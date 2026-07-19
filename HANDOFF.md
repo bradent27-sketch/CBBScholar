@@ -199,3 +199,22 @@ native hover tooltips) - revisit only if interactivity needs outgrow
   /layout tokens per-app, only the primary accent pair.
 - The Odds API key is shared with CFB Scholar (same account) — the
   ~500 credit/month free-tier allowance is NOT per-app.
+
+## 9. Repo & running on another machine
+
+Lives in a PRIVATE GitHub repo: https://github.com/bradent27-sketch/CBBScholar
+(sibling: https://github.com/bradent27-sketch/CFBScholar). Pushed from the
+main PC via GitHub CLI, which is installed and authenticated there as
+`bradent27-sketch` (token in gh's own config, `repo` scope).
+
+The repo is the complete app EXCEPT `.streamlit/secrets.toml` — the live
+CBBD + Odds API keys — which is gitignored and must never be committed,
+private repo or not. `.streamlit/secrets.toml.example` is the template.
+(Unlike CFB Scholar there's no paid-data folder here; nothing else is
+held back.)
+
+Fresh-machine setup: clone (or Code → Download ZIP), `pip install -r
+requirements.txt`, copy `.streamlit/secrets.toml.example` to
+`.streamlit/secrets.toml` and fill in real keys, `streamlit run app.py`.
+Without secrets, tabs that need the APIs show their NEEDS SETUP state but
+the app still runs.
