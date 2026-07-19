@@ -70,6 +70,27 @@ def render_setup_status_sidebar():
 
         st.caption("This pass ships navigation and theme only — tabs go live as each source above is wired in during the follow-up data pass.")
 
+        # "Configured" above only means a non-empty key exists in
+        # st.secrets - it says nothing about whether a live request with
+        # that key actually succeeds (bad/rotated key, rate limit, or a
+        # network block on the hosting side all look identical from the
+        # tabs' own "or the request failed" message). This makes one real,
+        # uncached request per source and reports exactly what happened.
+        st.markdown("---")
+        if st.button("Test live connections", key="test_live_connections", width="stretch"):
+            from data.loaders import test_cbbd_connection, test_odds_connection, test_ncaa_net_connection
+            with st.spinner("Testing..."):
+                cbbd_result = test_cbbd_connection()
+                odds_result = test_odds_connection()
+                ncaa_result = test_ncaa_net_connection()
+            for label, result in (
+                ("CollegeBasketballData.com", cbbd_result),
+                ("Odds API", odds_result),
+                ("ncaa.com NET rankings", ncaa_result),
+            ):
+                icon = "✅" if result['ok'] else "❌"
+                st.markdown(f"{icon} **{label}**  \n{result['detail']}")
+
 
 def render_team_banner(team_name, subtitle="", team_color=None):
     """Team identity banner (Player Search etc): name over a team-color

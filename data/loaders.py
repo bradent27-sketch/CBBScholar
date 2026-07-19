@@ -171,6 +171,115 @@ def _cbbd_get(path, params=None):
         return None
 
 
+# ==========================================
+# Live connection diagnostics - every loader above swallows its own
+# exception and returns None/empty on ANY failure (missing key, bad key,
+# rate limit, timeout, network block - all indistinguishable from the
+# tab's "or the request failed" message). These functions make one real,
+# uncached request each and report exactly what happened, so a deployed
+# instance can self-diagnose instead of guessing. Never called on tab
+# load - only from the sidebar's "Test live connections" button.
+# ==========================================
+
+def test_cbbd_connection():
+    """One real (uncached) hit against /teams with today's season. Returns
+    {'ok', 'detail'} - 'detail' is the actual status code/exception, not a
+    generic message, specifically so a 401 (bad/rotated key) reads
+    differently from a timeout/connection error (network block on the
+    hosting side, e.g. Streamlit Community Cloud's shared egress IPs being
+    rate-limited or blocked by the upstream) or a 429 (rate limit)."""
+    key = ""
+    try:
+        key = st.secrets.get("cbbd_api_key", "")
+    except Exception:
+        pass
+    if not key:
+        return {'ok': False, 'detail': "No cbbd_api_key in st.secrets."}
+    try:
+        resp = requests.get(
+            f"{CBBD_BASE}/teams", headers={"Authorization": f"Bearer {key}"},
+            params={"season": current_cbb_season()}, timeout=15,
+        )
+    except requests.exceptions.Timeout:
+        return {'ok': False, 'detail': "Timed out reaching api.collegebasketballdata.com — likely a network/firewall issue on the hosting side, not the key."}
+    except requests.exceptions.ConnectionError as e:
+        return {'ok': False, 'detail': f"Connection failed (DNS/network block, not the key): {e}"}
+    except Exception as e:
+        return {'ok': False, 'detail': f"Unexpected error: {e}"}
+    if resp.status_code == 401:
+        return {'ok': False, 'detail': "401 Unauthorized — the key itself is invalid, expired, or was rejected. Not a network problem."}
+    if resp.status_code == 429:
+        return {'ok': False, 'detail': "429 Too Many Requests — free-tier rate limit hit. Wait and retry, not a bad key."}
+    if resp.status_code != 200:
+        return {'ok': False, 'detail': f"HTTP {resp.status_code}: {resp.text[:200]}"}
+    try:
+        n = len(resp.json())
+    except Exception:
+        return {'ok': False, 'detail': f"HTTP 200 but response wasn't valid JSON: {resp.text[:200]}"}
+    return {'ok': True, 'detail': f"HTTP 200 — {n} teams returned."}
+
+
+def test_odds_connection():
+    """Same idea as test_cbbd_connection for the-odds-api.com."""
+    key = ""
+    try:
+        key = st.secrets.get("odds_api_key", "")
+    except Exception:
+        pass
+    if not key:
+        return {'ok': False, 'detail': "No odds_api_key in st.secrets."}
+    try:
+        resp = requests.get(
+            'https://api.the-odds-api.com/v4/sports/basketball_ncaab/odds',
+            params={'apiKey': key, 'regions': 'us', 'markets': 'h2h'}, timeout=15,
+        )
+    except requests.exceptions.Timeout:
+        return {'ok': False, 'detail': "Timed out reaching api.the-odds-api.com — likely a network/firewall issue on the hosting side, not the key."}
+    except requests.exceptions.ConnectionError as e:
+        return {'ok': False, 'detail': f"Connection failed (DNS/network block, not the key): {e}"}
+    except Exception as e:
+        return {'ok': False, 'detail': f"Unexpected error: {e}"}
+    if resp.status_code == 401:
+        return {'ok': False, 'detail': "401 Unauthorized — the key itself is invalid or expired."}
+    if resp.status_code == 429:
+        return {'ok': False, 'detail': "429 — monthly free-tier credits exhausted (shared with CFB Scholar if same account)."}
+    if resp.status_code != 200:
+        return {'ok': False, 'detail': f"HTTP {resp.status_code}: {resp.text[:200]}"}
+    remaining = resp.headers.get('x-requests-remaining', '?')
+    return {'ok': True, 'detail': f"HTTP 200 — {remaining} credits remaining this month."}
+
+
+def test_ncaa_net_connection():
+    """Same idea for the ncaa.com NET-rankings scrape - a totally separate,
+    keyless data source. If this ALSO fails alongside CBBD, that's a
+    strong signal the problem is outbound network access from the hosting
+    environment in general (or that ncaa.com is specifically blocking that
+    host's IP - Cloudflare-protected sites often rate-limit/block shared
+    hosting IP ranges like Streamlit Community Cloud's), not anything about
+    the CBBD key."""
+    try:
+        resp = requests.get(
+            NCAA_NET_RANKINGS_URL,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+            timeout=15,
+        )
+    except requests.exceptions.Timeout:
+        return {'ok': False, 'detail': "Timed out reaching ncaa.com."}
+    except requests.exceptions.ConnectionError as e:
+        return {'ok': False, 'detail': f"Connection failed: {e}"}
+    except Exception as e:
+        return {'ok': False, 'detail': f"Unexpected error: {e}"}
+    if resp.status_code != 200:
+        return {'ok': False, 'detail': f"HTTP {resp.status_code} — ncaa.com may be blocking this host's IP (common for shared hosting ranges)."}
+    try:
+        tables = pd.read_html(io.StringIO(resp.text))
+    except Exception as e:
+        return {'ok': False, 'detail': f"HTTP 200 but couldn't parse a table out of the page (layout may have changed): {e}"}
+    if not tables:
+        return {'ok': False, 'detail': "HTTP 200 but no HTML tables found on the page."}
+    return {'ok': True, 'detail': f"HTTP 200 — parsed a table with {len(tables[0])} rows."}
+
+
 @st.cache_data(ttl=86400)
 def load_teams(season=None):
     """
