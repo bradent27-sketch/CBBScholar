@@ -9,8 +9,11 @@ hardcoded assumption)."""
 import streamlit as st
 
 from config import AVAILABLE_SEASONS
-from data.loaders import current_cbb_season, load_efficiency_ratings, load_all_team_season_stats, team_color_map
-from data.transforms import team_dna_profile, stat_win_correlations
+from data.loaders import (
+    current_cbb_season, load_efficiency_ratings, load_all_team_season_stats, team_color_map,
+    get_league_player_stats, build_league_player_database,
+)
+from data.transforms import team_dna_profile, stat_win_correlations, league_rate_profiles, MIN_MINUTES_FOR_PERCENTILE
 from ui.components import render_coming_soon
 from ui.charts import render_efficiency_scatter, render_radar_chart, render_correlation_bars
 from ui.styling import style_plain_dataframe, df_auto_height, build_column_help_config
@@ -133,3 +136,41 @@ def render():
             )
         else:
             st.info("Not enough teams with both Four Factors and Net Rating data yet to compute correlations.")
+
+    # --- League player database (real percentile role tags) ----------------
+    st.markdown("<div class='custom-section-header'>LEAGUE PLAYER DATABASE</div>", unsafe_allow_html=True)
+    st.caption(
+        "Powers REAL percentile-based player role tags in Player Search and Matchup Analyzer "
+        "(Ball-Handler/Post Player/Shooter, ranked against actual D-I players, not fixed cutoffs) — "
+        "without it, those tabs fall back to fixed-threshold heuristics."
+    )
+    league_stats = get_league_player_stats(season)
+    if not league_stats.empty:
+        rates = league_rate_profiles(league_stats)
+        n_teams = league_stats['team'].nunique() if 'team' in league_stats.columns else '?'
+        st.success(
+            f"✅ League database loaded — {n_teams} teams, {len(rates)} qualifying players "
+            f"(≥{MIN_MINUTES_FOR_PERCENTILE} season minutes). Role tags elsewhere in the app are using REAL percentiles."
+        )
+    else:
+        st.warning(
+            f"Not built yet for {season - 1}-{str(season)[2:]}. CBBD's player-stats endpoint appears to be "
+            f"team-scoped (no free bulk pull like the team-level stats above), so building this requires "
+            f"one API call per D-I team — roughly {len(df)} calls. One-time, cached 24 hours in this "
+            "session. Role tags elsewhere fall back to fixed-threshold heuristics until this is built."
+        )
+        if st.button("Build League Player Database (all D-I teams)", key="te_build_league_db"):
+            progress = st.progress(0.0, text="Starting...")
+
+            def _update(done, total):
+                progress.progress(done / total, text=f"Pulling player stats... {done}/{total} teams")
+
+            result = build_league_player_database(season, _progress_callback=_update)
+            progress.empty()
+            if result.empty:
+                st.error("Couldn't build the league database — no team pulls succeeded. Check the sidebar's live-connection test.")
+            else:
+                st.session_state[f'_league_player_db_{season}'] = result
+                n_teams = result['team'].nunique() if 'team' in result.columns else '?'
+                st.success(f"Built — {len(result)} player rows across {n_teams} teams. Reload this page to see percentile-based role tags everywhere.")
+                st.rerun()

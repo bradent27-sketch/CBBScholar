@@ -17,11 +17,12 @@ from config import AVAILABLE_SEASONS
 from data.loaders import (
     current_cbb_season, load_efficiency_ratings, load_all_team_season_stats, load_team_games,
     load_team_roster, load_team_player_stats, load_defense_allowed_by_role, team_color_map,
+    get_league_player_stats,
 )
 from data.transforms import (
     four_factors_matchup, style_profile, project_score, recent_form, pct_rank, margin_volatility,
-    player_rate_profile, classify_player_role, aggregate_defense_by_role, defense_role_game_series,
-    ROLE_ORDER,
+    player_rate_profile, classify_player_role_best_available, aggregate_defense_by_role,
+    defense_role_game_series, league_rate_profiles, ROLE_ORDER,
 )
 from ui.components import render_coming_soon
 from ui.charts import render_mirror_bars, render_form_strip, render_margin_chart, render_role_badges, render_trend_line
@@ -191,8 +192,14 @@ def render():
                 render_mirror_bars(f"{team_a} allows", f"{team_b} allows", allowed_rows)
                 st.caption("D-I percentile — longer/greener bar = allows LESS of that shot type (i.e. defends it better).")
 
+    league_rates = league_rate_profiles(get_league_player_stats(season))
     st.markdown("**Roster Tendencies**")
-    st.caption("Every rostered player's primary role from their own season rate profile — see the Player Search tab for a single player's full breakdown.")
+    st.caption(
+        ("Every rostered player's primary role, ranked against REAL D-I percentiles" if not league_rates.empty else
+         "Every rostered player's primary role from a fixed-threshold heuristic (build the League Player "
+         "Database on Team Efficiency for real D-I percentiles instead)")
+        + " — see Player Search for a single player's full breakdown."
+    )
     rc_a, rc_b = st.columns(2)
     for col, team_name in ((rc_a, team_a), (rc_b, team_b)):
         with col:
@@ -206,7 +213,7 @@ def render():
             role_groups = {}
             for _, p in merged.iterrows():
                 profile = player_rate_profile(p.to_dict())
-                role, _ = classify_player_role(profile)
+                role, _, _ = classify_player_role_best_available(profile, league_rates)
                 if role:
                     role_groups.setdefault(role, []).append(p['name'])
             if not role_groups:

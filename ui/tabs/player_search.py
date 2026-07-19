@@ -14,9 +14,12 @@ import streamlit as st
 from config import AVAILABLE_SEASONS
 from data.loaders import (
     current_cbb_season, load_teams, load_team_roster, load_team_player_stats,
-    get_player_season_stats, team_color_map, load_player_game_logs,
+    get_player_season_stats, team_color_map, load_player_game_logs, get_league_player_stats,
 )
-from data.transforms import breakout_flags, last_n_form, player_rate_profile, classify_player_role
+from data.transforms import (
+    breakout_flags, last_n_form, player_rate_profile, classify_player_role_best_available,
+    league_rate_profiles,
+)
 from ui.components import render_coming_soon, render_team_banner, render_bio_strip, render_stat_tiles
 from ui.charts import render_game_log_bars, render_role_badges, render_trend_line
 
@@ -117,24 +120,31 @@ def render():
     render_stat_tiles(entries)
     st.caption("Season stats via CollegeBasketballData.com.")
 
-    _render_tendencies_section(stats, team, colors)
+    league_rates = league_rate_profiles(get_league_player_stats(season))
+    _render_tendencies_section(stats, team, colors, league_rates)
     _render_game_log_section(team, season, sel_row)
 
 
-def _render_tendencies_section(stats, team, colors):
+def _render_tendencies_section(stats, team, colors, league_rates=None):
     """Rate-basis role read - shooter/rebounder/passer/post, not raw
     totals, so a bench player and a starter with the same TENDENCY read
-    the same. See data.transforms.player_rate_profile/classify_player_role
-    for the underlying rates and thresholds; this is a heuristic
-    classification, not a league percentile (that needs a full-D-I player
-    pull this app doesn't do - see HANDOFF)."""
+    the same. See data.transforms.player_rate_profile/
+    classify_player_role_best_available for the underlying rates: a REAL
+    D-I percentile rank when a league player database has been built (Team
+    Efficiency tab), else a fixed-threshold heuristic fallback."""
     profile = player_rate_profile(stats)
-    role, badges = classify_player_role(profile)
+    role, badges, mode = classify_player_role_best_available(profile, league_rates)
     st.markdown("<div class='custom-section-header'>TENDENCIES</div>", unsafe_allow_html=True)
-    st.caption(
-        "Rate-basis role read (heuristic, not a league percentile) — controls for minutes and "
-        "shot volume so it reflects TYPE of player, not just how much they play."
-    )
+    if mode == 'percentile':
+        st.caption(
+            "Rate-basis role read — ranked against REAL D-I player percentiles (see Team Efficiency's "
+            "League Player Database). Controls for minutes/shot volume, so it reflects TYPE of player."
+        )
+    else:
+        st.caption(
+            "Rate-basis role read (fixed-threshold heuristic — build the League Player Database on the "
+            "Team Efficiency tab for real D-I percentiles instead). Controls for minutes/shot volume."
+        )
     render_role_badges(role, badges, primary_color=colors.get(team))
     if profile:
         tendency_entries = [

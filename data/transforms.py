@@ -466,6 +466,144 @@ def classify_player_role(rate_profile):
     return primary, badges
 
 
+# Minimum season minutes to enter the league percentile pool - filters
+# garbage-time noise (a 1-for-1 three in 4 minutes isn't a 100th-percentile
+# shooter). Roughly 15 MPG over a 20-game season; deliberately loose enough
+# to keep meaningful bench/platoon players in the pool.
+MIN_MINUTES_FOR_PERCENTILE = 300
+
+# Below this composite percentile score (mean of a role's defining
+# dimensions, see _ROLE_SIGNAL_DIMENSIONS), a player doesn't distinctly
+# specialize in ANY role - falls to Wing/Combo rather than force-fitting
+# into whichever role happens to score (barely) highest.
+WING_FLOOR_PERCENTILE = 60
+
+# Role-defining rate dimensions for the percentile classifier - the same
+# underlying rates classify_player_role's fixed thresholds use, just
+# ranked against a real distribution instead of a cutoff. (key into
+# player_rate_profile, higher_is_better). Post Player's three_pa_rate is
+# higher_is_better=False on purpose - a LOW 3PA rate is the signal for
+# playing mostly inside, same logic as the fixed-threshold version.
+_ROLE_SIGNAL_DIMENSIONS = {
+    ROLE_BALL_HANDLER: [('ast_per40', True), ('usage', True)],
+    ROLE_POST: [('three_pa_rate', False), ('reb_per40', True)],
+    ROLE_SHOOTER: [('three_pa_rate', True), ('three_pct', True)],
+}
+
+
+def league_rate_profiles(league_stats_df):
+    """
+    Vectorized rate-stat computation (same formulas as player_rate_profile
+    above) across every player in a league-wide stats table (see
+    data.loaders.get_league_player_stats), for building a REAL percentile
+    distribution rather than ranking against classify_player_role's fixed
+    thresholds. Filters to players with at least MIN_MINUTES_FOR_PERCENTILE
+    season minutes. Returns a DataFrame with one row per qualifying player
+    (athleteId, team, plus every player_rate_profile key as its own
+    column), or empty if the input is empty or has no qualifiers.
+    """
+    if league_stats_df is None or league_stats_df.empty:
+        return pd.DataFrame()
+    rows = []
+    for _, p in league_stats_df.iterrows():
+        stats = p.to_dict()
+        if (stats.get('minutes') or 0) < MIN_MINUTES_FOR_PERCENTILE:
+            continue
+        profile = player_rate_profile(stats)
+        if not profile:
+            continue
+        profile['athleteId'] = stats.get('athleteId')
+        profile['team'] = stats.get('team')
+        rows.append(profile)
+    return pd.DataFrame(rows)
+
+
+def classify_player_role_percentile(rate_profile, league_rates_df):
+    """
+    Percentile-based version of classify_player_role: ranks the player's
+    own rate profile against a REAL D-I distribution (league_rates_df, see
+    league_rate_profiles) instead of fixed thresholds, then picks the role
+    whose composite percentile score (mean of that role's defining
+    dimensions, see _ROLE_SIGNAL_DIMENSIONS) is highest - "which role's
+    signal is this player MOST elite at, relative to the real league,"
+    rather than "does this player clear an arbitrary bar." Falls back to
+    Wing/Combo if the best role score is below WING_FLOOR_PERCENTILE - a
+    merely-average-at-everything player doesn't get force-fit into a
+    specialty. Secondary badges reuse the same signals as
+    classify_player_role, percentile-gated (≥85th) instead of value-gated.
+
+    Returns (primary_role, [secondary_badges], {dimension: percentile}) -
+    the percentile dict lets a caller show "Usage% — 91st percentile"
+    style detail, not just the label. Returns (None, [], {}) if either
+    input is empty.
+    """
+    if not rate_profile or league_rates_df is None or league_rates_df.empty:
+        return None, [], {}
+
+    def pctl(key, higher_is_better=True):
+        val = rate_profile.get(key)
+        if val is None or key not in league_rates_df.columns:
+            return None
+        return pct_rank(league_rates_df[key], val, higher_is_better=higher_is_better)
+
+    percentiles = {}
+    role_scores = {}
+    for role, dims in _ROLE_SIGNAL_DIMENSIONS.items():
+        scores = []
+        for key, higher_is_better in dims:
+            pct = pctl(key, higher_is_better)
+            if pct is not None:
+                percentiles[key] = pct
+                scores.append(pct)
+        role_scores[role] = (sum(scores) / len(scores)) if scores else None
+
+    valid_scores = {r: s for r, s in role_scores.items() if s is not None}
+    if not valid_scores:
+        return None, [], percentiles
+    primary = max(valid_scores, key=valid_scores.get)
+    if valid_scores[primary] < WING_FLOOR_PERCENTILE:
+        primary = ROLE_WING
+
+    badges = []
+    reb_pct = pctl('reb_per40')
+    if reb_pct is not None and reb_pct >= 85 and primary != ROLE_POST:
+        badges.append('Rebounder')
+    if (pctl('blk_per40') or 0) >= 85:
+        badges.append('Rim Protector')
+    if (pctl('stl_per40') or 0) >= 85:
+        badges.append('Disruptor')
+    three_pct_pctl = pctl('three_pct')
+    if three_pct_pctl is not None and three_pct_pctl >= 80 and primary != ROLE_SHOOTER:
+        badges.append('Sharpshooter')
+    if (pctl('ft_rate') or 0) >= 85:
+        badges.append('Foul Drawer')
+    ast_to_pctl = pctl('ast_to_ratio')
+    if ast_to_pctl is not None and ast_to_pctl >= 85 and primary != ROLE_BALL_HANDLER:
+        badges.append('Secondary Ball-Handler')
+
+    return primary, badges, percentiles
+
+
+def classify_player_role_best_available(rate_profile, league_rates_df=None):
+    """
+    The "just give me the best answer" entry point tabs should call instead
+    of choosing between the two classifiers themselves: percentile
+    classification (classify_player_role_percentile) when a real league
+    distribution is available and has enough qualifying players to be
+    meaningful, else the fixed-threshold fallback (classify_player_role).
+    Returns (primary_role, [badges], mode) where mode is 'percentile' or
+    'heuristic', so a caller can show the user which one was used - see
+    ui/tabs/team_efficiency.py's "Build League Player Database" for how a
+    real distribution gets populated.
+    """
+    if league_rates_df is not None and not league_rates_df.empty and len(league_rates_df) >= 30:
+        primary, badges, _ = classify_player_role_percentile(rate_profile, league_rates_df)
+        if primary:
+            return primary, badges, 'percentile'
+    primary, badges = classify_player_role(rate_profile)
+    return primary, badges, 'heuristic'
+
+
 # ---------------------------------------------------------------------------
 # Defense-allowed-by-role (see data.loaders.load_defense_allowed_by_role for
 # how the per-(game, opposing player) rows this consumes get built).

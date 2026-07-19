@@ -76,21 +76,25 @@ Three pieces, see §3 for the full technical detail:
 1. **Player role tags** (`data.transforms.player_rate_profile` +
    `classify_player_role`) - Ball-Handler / Post Player / Shooter /
    Wing-Combo, from rate stats (per-40s, Usage%, 3PA Rate, AST/TOV, etc.),
-   not raw totals. Fixed, basketball-literate thresholds, explicitly a
-   heuristic (see §3) - NOT a league percentile, which would need a
-   full-D-I player pull this app deliberately doesn't do (360+ calls just
-   to rank one player). Shown in Player Search (badges + rate tiles) and
-   Matchup Analyzer (both rosters, grouped by role).
+   not raw totals. Originally shipped as fixed, basketball-literate
+   thresholds only (a full-D-I player pull looked too expensive to
+   justify) - **superseded later the same day** once the user pushed back
+   on that exact tradeoff: see the "real percentile" addendum below and
+   §3's League Player Database writeup. Shown in Player Search (badges +
+   rate tiles) and Matchup Analyzer (both rosters, grouped by role) -
+   percentile-ranked when a league database exists, heuristic fallback
+   otherwise, same UI either way (a caption says which mode is active).
 2. **Defense-allowed-by-role** (`data.loaders.load_defense_allowed_by_role`
    + `data.transforms.aggregate_defense_by_role`) - cross-references every
    opponent on a team's schedule (their roster, season stats, and game
    log - all loaders this app already had) to compute what that defense
    actually allows to Ball-Handlers/Post Players/Shooters specifically.
-   The heaviest pull in the app (~60-90 calls for a full schedule) - gated
-   behind an explicit "Analyze Defense" button in Matchup Analyzer's new
-   MATCHUP EDGES section, same pattern as the NCAA NET manual scrape.
-   Direct stats that needed no cross-referencing (3PA Rate/3P%/ORB%
-   allowed) are free and shown unconditionally above it.
+   The heaviest pull in the app (up to ~60-90 calls for a full schedule,
+   ~40-60 once a League Player Database exists - see the addendum below)
+   - gated behind an explicit "Analyze Defense" button in Matchup
+   Analyzer's new MATCHUP EDGES section, same pattern as the NCAA NET
+   manual scrape. Direct stats that needed no cross-referencing (3PA
+   Rate/3P%/ORB% allowed) are free and shown unconditionally above it.
 3. **Trending** (`ui.charts.render_trend_line`, reused for both) - rolling
    5-game average vs. season-average dashed line, for a player's Usage%/
    3PA Rate (Player Search, zero extra cost - already-fetched game logs)
@@ -98,6 +102,42 @@ Three pieces, see §3 for the full technical detail:
    cross-reference above). This is the "beat the market" piece: a real
    role or scheme change shows up as the rolling line pulling away from
    the season dashes before it moves the season number itself.
+
+**Addendum, same day: real percentiles instead of fixed thresholds, and
+why "60-90 calls" specifically.** Direct user pushback on both points
+above - fair on both. What shipped:
+- `data.loaders.load_all_player_season_stats` tries the SAME no-team-
+  filter trick `load_all_team_season_stats` uses against
+  `/stats/team/season`, but against `/stats/player/season` instead - if
+  CBBD's player endpoint secretly supports this too, league-wide
+  percentiles are one more free cached call. **UNCONFIRMED** - this dev
+  environment has no live network access to check (see §6); it validates
+  its own result (`df['team'].nunique() >= 30`) before trusting it, so a
+  single-team fallback response can't silently masquerade as league-wide
+  data.
+- If that fails, `data.loaders.build_league_player_database` is the
+  honest fallback: one `/stats/player/season` call per D-I team (~360, via
+  `load_teams`), manual button only (`ui/tabs/team_efficiency.py`'s new
+  LEAGUE PLAYER DATABASE section), with a live progress bar, cached in
+  `st.session_state` for the session (not `st.cache_data` - a real
+  progress callback isn't cacheable/hashable, and the point is a one-time
+  manual action, not a background job). Same
+  expensive-pull/user-gated precedent as the NCAA NET scrape and
+  Defense-by-role, just bigger.
+- Once either path populates data, `data.transforms.league_rate_profiles`
+  + `classify_player_role_percentile` do REAL percentile ranking (via the
+  existing `pct_rank` helper) instead of fixed cutoffs - see §3.
+  `classify_player_role_best_available` is the single entry point every
+  UI call site now uses: percentile when a league table exists and has
+  ≥30 qualifying players, fixed-threshold heuristic otherwise, transparent
+  to the caller either way.
+- The "why 60-90 calls" answer turned out to double as the fix for a
+  THIRD thing: `load_team_player_stats` now checks the league-wide cache
+  first and filters from it before making a fresh per-team call (see §3's
+  gotcha-adjacent note) - so once a league database exists,
+  `load_defense_allowed_by_role`'s per-opponent cost drops from 3 calls to
+  2 (season stats come free from the cache), automatically, no call-site
+  changes needed anywhere that already used `load_team_player_stats`.
 
 ## 1. Architecture
 
@@ -228,14 +268,44 @@ over scraping" default; nowhere else in either app scrapes anything.
   CBBD doesn't have) or REB/40 ≥ 9; **Shooter** if 3PA Rate ≥ 40%;
   else **Wing/Combo**. Secondary badges (Rebounder, Rim Protector,
   Disruptor, Sharpshooter, Foul Drawer, Secondary Ball-Handler) layer on
-  top from the same rate profile. **These thresholds are fixed and
-  basketball-literate, not league-percentile-based** - a true percentile
-  needs a full-D-I player pull (`/stats/player/season` is team-scoped;
-  ranking one player against all of D-I means pulling all ~360 teams'
-  rosters) this app deliberately doesn't do. Read every role tag as a
+  top from the same rate profile. **This is the FALLBACK classifier now**
+  (`data/transforms.classify_player_role`) - fixed, basketball-literate
+  thresholds, used only when no league-wide player data is available. See
+  the League Player Database entry below for the real-percentile version
+  and `classify_player_role_best_available`, the entry point every UI call
+  site actually uses (picks whichever classifier has real data to work
+  with, transparent to the caller). Read a heuristic-mode tag as a
   heuristic read, same "labeled as an estimate" spirit as the Matchup
   Analyzer's projections - recalibrate the thresholds if they start
   reading players wrong once real data is flowing.
+- **League Player Database** (`data/loaders.load_all_player_season_stats`
+  / `build_league_player_database` / `get_league_player_stats`,
+  `data/transforms.league_rate_profiles` /
+  `classify_player_role_percentile` / `classify_player_role_best_available`,
+  `ui/tabs/team_efficiency.py`'s new LEAGUE PLAYER DATABASE section): what
+  makes player role tags REAL D-I percentiles instead of fixed thresholds.
+  Tries a no-team-filter `/stats/player/season` call first (mirrors how
+  `/stats/team/season` already works league-wide for free) -
+  **UNCONFIRMED whether CBBD's player endpoint actually supports this**
+  (no live network access from this dev environment to check; the
+  function validates the response spans ≥30 teams before trusting it, so
+  a narrow/single-team response can't silently pass as league data). If
+  that's unsupported, an explicit "Build League Player Database" button
+  fans out one `/stats/player/season` call per D-I team (~360, with a live
+  progress bar) - one-time, session-cached, never automatic, same
+  expensive-pull/user-gated precedent as the NCAA NET scrape. Once
+  populated (either way), `league_rate_profiles` computes the same rate
+  stats as `player_rate_profile` across every qualifying player (≥300
+  season minutes - `MIN_MINUTES_FOR_PERCENTILE`, filters garbage-time
+  noise), and `classify_player_role_percentile` ranks a player against
+  that REAL distribution (composite percentile score per role -
+  `_ROLE_SIGNAL_DIMENSIONS` - argmax picks primary, `WING_FLOOR_PERCENTILE`
+  gates a merely-average player back to Wing/Combo instead of force-fitting
+  a weak specialty). **Bonus side effect**: `load_team_player_stats` now
+  checks this league cache first before making a fresh per-team API call -
+  so once a league database exists, `load_defense_allowed_by_role`'s
+  per-opponent cost drops from 3 calls to 2 automatically, no other code
+  changed.
 - **Defense-allowed-by-role** (`data/loaders.load_defense_allowed_by_role`
   + `data/transforms.aggregate_defense_by_role`/`defense_role_game_series`,
   in Matchup Analyzer's new MATCHUP EDGES section): no free CBB source
@@ -248,9 +318,12 @@ over scraping" default; nowhere else in either app scrapes anything.
   game log filtered to just the game(s) against the team being analyzed.
   Bucket by role, average PER GAME (not per player-appearance - two
   Ball-Handlers in one game still divide by 1 game). This is the heaviest
-  pull in the app (~3 calls/opponent × ~20-30 opponents = 60-90 calls for
-  a full schedule) - gated behind an explicit "Analyze Defense" button,
-  same pattern as the NCAA NET manual scrape; never call it on tab load.
+  pull in the app - up to 3 calls/opponent × ~20-30 opponents = up to
+  60-90 calls for a full schedule, dropping to ~2 calls/opponent (~40-60)
+  once a League Player Database exists (see above - season stats come
+  from the cache instead of a fresh call). Gated behind an explicit
+  "Analyze Defense" button either way, same pattern as the NCAA NET manual
+  scrape; never call it on tab load.
   Direct stats needing no cross-reference (3PA Rate/3P%/ORB% allowed, from
   `opponentStats.threePointFieldGoals`/`fourFactors` - same cached
   `/stats/team/season` pull as everything else) are shown above it for
@@ -421,6 +494,32 @@ fit to real CBBD data - they may need recalibrating once real numbers are
 flowing; watch for a role that obviously reads wrong on a real player and
 adjust the threshold, not the architecture).
 
+**Verification note for the same-day percentile addendum:**
+`league_rate_profiles`/`classify_player_role_percentile` tested against a
+200-player synthetic league spanning 4 archetypes (Ball-Handler/Post/
+Shooter/Wing mixed by weighted random draw) - both strong, unambiguous
+archetypes (Ball-Handler, Post) classified correctly against the real
+distribution; an intentionally moderate "wing" test case landed as Shooter
+instead of Wing/Combo, which is CORRECT percentile behavior, not a bug -
+relative to that specific synthetic league's archetype mix, its 33% three
+rate genuinely ranked high enough to cross `WING_FLOOR_PERCENTILE`. This
+is the actual behavioral difference from fixed thresholds worth
+remembering: percentile results depend on the real comparison population,
+which is the point, but also means results will shift as more real season
+data accumulates - a player isn't mis-tagged if their percentile changes
+as the sample grows, that's the system working as designed. Also verified
+end-to-end via `AppTest`: Team Efficiency's "Build League Player Database"
+button (progress callback firing, `st.rerun()` picking up the
+session-stored result, the ≥30-teams validation guard), and both Player
+Search and Matchup Analyzer correctly switching their caption from
+"heuristic" to "REAL D-I player percentiles" once a league table exists
+in session state. **Still unconfirmed:** whether
+`load_all_player_season_stats`'s no-team-filter call actually works
+against the real API (this is the single biggest open question from this
+addendum - if it does, the ~360-call manual button becomes unnecessary
+for most users) - check the Team Efficiency tab's League Player Database
+status message on a live deploy before assuming which path is active.
+
 ## 7. Deliberately NOT done / parked
 
 Formerly parked and now DONE in the data-viz pass: game-by-game logs (with
@@ -440,10 +539,16 @@ Rate/3P% allowed, and rolling role/usage trend charts for both players and
 defenses - see §3. This was the app's stated core differentiator vs. raw
 KenPom/Torvik numbers and is now built.
 
-Still parked: PLAYER-level league-wide percentiles (that one genuinely
-needs a full-D-I player pull; `/stats/player/season` is team-scoped) - the
-new role tags use FIXED thresholds instead, explicitly not percentiles,
-see §3/§5. Per-arena home-court values (flat 3-point constant instead).
+Also now DONE (same-day addendum): PLAYER-level league-wide percentiles -
+no longer parked. `/stats/player/season` being team-scoped turned out not
+to be a hard blocker: a no-team-filter call is tried first (free if CBBD
+supports it, unconfirmed), and an explicit "Build League Player Database"
+button is the honest fallback (~360 calls, one-time, user-gated) if not -
+see the League Player Database entry in §3. Role tags use REAL percentiles
+whenever that data exists, fixed thresholds only as the automatic
+fallback otherwise.
+
+Still parked: Per-arena home-court values (flat 3-point constant instead).
 Shot-location/play-type data specifically (would upgrade the Post Player
 role signal past the "low 3PA rate" proxy, and would let defense-allowed-
 by-role use actual shot charts instead of season box scores) - CBBD's

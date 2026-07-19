@@ -357,18 +357,39 @@ def load_team_roster(team, season=None):
 
 
 @st.cache_data(ttl=3600)
+def _load_team_player_stats_uncached(team, season):
+    """The actual single-team /stats/player/season call - split out from
+    load_team_player_stats below so the league-wide cache check in that
+    function doesn't recurse into itself."""
+    data = _cbbd_get("/stats/player/season", params={"team": team, "season": season})
+    if not data:
+        return pd.DataFrame()
+    return pd.DataFrame(data)
+
+
 def load_team_player_stats(team, season=None):
     """
     One team's full season stats, already WIDE format (one row per player,
     unlike CFBD's long/pivot-needed shape) - verified live against
     /stats/player/season before writing this. Field names below (games,
     points, fieldGoals.pct, etc.) are exact.
+
+    Checks the league-wide cache (get_league_player_stats) FIRST and
+    filters from it if available - zero extra API cost, and automatically
+    cuts load_defense_allowed_by_role's per-opponent cost once a league
+    database has been built (see build_league_player_database), since that
+    function's season-stats call for each opponent becomes a free filter
+    instead of a fresh request. Falls back to the original single-team
+    call when no league data is cached (the common case until a league
+    database is explicitly built - see ui/tabs/team_efficiency.py).
     """
     season = season or current_cbb_season()
-    data = _cbbd_get("/stats/player/season", params={"team": team, "season": season})
-    if not data:
-        return pd.DataFrame()
-    return pd.DataFrame(data)
+    league = get_league_player_stats(season)
+    if not league.empty and 'team' in league.columns:
+        subset = league[league['team'] == team]
+        if not subset.empty:
+            return subset.reset_index(drop=True)
+    return _load_team_player_stats_uncached(team, season)
 
 
 def get_player_season_stats(team, season, athlete_id):
@@ -382,6 +403,105 @@ def get_player_season_stats(team, season, athlete_id):
     if match.empty:
         return {}
     return match.iloc[0].to_dict()
+
+
+# ==========================================
+# League-wide player stats - what real (not fixed-threshold) player role
+# percentiles and a cheaper defense-by-role pull both need. See
+# data/transforms.py's league_rate_profiles/classify_player_role_percentile
+# and ui/tabs/team_efficiency.py's "Build League Player Database" button.
+# ==========================================
+
+@st.cache_data(ttl=21600)
+def load_all_player_season_stats(season=None):
+    """
+    Attempts the SAME no-team-filter call load_all_team_season_stats makes
+    against /stats/team/season, but against /stats/player/season instead -
+    if CBBD's player endpoint supports omitting `team` the same way its
+    team endpoint does, this is one cheap cached call for every D-I
+    player's season, exactly mirroring the team-level bulk pull.
+
+    UNCONFIRMED - this dev environment has no live network access to CBBD
+    to verify whether the player endpoint actually supports this (see
+    HANDOFF's verification note). If it doesn't, CBBD returns an
+    empty/error response and this function returns an empty DataFrame,
+    same "never raises" contract as every other loader here - callers
+    (get_league_player_stats) transparently fall back to
+    build_league_player_database's per-team fan-out. Costs nothing to
+    attempt either way (one cached call), so this always runs first.
+    """
+    season = season or current_cbb_season()
+    data = _cbbd_get("/stats/player/season", params={"season": season})
+    if not data:
+        return pd.DataFrame()
+    df = pd.DataFrame(data)
+    # A real league-wide response should span many teams - a single-team
+    # response (the endpoint silently defaulting to something narrow
+    # instead of erroring) would be worse than no data at all here, since
+    # league_rate_profiles would build "percentiles" off one roster.
+    if 'team' not in df.columns or df['team'].nunique() < 30:
+        return pd.DataFrame()
+    return df
+
+
+def build_league_player_database(season=None, _progress_callback=None):
+    """
+    Manual fallback if load_all_player_season_stats's bulk call isn't
+    supported: fans out /stats/player/season across every D-I team from
+    load_teams (~360 calls as of this writing - confirm the real count via
+    len(load_teams(season)) before running this on a live instance).
+    NEVER call this automatically - see ui/tabs/team_efficiency.py's
+    "Build League Player Database" button, same expensive-pull/user-gated
+    pattern as the NCAA NET manual scrape and load_defense_allowed_by_role.
+
+    `_progress_callback(done, total)`, if given, is called after every
+    team so the caller can drive a progress bar - the leading underscore
+    is Streamlit's own convention for "exclude this param from the cache
+    key," not just a style choice (a real callable can't be hashed for
+    caching anyway). Returns a combined DataFrame (one row per player,
+    every team) or empty if no team's pull succeeded. Stores nothing
+    itself - the caller (ui/tabs/team_efficiency.py) is responsible for
+    putting the result in st.session_state so it survives reruns without
+    re-fetching (get_league_player_stats reads it from there).
+    """
+    season = season or current_cbb_season()
+    teams_df = load_teams(season)
+    teams = sorted(teams_df['Team'].dropna().unique().tolist()) if not teams_df.empty else []
+    frames = []
+    for i, team in enumerate(teams):
+        df = _load_team_player_stats_uncached(team, season)
+        if not df.empty:
+            if 'team' not in df.columns:
+                df = df.assign(team=team)
+            frames.append(df)
+        if _progress_callback:
+            _progress_callback(i + 1, len(teams))
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+
+def get_league_player_stats(season=None):
+    """
+    Single accessor every caller should use for "all D-I players' season
+    stats" - tries the free bulk call first (load_all_player_season_stats),
+    then whatever's been manually built this session via
+    build_league_player_database (stored in st.session_state by
+    ui/tabs/team_efficiency.py's button), and returns an empty DataFrame
+    (never raises) if neither is available. Callers should fall back
+    further to fixed-threshold role classification
+    (data.transforms.classify_player_role) rather than block on this -
+    league-wide data is an upgrade, not a requirement, for every feature
+    that uses it.
+    """
+    season = season or current_cbb_season()
+    bulk = load_all_player_season_stats(season)
+    if not bulk.empty:
+        return bulk
+    try:
+        return st.session_state.get(f'_league_player_db_{season}', pd.DataFrame())
+    except Exception:
+        return pd.DataFrame()
 
 
 @st.cache_data(ttl=3600)
@@ -676,15 +796,20 @@ def load_defense_allowed_by_role(team, season=None):
     IS a Ball-Handler on his own team all season, produce against `team`'s
     defense specifically" - repeated across the whole schedule.
 
-    This is the heaviest pull in the app - roughly 3 extra API calls per
-    opponent (roster + season stats + game log), so ~60-90 calls for a
-    full ~20-30 game schedule. Every underlying loader is independently
-    cached and shared with Player Search/Compare/Matchup Analyzer, so
-    opponents already viewed elsewhere this session are free; this
-    function itself is also cached. NEVER call this on tab load - only
-    from an explicit "Analyze Defense" button click (see
-    ui/tabs/matchup_analyzer.py), same expensive-pull/user-gated pattern
-    as the NCAA NET manual scrape.
+    This is the heaviest pull in the app - up to 3 extra API calls per
+    opponent (roster + season stats + game log), so up to ~60-90 calls for
+    a full ~20-30 game schedule IF no league player database has been
+    built yet. Once one has (see get_league_player_stats/
+    build_league_player_database, triggered from Team Efficiency), the
+    season-stats call drops out entirely - load_team_player_stats below
+    serves it from the cached league table instead - cutting this to ~2
+    calls/opponent (roster + game log), roughly a third less. Every
+    underlying loader is independently cached and shared with Player
+    Search/Compare/Matchup Analyzer, so opponents already viewed elsewhere
+    this session are free either way; this function itself is also cached.
+    NEVER call this on tab load - only from an explicit "Analyze Defense"
+    button click (see ui/tabs/matchup_analyzer.py), same expensive-pull/
+    user-gated pattern as the NCAA NET manual scrape.
 
     Returns a DataFrame with one row per (game, opposing player who could
     be role-classified): Date, Opponent, OpposingPlayer, Role, Points,
@@ -693,13 +818,20 @@ def load_defense_allowed_by_role(team, season=None):
     of its three pulls comes back empty, same "never raises" contract as
     every other loader here.
     """
-    from data.transforms import player_rate_profile, classify_player_role
+    from data.transforms import player_rate_profile, classify_player_role_best_available, league_rate_profiles
 
     season = season or current_cbb_season()
     games = load_team_games(team, season)
     if games.empty:
         return pd.DataFrame()
     opponents = sorted(games['Opponent'].dropna().unique().tolist())
+
+    # Computed once, not per-opponent - if a league player database has
+    # been built (see ui/tabs/team_efficiency.py), every opponent's players
+    # get REAL percentile role classification instead of the fixed-
+    # threshold fallback, at no extra cost (same cached league table
+    # load_team_player_stats below is already drawing from).
+    league_rates = league_rate_profiles(get_league_player_stats(season))
 
     rows = []
     for opp in opponents:
@@ -715,7 +847,7 @@ def load_defense_allowed_by_role(team, season=None):
         role_by_source_id = {}
         for _, p in merged.iterrows():
             profile = player_rate_profile(p.to_dict())
-            primary, _ = classify_player_role(profile)
+            primary, _, _ = classify_player_role_best_available(profile, league_rates)
             if primary and pd.notna(p.get('sourceId')):
                 role_by_source_id[p['sourceId']] = (primary, p.get('name'))
         if not role_by_source_id:
