@@ -1,0 +1,6 @@
+# Live API keys (CBBD, The Odds API) - never commit. Use
+# .streamlit/secrets.toml.example as the setup template.
+.streamlit/secrets.toml
+
+__pycache__/
+*.pyc

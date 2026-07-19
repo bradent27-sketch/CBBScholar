@@ -1,0 +1,372 @@
+"""
+Inline-SVG chart components shared by tabs. Deliberately hand-rolled SVG
+(rendered via st.markdown) instead of a charting library: every color/font
+comes straight from config.THEME so charts are pixel-consistent with the
+rest of the design system, there's no new dependency, native <title>
+elements give hover tooltips for free, and the file is byte-identical
+between CFB Scholar and CBB Scholar (sport-agnostic by design - keep it
+that way; sport-specific logic belongs in the calling tab or transforms).
+"""
+import html
+
+import pandas as pd
+import streamlit as st
+
+from config import THEME
+from ui.styling import get_grade_color
+
+C = THEME['colors']
+F = THEME['fonts']
+
+# THEME's font stacks quote family names with SINGLE quotes ("'Inter',
+# sans-serif") - embedded inside this module's single-quoted style/
+# font-family attributes that terminates the attribute early, and the
+# resulting malformed opening tag makes Streamlit's markdown refuse to
+# treat the block as raw HTML at all (it renders as escaped text - hit
+# live during verification). Double-quoted family names inside
+# single-quoted attributes are valid HTML+CSS.
+_BODY_FONT = F['body'].replace("'", '"')
+_MONO_FONT = F['mono'].replace("'", '"')
+
+
+def _esc(s):
+    return html.escape(str(s), quote=True)
+
+
+# ---------------------------------------------------------------------------
+# Mirrored matchup bars (unit-vs-unit comparisons)
+# ---------------------------------------------------------------------------
+
+def render_mirror_bars(header_left, header_right, rows):
+    """
+    Center-labeled mirrored percentile bars - the matchup workhorse. Each
+    row: {'label', 'help', 'left_val_str', 'left_pct', 'right_val_str',
+    'right_pct'}. Bars grow outward from the center label, length AND color
+    driven by league percentile (get_grade_color's diverging scale), so on
+    both sides "long + violet/blue = that unit is winning its side."
+    Percentile of None renders a neutral stub instead of a lying zero-bar.
+    """
+    W, ROW_H, LABEL_W = 860, 34, 170
+    half = (W - LABEL_W) / 2
+    H = ROW_H * len(rows) + 26
+    parts = [
+        f"<svg viewBox='0 0 {W} {H}' xmlns='http://www.w3.org/2000/svg' "
+        f"style='width:100%; height:auto; font-family:{_BODY_FONT};'>"
+    ]
+    # Column headers
+    parts.append(
+        f"<text x='{half - 6}' y='14' text-anchor='end' font-size='11' font-weight='700' "
+        f"letter-spacing='0.08em' fill='{C['on_surface_variant']}'>{_esc(header_left.upper())}</text>"
+    )
+    parts.append(
+        f"<text x='{half + LABEL_W + 6}' y='14' text-anchor='start' font-size='11' font-weight='700' "
+        f"letter-spacing='0.08em' fill='{C['on_surface_variant']}'>{_esc(header_right.upper())}</text>"
+    )
+    y = 26
+    max_bar = half - 78  # room for the value label beyond the bar tip
+    for r in rows:
+        cy = y + ROW_H / 2
+        bar_h = 12
+        # center label (with tooltip)
+        parts.append(
+            f"<text x='{half + LABEL_W / 2}' y='{cy + 4}' text-anchor='middle' font-size='11.5' "
+            f"font-weight='600' fill='{C['on_surface']}'>{_esc(r['label'])}"
+            f"<title>{_esc(r.get('help', ''))}</title></text>"
+        )
+        for side in ('left', 'right'):
+            pct = r.get(f'{side}_pct')
+            val_str = r.get(f'{side}_val_str', '--')
+            if pct is None or pd.isna(pct):
+                bar_len, color = 4, C['surface_container_high']
+                pct_label = ''
+            else:
+                bar_len = max(4.0, max_bar * float(pct) / 100.0)
+                color = get_grade_color(pct)
+                pct_label = f" · {pct:.0f}th pctl"
+            if side == 'left':
+                x0 = half - bar_len
+                tx, anchor = x0 - 8, 'end'
+            else:
+                x0 = half + LABEL_W
+                tx, anchor = x0 + bar_len + 8, 'start'
+            tooltip = f"{r['label']}: {val_str}{pct_label}"
+            parts.append(
+                f"<rect x='{x0:.1f}' y='{cy - bar_h / 2:.1f}' width='{bar_len:.1f}' height='{bar_h}' rx='3' "
+                f"fill='{color}'><title>{_esc(tooltip)}</title></rect>"
+            )
+            parts.append(
+                f"<text x='{tx:.1f}' y='{cy + 4}' text-anchor='{anchor}' font-size='11' "
+                f"font-family='{_MONO_FONT}' fill='{C['on_surface']}'>{_esc(val_str)}</text>"
+            )
+        y += ROW_H
+    parts.append("</svg>")
+    st.markdown("".join(parts), unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
+# Recent-form strip (last-n results as chips)
+# ---------------------------------------------------------------------------
+
+def render_form_strip(team_label, chips, elo_delta=None):
+    """W/L chips (oldest -> newest) with score + opponent tooltips, plus an
+    optional Elo-trend readout. `chips`: [{'result','margin','opponent',
+    'venue','score'}, ...] from transforms.recent_form."""
+    if not chips:
+        st.caption(f"{team_label}: no completed games yet.")
+        return
+    chip_html = []
+    for ch in chips:
+        is_win = ch['result'] == 'W'
+        bg = C['positive'] if is_win else C['negative']
+        tooltip = f"{ch['result']} {ch['score']} {ch['venue']} {ch['opponent']}"
+        chip_html.append(
+            f"<span title='{_esc(tooltip)}' style='display:inline-flex; flex-direction:column; align-items:center; "
+            f"min-width:34px; padding:4px 6px; border-radius:6px; background:{bg}22; "
+            f"border:1px solid {bg}66;'>"
+            f"<span style='font-weight:800; font-size:12px; color:{bg};'>{ch['result']}</span>"
+            f"<span style='font-family:{_MONO_FONT}; font-size:10px; color:{C['on_surface_variant']};'>"
+            f"{'+' if ch['margin'] > 0 else ''}{ch['margin']}</span></span>"
+        )
+    elo_html = ""
+    if elo_delta is not None:
+        up = elo_delta >= 0
+        color = C['positive'] if up else C['negative']
+        elo_html = (
+            f"<span style='margin-left:10px; font-family:{_MONO_FONT}; font-size:11px; color:{color};' "
+            f"title='Elo rating change across these games'>{'▲' if up else '▼'} {abs(elo_delta):.0f} Elo</span>"
+        )
+    st.markdown(
+        f"<div style='display:flex; align-items:center; gap:5px; margin:2px 0 10px 0;'>"
+        f"<span style='font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:0.07em; "
+        f"color:{C['on_surface_variant']}; margin-right:6px;'>{_esc(team_label)}</span>"
+        f"{''.join(chip_html)}{elo_html}</div>",
+        unsafe_allow_html=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Rank trajectory (poll position over weeks; rank 1 at the top)
+# ---------------------------------------------------------------------------
+
+def render_rank_trajectory(pivot, week_labels, color_map, max_rank=26):
+    """
+    Multi-team rank-over-time lines. `pivot`: index = week order, columns =
+    teams, values = rank (NaN = unranked, drawn as a gap). `week_labels`:
+    {week_order: 'W5'/'Final'}. Y axis inverted (rank 1 on top). Team lines
+    use official team colors with an end-of-line label; hover any point for
+    'team - W5: #12'.
+    """
+    if pivot.empty:
+        return
+    W, H = 860, 360
+    ML, MR, MT, MB = 34, 130, 14, 30
+    plot_w, plot_h = W - ML - MR, H - MT - MB
+    orders = list(pivot.index)
+    n = len(orders)
+    xs = {o: ML + (plot_w * i / max(n - 1, 1)) for i, o in enumerate(orders)}
+
+    def y_for(rank):
+        return MT + plot_h * (rank - 1) / (max_rank - 1)
+
+    parts = [
+        f"<svg viewBox='0 0 {W} {H}' xmlns='http://www.w3.org/2000/svg' "
+        f"style='width:100%; height:auto; font-family:{_BODY_FONT};'>"
+    ]
+    # Grid + rank axis
+    for r in (1, 5, 10, 15, 20, 25):
+        gy = y_for(r)
+        parts.append(f"<line x1='{ML}' y1='{gy:.1f}' x2='{W - MR}' y2='{gy:.1f}' stroke='{C['outline_variant']}' stroke-width='1' stroke-dasharray='3,4'/>")
+        parts.append(f"<text x='{ML - 6}' y='{gy + 4:.1f}' text-anchor='end' font-size='10.5' font-family='{_MONO_FONT}' fill='{C['on_surface_variant']}'>{r}</text>")
+    # Week axis labels (thin out if crowded)
+    step = max(1, n // 12)
+    for i, o in enumerate(orders):
+        if i % step and i != n - 1:
+            continue
+        parts.append(
+            f"<text x='{xs[o]:.1f}' y='{H - 8}' text-anchor='middle' font-size='10.5' "
+            f"font-family='{_MONO_FONT}' fill='{C['on_surface_variant']}'>{_esc(week_labels.get(o, o))}</text>"
+        )
+    # Team lines - draw in reverse final-rank order so better teams paint last (on top)
+    final_ranks = pivot.iloc[-1]
+    ordered_teams = final_ranks.sort_values(ascending=False, na_position='first').index.tolist()
+    label_ys = []
+    for team in ordered_teams:
+        series = pivot[team]
+        color = color_map.get(team) or C['primary']
+        pts = [(xs[o], y_for(v)) for o, v in series.items() if pd.notna(v)]
+        if not pts:
+            continue
+        # polyline segments broken at unranked gaps
+        segs, cur = [], []
+        for o in orders:
+            v = series.get(o)
+            if pd.notna(v):
+                cur.append((xs[o], y_for(v)))
+            elif cur:
+                segs.append(cur)
+                cur = []
+        if cur:
+            segs.append(cur)
+        for seg in segs:
+            if len(seg) == 1:
+                x, yv = seg[0]
+                parts.append(f"<circle cx='{x:.1f}' cy='{yv:.1f}' r='3' fill='{color}'/>")
+            else:
+                d = " ".join(f"{x:.1f},{yv:.1f}" for x, yv in seg)
+                parts.append(f"<polyline points='{d}' fill='none' stroke='{color}' stroke-width='2.2' stroke-linejoin='round' stroke-linecap='round' opacity='0.9'/>")
+        for o, v in series.items():
+            if pd.isna(v):
+                continue
+            parts.append(
+                f"<circle cx='{xs[o]:.1f}' cy='{y_for(v):.1f}' r='3.4' fill='{color}' stroke='{C['surface']}' stroke-width='1'>"
+                f"<title>{_esc(team)} — {_esc(week_labels.get(o, o))}: #{int(v)}</title></circle>"
+            )
+        # End label, nudged to avoid overlaps
+        last_y = next((y_for(series[o]) for o in reversed(orders) if pd.notna(series.get(o))), None)
+        if last_y is not None:
+            while any(abs(last_y - ly) < 13 for ly in label_ys):
+                last_y += 13
+            label_ys.append(last_y)
+            parts.append(
+                f"<text x='{W - MR + 8}' y='{last_y + 4:.1f}' font-size='11' font-weight='600' "
+                f"fill='{color}'>{_esc(team)}</text>"
+            )
+    parts.append("</svg>")
+    st.markdown("".join(parts), unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
+# Game-log bars (per-game values with season-average line + breakout flags)
+# ---------------------------------------------------------------------------
+
+def render_game_log_bars(values, tooltips, breakout, avg=None, avg_label="season avg"):
+    """
+    One bar per game (season order), season-average dashed reference line,
+    breakout games (see transforms.breakout_flags) drawn in the primary
+    accent with a ★ marker. `tooltips` supplies the per-bar hover text.
+    """
+    if not values:
+        return
+    W, H, MB, MT = 860, 190, 24, 18
+    plot_h = H - MB - MT
+    n = len(values)
+    slot = W / n
+    bar_w = min(46.0, slot * 0.62)
+    vmax = max(max(values), (avg or 0)) or 1
+    parts = [
+        f"<svg viewBox='0 0 {W} {H}' xmlns='http://www.w3.org/2000/svg' "
+        f"style='width:100%; height:auto; font-family:{_BODY_FONT};'>"
+    ]
+    for i, v in enumerate(values):
+        h = max(2.0, plot_h * float(v) / vmax)
+        x = slot * i + (slot - bar_w) / 2
+        y = MT + plot_h - h
+        is_star = bool(breakout[i]) if i < len(breakout) else False
+        fill = C['primary'] if is_star else C['secondary']
+        parts.append(
+            f"<rect x='{x:.1f}' y='{y:.1f}' width='{bar_w:.1f}' height='{h:.1f}' rx='3' fill='{fill}' "
+            f"opacity='{1.0 if is_star else 0.75}'><title>{_esc(tooltips[i])}</title></rect>"
+        )
+        if is_star:
+            parts.append(
+                f"<text x='{x + bar_w / 2:.1f}' y='{y - 5:.1f}' text-anchor='middle' font-size='12' "
+                f"fill='{C['primary']}'>★<title>{_esc(tooltips[i])}</title></text>"
+            )
+        parts.append(
+            f"<text x='{x + bar_w / 2:.1f}' y='{H - 8}' text-anchor='middle' font-size='9.5' "
+            f"font-family='{_MONO_FONT}' fill='{C['on_surface_variant']}'>{i + 1}</text>"
+        )
+    if avg is not None and vmax:
+        ay = MT + plot_h - plot_h * float(avg) / vmax
+        parts.append(f"<line x1='0' y1='{ay:.1f}' x2='{W}' y2='{ay:.1f}' stroke='{C['on_surface_variant']}' stroke-width='1.2' stroke-dasharray='5,5' opacity='0.8'/>")
+        parts.append(
+            f"<text x='{W - 4}' y='{ay - 5:.1f}' text-anchor='end' font-size='10' font-family='{_MONO_FONT}' "
+            f"fill='{C['on_surface_variant']}'>{avg_label} {avg:.1f}</text>"
+        )
+    parts.append("</svg>")
+    st.markdown("".join(parts), unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
+# Efficiency landscape scatter (offense vs defense, quadrant-annotated)
+# ---------------------------------------------------------------------------
+
+def render_efficiency_scatter(df, x_col, y_col, color_map, invert_y=False,
+                              highlight=None, x_label=None, y_label=None):
+    """
+    Full-league scatter with team-colored dots and hover tooltips.
+    `invert_y=True` for metrics where lower = better (defensive ratings),
+    so 'good' is always up-and-right. `highlight`: iterable of team names
+    drawn larger with a name label.
+    """
+    data = df[['Team', x_col, y_col]].dropna()
+    if data.empty:
+        return
+    W, H = 860, 420
+    ML, MR, MT, MB = 52, 18, 16, 40
+    plot_w, plot_h = W - ML - MR, H - MT - MB
+    xs_ = pd.to_numeric(data[x_col])
+    ys_ = pd.to_numeric(data[y_col])
+    x_min, x_max = xs_.min(), xs_.max()
+    y_min, y_max = ys_.min(), ys_.max()
+    x_pad = (x_max - x_min) * 0.05 or 1
+    y_pad = (y_max - y_min) * 0.05 or 1
+    x_min, x_max = x_min - x_pad, x_max + x_pad
+    y_min, y_max = y_min - y_pad, y_max + y_pad
+
+    def px(v):
+        return ML + plot_w * (v - x_min) / (x_max - x_min)
+
+    def py(v):
+        frac = (v - y_min) / (y_max - y_min)
+        if not invert_y:
+            frac = 1 - frac
+        return MT + plot_h * frac
+
+    highlight = set(highlight or [])
+    parts = [
+        f"<svg viewBox='0 0 {W} {H}' xmlns='http://www.w3.org/2000/svg' "
+        f"style='width:100%; height:auto; font-family:{_BODY_FONT};'>"
+    ]
+    # Median crosshairs -> four quadrants
+    mx, my = px(xs_.median()), py(ys_.median())
+    parts.append(f"<line x1='{mx:.1f}' y1='{MT}' x2='{mx:.1f}' y2='{MT + plot_h}' stroke='{C['outline_variant']}' stroke-width='1' stroke-dasharray='4,4'/>")
+    parts.append(f"<line x1='{ML}' y1='{my:.1f}' x2='{ML + plot_w}' y2='{my:.1f}' stroke='{C['outline_variant']}' stroke-width='1' stroke-dasharray='4,4'/>")
+    parts.append(
+        f"<text x='{W - MR - 4}' y='{MT + 14}' text-anchor='end' font-size='10.5' font-weight='700' "
+        f"letter-spacing='0.06em' fill='{C['on_surface_variant']}' opacity='0.8'>ELITE BOTH WAYS ↗</text>"
+    )
+    if x_label:
+        parts.append(f"<text x='{ML + plot_w / 2}' y='{H - 8}' text-anchor='middle' font-size='11' fill='{C['on_surface_variant']}'>{_esc(x_label)}</text>")
+    if y_label:
+        parts.append(
+            f"<text x='14' y='{MT + plot_h / 2}' text-anchor='middle' font-size='11' fill='{C['on_surface_variant']}' "
+            f"transform='rotate(-90 14 {MT + plot_h / 2})'>{_esc(y_label)}</text>"
+        )
+    # Dots: non-highlighted first so highlights paint on top
+    for _, row in data.iterrows():
+        team = row['Team']
+        if team in highlight:
+            continue
+        color = color_map.get(team) or C['secondary']
+        parts.append(
+            f"<circle cx='{px(row[x_col]):.1f}' cy='{py(row[y_col]):.1f}' r='4.2' fill='{color}' "
+            f"opacity='0.75' stroke='{C['surface']}' stroke-width='0.8'>"
+            f"<title>{_esc(team)} — {x_col}: {row[x_col]:.1f}, {y_col}: {row[y_col]:.1f}</title></circle>"
+        )
+    for _, row in data.iterrows():
+        team = row['Team']
+        if team not in highlight:
+            continue
+        color = color_map.get(team) or C['primary']
+        x, yv = px(row[x_col]), py(row[y_col])
+        parts.append(
+            f"<circle cx='{x:.1f}' cy='{yv:.1f}' r='7' fill='{color}' stroke='#ffffff' stroke-width='1.6'>"
+            f"<title>{_esc(team)} — {x_col}: {row[x_col]:.1f}, {y_col}: {row[y_col]:.1f}</title></circle>"
+        )
+        parts.append(
+            f"<text x='{x + 10:.1f}' y='{yv + 4:.1f}' font-size='11.5' font-weight='700' fill='#ffffff' "
+            f"style='paint-order:stroke; stroke:{C['surface']}; stroke-width:3px;'>{_esc(team)}</text>"
+        )
+    parts.append("</svg>")
+    st.markdown("".join(parts), unsafe_allow_html=True)
