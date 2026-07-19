@@ -16,12 +16,16 @@ import streamlit as st
 from config import AVAILABLE_SEASONS
 from data.loaders import (
     current_cbb_season, load_efficiency_ratings, load_all_team_season_stats, load_team_games,
+    load_team_roster, load_team_player_stats, load_defense_allowed_by_role, team_color_map,
 )
 from data.transforms import (
     four_factors_matchup, style_profile, project_score, recent_form, pct_rank, margin_volatility,
+    player_rate_profile, classify_player_role, aggregate_defense_by_role, defense_role_game_series,
+    ROLE_ORDER,
 )
 from ui.components import render_coming_soon
-from ui.charts import render_mirror_bars, render_form_strip, render_margin_chart
+from ui.charts import render_mirror_bars, render_form_strip, render_margin_chart, render_role_badges, render_trend_line
+from ui.styling import style_plain_dataframe, df_auto_height
 
 # Standard CBB home-court advantage in points (~3 historically, all venues
 # pooled) - a flat constant, not a per-arena model.
@@ -153,6 +157,92 @@ def render():
                   'left_val_str': _fmt(r['left_val']), 'left_pct': r['left_pct'],
                   'right_val_str': _fmt(r['right_val']), 'right_pct': r['right_pct']} for r in style_rows],
             )
+
+    # --- Matchup Edges: defense vs. role ------------------------------------
+    colors = team_color_map(season)
+    st.markdown("<div class='custom-section-header'>MATCHUP EDGES — DEFENSE VS. ROLE</div>", unsafe_allow_html=True)
+    st.caption(
+        "The real matchup question: which opposing player TYPES does each defense struggle with, and "
+        "does the other team have that type? No free CBB source publishes 'defense vs. role' directly "
+        "(checked — see HANDOFF), so the full breakdown below is built by cross-referencing every "
+        "opponent's own game log. Shooting/rebounding-allowed numbers are free (same cached pull as "
+        "everything else on this tab); the full points-by-role breakdown is a heavier on-demand pull."
+    )
+
+    if not team_stats.empty:
+        da_rows = team_stats[team_stats['Team'] == team_a]
+        db_rows = team_stats[team_stats['Team'] == team_b]
+        if not da_rows.empty and not db_rows.empty:
+            da, db = da_rows.iloc[0], db_rows.iloc[0]
+            allowed_rows = []
+            for label, col, help_text in (
+                ('3PA Rate Allowed', 'Def 3PA Rate', "Share of opponent field goal attempts from three, allowed."),
+                ('3P% Allowed', 'Def 3P%', "Opponent three-point percentage, allowed."),
+                ('ORB% Allowed', 'Def ORB%', "Opponent offensive rebound rate, allowed."),
+            ):
+                if col not in team_stats.columns:
+                    continue
+                allowed_rows.append({
+                    'label': label, 'help': help_text,
+                    'left_val_str': _fmt(da[col]), 'left_pct': pct_rank(team_stats[col], da[col], higher_is_better=False),
+                    'right_val_str': _fmt(db[col]), 'right_pct': pct_rank(team_stats[col], db[col], higher_is_better=False),
+                })
+            if allowed_rows:
+                render_mirror_bars(f"{team_a} allows", f"{team_b} allows", allowed_rows)
+                st.caption("D-I percentile — longer/greener bar = allows LESS of that shot type (i.e. defends it better).")
+
+    st.markdown("**Roster Tendencies**")
+    st.caption("Every rostered player's primary role from their own season rate profile — see the Player Search tab for a single player's full breakdown.")
+    rc_a, rc_b = st.columns(2)
+    for col, team_name in ((rc_a, team_a), (rc_b, team_b)):
+        with col:
+            st.markdown(f"**{team_name}**")
+            roster = load_team_roster(team_name, season)
+            player_stats_df = load_team_player_stats(team_name, season)
+            if roster.empty or player_stats_df.empty:
+                st.caption("No roster/stat data.")
+                continue
+            merged = player_stats_df.merge(roster[['id', 'name']], left_on='athleteId', right_on='id', how='inner')
+            role_groups = {}
+            for _, p in merged.iterrows():
+                profile = player_rate_profile(p.to_dict())
+                role, _ = classify_player_role(profile)
+                if role:
+                    role_groups.setdefault(role, []).append(p['name'])
+            if not role_groups:
+                st.caption("Not enough minutes logged yet to classify this roster.")
+            for role in ROLE_ORDER:
+                if role not in role_groups:
+                    continue
+                pill_color = colors.get(team_name)
+                render_role_badges(role, [], primary_color=pill_color)
+                st.caption(", ".join(role_groups[role]))
+
+    st.markdown("**Defense vs. Role — Full Breakdown**")
+    st.caption(
+        "Roughly 60-90 extra API calls for a full schedule (one roster + season-stats + game-log pull "
+        "per opponent) — not run automatically. Cached once run, and opponents already viewed elsewhere "
+        "this session are free."
+    )
+    edge_a, edge_b = st.columns(2)
+    for col, team_name in ((edge_a, team_a), (edge_b, team_b)):
+        with col:
+            state_key = f"ma_role_data_{team_name}"
+            if st.button(f"Analyze {team_name}'s Defense", key=f"ma_analyze_{team_name}"):
+                st.session_state[state_key] = True
+            if st.session_state.get(state_key):
+                with st.spinner(f"Cross-referencing {team_name}'s opponents — this can take a while..."):
+                    role_games = load_defense_allowed_by_role(team_name, season)
+                if role_games.empty:
+                    st.info("Not enough data to compute this yet (schedule or opponent stats unavailable).")
+                else:
+                    summary = aggregate_defense_by_role(role_games)
+                    st.dataframe(style_plain_dataframe(summary), width="stretch", height=df_auto_height(len(summary)))
+                    role_pick = st.selectbox("Trend for role", summary.index.tolist(), key=f"ma_role_trend_{team_name}")
+                    trend = defense_role_game_series(role_games, role_pick)
+                    if not trend.empty and len(trend) >= 2:
+                        render_trend_line(trend['Date'].tolist(), trend['Points'].tolist(), window=5, unit=' pts')
+                        st.caption(f"Points allowed to {role_pick} per game — rolling 5-game average (violet) vs. season average (dashed). A rising line with the game log still showing the same opponents is the earliest sign of a scheme or personnel change.")
 
     # --- Recent form --------------------------------------------------------
     st.markdown("<div class='custom-section-header'>RECENT FORM (LAST 5)</div>", unsafe_allow_html=True)

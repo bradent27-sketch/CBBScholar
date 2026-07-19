@@ -341,6 +341,187 @@ def stat_win_correlations(team_stats_df, ratings_df, min_n=8):
 # Season margin trend + volatility/consistency
 # ---------------------------------------------------------------------------
 
+ROLE_BALL_HANDLER = 'Ball-Handler'
+ROLE_POST = 'Post Player'
+ROLE_SHOOTER = 'Shooter'
+ROLE_WING = 'Wing/Combo'
+ROLE_ORDER = [ROLE_BALL_HANDLER, ROLE_POST, ROLE_SHOOTER, ROLE_WING]
+
+
+def player_rate_profile(stats):
+    """
+    Rate-basis tendency profile from one player's raw /stats/player/season
+    dict (data.loaders.get_player_season_stats, or any row of
+    load_team_player_stats via .to_dict()) - every number here controls for
+    playing time or shot volume rather than counting stats, so a bench
+    player and a starter with the same TENDENCY read the same even though
+    their raw totals don't. This is the "are they a shooter, rebounder,
+    passer" question the app previously had no answer for - everything
+    else in the app was descriptive percentiles, this is the first
+    tendency/role layer. Returns {} if minutes/games are missing (can't
+    build a rate off zero playing time).
+    """
+    if not stats:
+        return {}
+    games = stats.get('games') or 0
+    minutes = stats.get('minutes') or 0
+    if not games or not minutes:
+        return {}
+    fg = stats.get('fieldGoals') or {}
+    three = stats.get('threePointFieldGoals') or {}
+    ft = stats.get('freeThrows') or {}
+    reb = stats.get('rebounds') or {}
+    fga = fg.get('attempted') or 0
+    turnovers = stats.get('turnovers') or 0
+    assists = stats.get('assists') or 0
+
+    def per40(total):
+        if total is None:
+            return None
+        try:
+            return float(total) / minutes * 40
+        except (TypeError, ZeroDivisionError):
+            return None
+
+    return {
+        'usage': stats.get('usage'),
+        'efg_pct': stats.get('effectiveFieldGoalPct'),
+        'ts_pct': stats.get('trueShootingPct'),
+        'three_pa_rate': (three.get('attempted') / fga * 100) if fga and three.get('attempted') is not None else None,
+        'three_pct': three.get('pct'),
+        'ft_rate': (ft.get('attempted') / fga * 100) if fga and ft.get('attempted') is not None else None,
+        'ft_pct': ft.get('pct'),
+        'ast_per40': per40(assists),
+        'reb_per40': per40(reb.get('total')),
+        'stl_per40': per40(stats.get('steals')),
+        'blk_per40': per40(stats.get('blocks')),
+        'pts_per40': per40(stats.get('points')),
+        'ast_to_ratio': (assists / turnovers) if turnovers else None,
+        'minutes_per_game': (minutes / games) if games else None,
+    }
+
+
+def classify_player_role(rate_profile):
+    """
+    Single primary offensive role from a rate profile (see
+    player_rate_profile above), plus secondary descriptive badges. Fixed,
+    basketball-literate thresholds — NOT league-percentile-based, since
+    that would need a full-D-I player pull this app deliberately doesn't
+    do (360+ extra API calls just to rank one player; see HANDOFF §7's
+    "still parked" note). Read this as a heuristic classifier, the same
+    "labeled as an estimate" spirit as the Matchup Analyzer's projections,
+    not a precise percentile rank.
+
+    Evaluated in priority order so every player gets exactly ONE primary
+    role - required so defense-allowed-by-role aggregation (see
+    aggregate_defense_by_role) can bucket cleanly without double-counting
+    a player who's both a good rebounder AND a decent shooter. Priority:
+    a real, high-rate PASSER is a Ball-Handler regardless of usage (a
+    pass-first floor general can have modest usage); failing that, a
+    high-usage/high-assist combo guard also qualifies. Then: low 3PA rate
+    or a heavy rebounding rate reads as playing mostly inside (Post
+    Player) - the best proxy available without shot-location data (CBBD
+    doesn't have it; see HANDOFF §7). Then: high 3PA rate reads as
+    Shooter. Everything else falls to Wing/Combo (secondary scorer, no
+    single tendency dominates).
+
+    Returns (primary_role, [secondary_badges]) or (None, []) if the
+    profile is empty/too thin.
+    """
+    if not rate_profile:
+        return None, []
+    usage = rate_profile.get('usage') or 0
+    ast40 = rate_profile.get('ast_per40') or 0
+    reb40 = rate_profile.get('reb_per40') or 0
+    three_rate = rate_profile.get('three_pa_rate')
+    ft_rate = rate_profile.get('ft_rate')
+    blk40 = rate_profile.get('blk_per40') or 0
+    stl40 = rate_profile.get('stl_per40') or 0
+    three_pct = rate_profile.get('three_pct')
+    ast_to = rate_profile.get('ast_to_ratio')
+
+    if ast40 >= 5.5 or (usage >= 24 and ast40 >= 3.0):
+        primary = ROLE_BALL_HANDLER
+    elif (three_rate is not None and three_rate <= 20) or reb40 >= 9:
+        primary = ROLE_POST
+    elif three_rate is not None and three_rate >= 40:
+        primary = ROLE_SHOOTER
+    else:
+        primary = ROLE_WING
+
+    badges = []
+    if reb40 >= 9 and primary != ROLE_POST:
+        badges.append('Rebounder')
+    if blk40 >= 2.0:
+        badges.append('Rim Protector')
+    if stl40 >= 2.2:
+        badges.append('Disruptor')
+    if three_pct is not None and three_pct >= 38 and (three_rate or 0) >= 30 and primary != ROLE_SHOOTER:
+        badges.append('Sharpshooter')
+    if ft_rate is not None and ft_rate >= 35:
+        badges.append('Foul Drawer')
+    if ast_to is not None and ast_to >= 2.0 and primary != ROLE_BALL_HANDLER:
+        badges.append('Secondary Ball-Handler')
+
+    return primary, badges
+
+
+# ---------------------------------------------------------------------------
+# Defense-allowed-by-role (see data.loaders.load_defense_allowed_by_role for
+# how the per-(game, opposing player) rows this consumes get built).
+# ---------------------------------------------------------------------------
+
+def aggregate_defense_by_role(role_games_df):
+    """
+    Per-role PPG/RPG/APG/3PM-per-game allowed, from
+    data.loaders.load_defense_allowed_by_role's per-(game, opposing player)
+    rows. Averages by GAME, not by player-appearance - a game where two
+    different Ball-Handlers both played still divides by 1 game, not 2, so
+    "PPG allowed to Ball-Handlers" reads as "how much did the Ball-Handler(s)
+    I faced that night combine for," matching how a scout actually reads a
+    box score. Returns a DataFrame indexed by Role (Ball-Handler/Post
+    Player/Shooter/Wing-Combo order) with Games/Points/Rebounds/Assists/
+    Threes-per-game, or empty if the input is empty.
+    """
+    if role_games_df is None or role_games_df.empty:
+        return pd.DataFrame()
+    per_game = role_games_df.groupby(['Role', 'Date'], as_index=False).agg(
+        Points=('Points', 'sum'), Rebounds=('Rebounds', 'sum'),
+        Assists=('Assists', 'sum'), ThreesMade=('ThreesMade', 'sum'),
+    )
+    summary = per_game.groupby('Role').agg(
+        Games=('Date', 'nunique'), PointsG=('Points', 'mean'),
+        ReboundsG=('Rebounds', 'mean'), AssistsG=('Assists', 'mean'),
+        ThreesG=('ThreesMade', 'mean'),
+    )
+    summary = summary.rename(columns={
+        'PointsG': 'Points/G', 'ReboundsG': 'Rebounds/G',
+        'AssistsG': 'Assists/G', 'ThreesG': '3PM/G',
+    })
+    order = [r for r in ROLE_ORDER if r in summary.index]
+    return summary.reindex(order)
+
+
+def defense_role_game_series(role_games_df, role):
+    """
+    Chronological per-game totals allowed to ONE role - the trend input for
+    ui.charts.render_trend_line (rolling average / game-by-game), so a
+    mid-season scheme change or a new-role opposing player shows up in the
+    shape of this line before it moves the season aggregate in
+    aggregate_defense_by_role. Returns a DataFrame sorted by Date, or empty.
+    """
+    if role_games_df is None or role_games_df.empty:
+        return pd.DataFrame()
+    sub = role_games_df[role_games_df['Role'] == role]
+    if sub.empty:
+        return pd.DataFrame()
+    per_game = sub.groupby('Date', as_index=False).agg(
+        Points=('Points', 'sum'), Rebounds=('Rebounds', 'sum'),
+        Assists=('Assists', 'sum'), ThreesMade=('ThreesMade', 'sum'),
+    )
+    return per_game.sort_values('Date').reset_index(drop=True)
+
+
 def margin_volatility(games_df, close_margin=5):
     """
     Season-long scoring-margin descriptives from a team's completed

@@ -8,6 +8,7 @@ on purpose - see CFB Scholar's player_search.py docstring for the same
 reasoning (percentile ranking needs a full-league pull this pass doesn't
 do; game-by-game logs are a later pass).
 """
+import pandas as pd
 import streamlit as st
 
 from config import AVAILABLE_SEASONS
@@ -15,9 +16,9 @@ from data.loaders import (
     current_cbb_season, load_teams, load_team_roster, load_team_player_stats,
     get_player_season_stats, team_color_map, load_player_game_logs,
 )
-from data.transforms import breakout_flags, last_n_form
+from data.transforms import breakout_flags, last_n_form, player_rate_profile, classify_player_role
 from ui.components import render_coming_soon, render_team_banner, render_bio_strip, render_stat_tiles
-from ui.charts import render_game_log_bars
+from ui.charts import render_game_log_bars, render_role_badges, render_trend_line
 
 
 def _fmt_height(inches):
@@ -116,7 +117,64 @@ def render():
     render_stat_tiles(entries)
     st.caption("Season stats via CollegeBasketballData.com.")
 
+    _render_tendencies_section(stats, team, colors)
     _render_game_log_section(team, season, sel_row)
+
+
+def _render_tendencies_section(stats, team, colors):
+    """Rate-basis role read - shooter/rebounder/passer/post, not raw
+    totals, so a bench player and a starter with the same TENDENCY read
+    the same. See data.transforms.player_rate_profile/classify_player_role
+    for the underlying rates and thresholds; this is a heuristic
+    classification, not a league percentile (that needs a full-D-I player
+    pull this app doesn't do - see HANDOFF)."""
+    profile = player_rate_profile(stats)
+    role, badges = classify_player_role(profile)
+    st.markdown("<div class='custom-section-header'>TENDENCIES</div>", unsafe_allow_html=True)
+    st.caption(
+        "Rate-basis role read (heuristic, not a league percentile) — controls for minutes and "
+        "shot volume so it reflects TYPE of player, not just how much they play."
+    )
+    render_role_badges(role, badges, primary_color=colors.get(team))
+    if profile:
+        tendency_entries = [
+            {'label': 'Usage %', 'value_str': _pct(profile.get('usage'))},
+            {'label': '3PA Rate', 'value_str': _pct(profile.get('three_pa_rate'))},
+            {'label': 'FT Rate', 'value_str': _pct(profile.get('ft_rate'))},
+            {'label': 'AST/40', 'value_str': f"{profile['ast_per40']:.1f}" if profile.get('ast_per40') is not None else '--'},
+            {'label': 'REB/40', 'value_str': f"{profile['reb_per40']:.1f}" if profile.get('reb_per40') is not None else '--'},
+            {'label': 'AST/TOV', 'value_str': f"{profile['ast_to_ratio']:.1f}" if profile.get('ast_to_ratio') is not None else '--'},
+            {'label': 'BLK/40', 'value_str': f"{profile['blk_per40']:.1f}" if profile.get('blk_per40') is not None else '--'},
+            {'label': 'STL/40', 'value_str': f"{profile['stl_per40']:.1f}" if profile.get('stl_per40') is not None else '--'},
+        ]
+        render_stat_tiles(tendency_entries)
+
+
+def _render_role_trend(mine):
+    """Rolling-average trend of Usage% and 3PT Rate across the season, from
+    the same per-game rows already loaded for the breakout chart above -
+    both are already present per-game in /games/players (Usage directly;
+    3PT Rate computed from 3PA/FGA), so this costs nothing extra. This is
+    the "beat the market" view: a real role/scheme change (more shots, a
+    bigger shot-creation burden) shows up here as the rolling line pulling
+    away from the season-average dashes well before it moves the season
+    number itself."""
+    st.markdown("**Role Trend (rolling 5-game average)**")
+    trend_stat = st.selectbox("Trend stat", ["Usage %", "3PT Rate"], key="ps_trend_stat")
+    labels = [f"{g['Home/Away']} {g['Opponent']} ({g['Date']})" for _, g in mine.iterrows()]
+    if trend_stat == "Usage %":
+        values = pd.to_numeric(mine['Usage'], errors='coerce').tolist()
+        unit = '%'
+    else:
+        fga = pd.to_numeric(mine['FGA'], errors='coerce')
+        three_pa = pd.to_numeric(mine['3PA'], errors='coerce')
+        values = (three_pa / fga.replace(0, pd.NA) * 100).tolist()
+        unit = '%'
+    render_trend_line(labels, values, window=5, unit=unit)
+    st.caption(
+        "Violet line = trailing 5-game average; dashed = season average. A widening gap between "
+        "them is the earliest signal of a real role or usage change, before it shows up in box scores."
+    )
 
 
 _GAME_LOG_STATS = [('Points', 'Points'), ('Rebounds', 'Rebounds'), ('Assists', 'Assists'),
@@ -149,7 +207,6 @@ def _render_game_log_section(team, season, sel_row):
     sel = st.selectbox("Stat", labels, key="ps_gamelog_stat")
     col = _GAME_LOG_STATS[labels.index(sel)][0]
 
-    import pandas as pd
     series = mine.dropna(subset=[col]).reset_index(drop=True)
     values = pd.to_numeric(series[col], errors='coerce').fillna(0).tolist()
     if not values:
@@ -169,6 +226,8 @@ def _render_game_log_section(team, season, sel_row):
         st.caption(f"★ Breakout game(s) — at least 1.5σ above their own season average: {', '.join(star_games)}.")
     else:
         st.caption("No breakout games yet by the 1.5σ-above-season-average threshold.")
+
+    _render_role_trend(mine)
 
     # Last-5 form vs season average - the heating-up/cooling-off readout.
     form = last_n_form(mine)

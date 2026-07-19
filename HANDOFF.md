@@ -45,6 +45,60 @@ They're written sport-agnostically on purpose (generic radar/correlation/
 margin primitives, no CBB-specific logic) so back-porting later is a
 straight file sync if wanted — just hasn't been done as part of this pass.
 
+**Also fixed this pass: `cbfd_api_key` vs. `cbbd_api_key`.** A live
+instance had the CBBD key pasted into Streamlit Cloud's secrets under the
+name `cfbd_api_key` (the CFB Scholar sibling's key name — a one-letter
+typo, easy to make copying between the two apps). Every loader here reads
+`st.secrets["cbbd_api_key"]` specifically; a key under any other name is
+invisible to it. No code changed for this one - it was a secrets-panel
+typo on Streamlit Cloud, not a bug in this repo. Also added a **"Test live
+connections" button** (sidebar, below Setup Status) that makes one real,
+uncached request to each of CBBD/Odds API/ncaa.com and reports the actual
+HTTP status/exception instead of every tab's generic "or the request
+failed" — see `data.loaders.test_cbbd_connection` /
+`test_odds_connection` / `test_ncaa_net_connection`. Use this FIRST
+whenever "configured" in the sidebar doesn't match what a tab shows - it
+distinguishes a bad/rotated key (401) from a rate limit (429) from a
+network block on the hosting side (timeout/connection error), which the
+tabs' own error message can't.
+
+**Major pass: role-based matchup intelligence.** This is the app's actual
+differentiator vs. raw KenPom/Torvik/CBBD numbers - the user's real
+workflow (paraphrased): "check what a defense allows by position, then
+check whether the opposing player's own tendencies match that hole, on a
+rate basis, and watch for a role/usage trend before it shows up in the
+season averages." None of this exists as a single free CBB data source
+(checked: CBBD's spec has no shot-location/play-type/defense-by-position
+endpoint; `/lineups` and `/plays` in its spec are possession/shot-clock
+logs, not role-tagged splits) - it's built by adding a role-tendency layer
+on top of data already in this app, plus one new cross-referencing loader.
+Three pieces, see §3 for the full technical detail:
+1. **Player role tags** (`data.transforms.player_rate_profile` +
+   `classify_player_role`) - Ball-Handler / Post Player / Shooter /
+   Wing-Combo, from rate stats (per-40s, Usage%, 3PA Rate, AST/TOV, etc.),
+   not raw totals. Fixed, basketball-literate thresholds, explicitly a
+   heuristic (see §3) - NOT a league percentile, which would need a
+   full-D-I player pull this app deliberately doesn't do (360+ calls just
+   to rank one player). Shown in Player Search (badges + rate tiles) and
+   Matchup Analyzer (both rosters, grouped by role).
+2. **Defense-allowed-by-role** (`data.loaders.load_defense_allowed_by_role`
+   + `data.transforms.aggregate_defense_by_role`) - cross-references every
+   opponent on a team's schedule (their roster, season stats, and game
+   log - all loaders this app already had) to compute what that defense
+   actually allows to Ball-Handlers/Post Players/Shooters specifically.
+   The heaviest pull in the app (~60-90 calls for a full schedule) - gated
+   behind an explicit "Analyze Defense" button in Matchup Analyzer's new
+   MATCHUP EDGES section, same pattern as the NCAA NET manual scrape.
+   Direct stats that needed no cross-referencing (3PA Rate/3P%/ORB%
+   allowed) are free and shown unconditionally above it.
+3. **Trending** (`ui.charts.render_trend_line`, reused for both) - rolling
+   5-game average vs. season-average dashed line, for a player's Usage%/
+   3PA Rate (Player Search, zero extra cost - already-fetched game logs)
+   and for points allowed per role (Matchup Analyzer, from the
+   cross-reference above). This is the "beat the market" piece: a real
+   role or scheme change shows up as the rolling line pulling away from
+   the season dashes before it moves the season number itself.
+
 ## 1. Architecture
 
 Same 3-layer separation as NFL Scholar / CFB Scholar. `data/loaders.py`'s
@@ -160,6 +214,58 @@ over scraping" default; nowhere else in either app scrapes anything.
   close-game (≤5 pt) win-loss split - all computed from the same
   `load_team_games` pull Recent Form already makes for the last-5 strips,
   just over the full season instead of the last 5.
+- **Player role tags** (`data/transforms.player_rate_profile` +
+  `classify_player_role`): rate-basis tendency profile from one player's
+  raw `/stats/player/season` dict - Usage% (direct from the API), 3PA
+  Rate/3P%/FT Rate (computed from attempted/made splits), AST/REB/STL/BLK
+  per-40 (rate stats, minutes-normalized), AST/TOV ratio, eFG%/TS%. Fed
+  into a single PRIMARY role per player (priority order, so defense
+  aggregation below can bucket without double-counting): **Ball-Handler**
+  if AST/40 ≥ 5.5, or Usage% ≥ 24 AND AST/40 ≥ 3.0 (catches both the
+  pass-first low-usage floor general and the high-usage combo guard who
+  also creates); **Post Player** if 3PA Rate ≤ 20% (barely plays beyond
+  the arc - the best proxy available without shot-location data, which
+  CBBD doesn't have) or REB/40 ≥ 9; **Shooter** if 3PA Rate ≥ 40%;
+  else **Wing/Combo**. Secondary badges (Rebounder, Rim Protector,
+  Disruptor, Sharpshooter, Foul Drawer, Secondary Ball-Handler) layer on
+  top from the same rate profile. **These thresholds are fixed and
+  basketball-literate, not league-percentile-based** - a true percentile
+  needs a full-D-I player pull (`/stats/player/season` is team-scoped;
+  ranking one player against all of D-I means pulling all ~360 teams'
+  rosters) this app deliberately doesn't do. Read every role tag as a
+  heuristic read, same "labeled as an estimate" spirit as the Matchup
+  Analyzer's projections - recalibrate the thresholds if they start
+  reading players wrong once real data is flowing.
+- **Defense-allowed-by-role** (`data/loaders.load_defense_allowed_by_role`
+  + `data/transforms.aggregate_defense_by_role`/`defense_role_game_series`,
+  in Matchup Analyzer's new MATCHUP EDGES section): no free CBB source
+  publishes "what does this defense allow to Ball-Handlers vs. Shooters
+  vs. Post Players" - it's built by cross-referencing every opponent on a
+  team's schedule. For each opponent: pull their roster (id↔sourceId
+  bridge - see the id-namespace gotcha below), their season stats (role
+  classification, from THEIR OWN season profile, not from what they did
+  against the team being analyzed - that would be circular), and their
+  game log filtered to just the game(s) against the team being analyzed.
+  Bucket by role, average PER GAME (not per player-appearance - two
+  Ball-Handlers in one game still divide by 1 game). This is the heaviest
+  pull in the app (~3 calls/opponent × ~20-30 opponents = 60-90 calls for
+  a full schedule) - gated behind an explicit "Analyze Defense" button,
+  same pattern as the NCAA NET manual scrape; never call it on tab load.
+  Direct stats needing no cross-reference (3PA Rate/3P%/ORB% allowed, from
+  `opponentStats.threePointFieldGoals`/`fourFactors` - same cached
+  `/stats/team/season` pull as everything else) are shown above it for
+  free.
+- **Rate-stat / role trend** (`ui/charts.render_trend_line`, reused by
+  both Player Search and Matchup Analyzer): game-by-game dots plus a
+  trailing 5-game rolling average against a dashed season-average line.
+  Player Search: Usage%/3PA Rate per game, both already present per-game
+  in `/games/players` (Usage directly, 3PA Rate from 3PA/FGA) - zero extra
+  API cost, pure re-use of the game log Breakout Games already fetches.
+  Matchup Analyzer: points allowed per role per game, from the
+  cross-reference above. This is the actual "beat the market" feature the
+  role tags exist to support - a real role/usage/scheme change shows up as
+  the rolling line pulling away from the season dashes before it moves the
+  season number.
 
 ## 4. UI conventions
 
@@ -232,6 +338,31 @@ cards, full-bleed layout. Same `render_coming_soon()` reuse for setup
   reads that filename. If setup status ever again disagrees with "I
   definitely entered a key", check which literal filename holds the values
   before assuming the key itself is bad.
+- **A key pasted under the wrong SECRET NAME (not the wrong file) produces
+  the identical "Configured" ✅ + tab-level failure symptom** - hit for
+  real on a live Streamlit Cloud deploy: the CBBD key was pasted in under
+  `cfbd_api_key` (CFB Scholar's key name - one letter off, easy mix-up
+  copying between the sibling apps) instead of `cbbd_api_key`. The sidebar
+  only checks "is SOME value present under this exact name", so it can't
+  catch a right-value/wrong-name typo - every tab quietly failed with the
+  generic "or the request failed" message instead. This is exactly why the
+  "Test live connections" button (§0/sidebar) exists now - it makes one
+  real, uncached request and reports the true failure (401/429/timeout),
+  which for a wrong-name secret shows as "No cbbd_api_key in st.secrets"
+  even though a key IS in there under a neighboring name.
+- **`load_defense_allowed_by_role`'s id-bridging needs THREE joins, not
+  one** - the `athleteId`/`sourceId` gotcha above (season-stats id
+  matches roster id; game-log id matches roster sourceId) means tagging a
+  game-log row with a role computed from season stats requires roster as
+  the bridge in between: `season_stats.merge(roster[['id','sourceId',
+  'name']], left_on='athleteId', right_on='id')` first, THEN join the
+  result's `sourceId` to the game log's `athleteSourceId`. Skipping the
+  roster pull and trying to join season stats directly to game logs (both
+  loaders return an `athleteId` column with the SAME name but a DIFFERENT
+  id space) silently produces zero matches, not an error - confirmed by
+  testing the join logic against synthetic data shaped like the real
+  three payloads before trusting it (this sandbox has no live network to
+  confirm against the real API - see §6).
 
 ## 6. Verification workflow (what "done" means for this pass)
 
@@ -263,6 +394,33 @@ data**, since that requires normal internet access this sandbox doesn't
 have - do that once on a machine with real connectivity before calling
 this pass fully verified, same bar as every prior pass in this doc.
 
+**Verification note for the role-based matchup intelligence pass**
+(player role tags, defense-allowed-by-role, rate/role trends): same
+sandbox network restriction as above. Verified: `classify_player_role`
+against four hand-built synthetic player archetypes (a high-assist PG, a
+low-3PA-rate high-rebound center, a high-3PA-rate wing, a
+nothing-dominates combo guard) - each landed on the intended role, and the
+secondary badges (Rim Protector, Sharpshooter, Foul Drawer) fired
+correctly. `aggregate_defense_by_role`/`defense_role_game_series` against
+a hand-built role-games table with a known answer (verified the per-game,
+not per-appearance, averaging). Most importantly,
+`load_defense_allowed_by_role`'s full three-way id-bridging join (roster
+↔ season stats ↔ game log, see §5) was tested end-to-end against a
+synthetic "mini-league" shaped exactly like the real API responses (two
+opponents, a Ball-Handler and a Shooter on each, one deliberately-injected
+game against a THIRD team to confirm the opponent-filter excludes it) via
+`streamlit.testing.v1.AppTest`, clicking the actual "Analyze Defense"
+button - confirmed the right roles, the right game counts (2, not 3 -
+proving the off-opponent game was correctly filtered out), and the right
+per-game averages. This is real behavioral verification of the hardest
+new logic in this pass, not just "it didn't crash." **Still not done:**
+running it against the real live API, real `athleteId`/`sourceId` values,
+and real CBBD role-stat distributions (the fixed thresholds in
+`classify_player_role` were picked from basketball-analytics priors, not
+fit to real CBBD data - they may need recalibrating once real numbers are
+flowing; watch for a role that obviously reads wrong on a real player and
+adjust the threshold, not the architecture).
+
 ## 7. Deliberately NOT done / parked
 
 Formerly parked and now DONE in the data-viz pass: game-by-game logs (with
@@ -275,16 +433,31 @@ originally feared), and `data/transforms.py` is no longer empty.
 Also now DONE (this pass): the Team DNA radar, the "What Wins This Season"
 correlation panel, and the season margin trend/consistency chart - see §3.
 
+Also now DONE (role-based matchup intelligence pass): player role tags on
+a rate basis (Ball-Handler/Post Player/Shooter/Wing-Combo + secondary
+badges), the defense-allowed-by-role cross-reference engine, direct 3PA
+Rate/3P% allowed, and rolling role/usage trend charts for both players and
+defenses - see §3. This was the app's stated core differentiator vs. raw
+KenPom/Torvik numbers and is now built.
+
 Still parked: PLAYER-level league-wide percentiles (that one genuinely
-needs a full-D-I player pull; `/stats/player/season` is team-scoped).
-Per-arena home-court values (flat 3-point constant instead). Tempo-free
-possession-length or lineup data (`/lineups`, `/plays` exist in the spec —
-unexplored). `cbbd` Python package vs. raw `requests` - unchanged. UI
-charts are hand-rolled inline SVG on purpose (theme-exact, zero deps,
-native hover tooltips) - revisit only if interactivity needs outgrow
-`<title>` tooltips. Back-porting the three new `ui/charts.py` functions to
-CFB Scholar to restore the "byte-identical" invariant (see note at the top
-of this doc) - not done, needs a separate pass in that repo.
+needs a full-D-I player pull; `/stats/player/season` is team-scoped) - the
+new role tags use FIXED thresholds instead, explicitly not percentiles,
+see §3/§5. Per-arena home-court values (flat 3-point constant instead).
+Shot-location/play-type data specifically (would upgrade the Post Player
+role signal past the "low 3PA rate" proxy, and would let defense-allowed-
+by-role use actual shot charts instead of season box scores) - CBBD's
+`/lineups` and `/plays` were checked this pass (see §3 lead-in) and are
+possession/shot-clock logs, not that; no free source for it was found.
+`cbbd` Python package vs. raw `requests` - unchanged. UI charts are
+hand-rolled inline SVG on purpose (theme-exact, zero deps, native hover
+tooltips) - revisit only if interactivity needs outgrow `<title>`
+tooltips. Compare tab doesn't show role tags yet (Player Search and
+Matchup Analyzer do) - natural next spot, just not done this pass.
+Back-porting the new `ui/charts.py` functions (radar/correlation/margin
+from the prior pass, role-badges/trend-line from this one) to CFB Scholar
+to restore the "byte-identical" invariant (see note at the top of this
+doc) - not done, needs a separate pass in that repo.
 
 ## 8. Constraints (user-set, don't violate)
 

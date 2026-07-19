@@ -552,3 +552,110 @@ def render_margin_chart(games):
         )
     parts.append("</svg>")
     st.markdown("".join(parts), unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
+# Role/tendency badges (see data.transforms.classify_player_role)
+# ---------------------------------------------------------------------------
+
+def render_role_badges(primary_role, secondary_badges=None, primary_color=None):
+    """
+    Primary role pill (filled, accent-colored) + secondary tendency badges
+    (outlined) - see data.transforms.classify_player_role for what feeds
+    this. `primary_color`: optional override (e.g. team color) for the
+    filled pill; defaults to THEME's primary accent.
+    """
+    if not primary_role:
+        st.caption("Not enough minutes this season to classify a role.")
+        return
+    color = primary_color or C['primary']
+    chips = [
+        f"<span style='display:inline-flex; align-items:center; padding:4px 12px; border-radius:999px; "
+        f"background:{color}; color:{C['on_primary']}; font-size:11.5px; font-weight:800; "
+        f"text-transform:uppercase; letter-spacing:0.04em; margin-right:6px;'>{_esc(primary_role)}</span>"
+    ]
+    for b in (secondary_badges or []):
+        chips.append(
+            f"<span style='display:inline-flex; align-items:center; padding:4px 11px; border-radius:999px; "
+            f"background:transparent; border:1px solid {C['outline_variant']}; color:{C['on_surface_variant']}; "
+            f"font-size:11px; font-weight:600; margin-right:6px;'>{_esc(b)}</span>"
+        )
+    st.markdown(f"<div style='margin:6px 0 10px 0;'>{''.join(chips)}</div>", unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
+# Rate-stat / allowed-by-role trend (game-by-game + trailing rolling avg)
+# ---------------------------------------------------------------------------
+
+def render_trend_line(labels, values, window=5, unit=''):
+    """
+    Game-by-game dots plus a trailing `window`-game rolling-average line and
+    a dashed season-average reference - the shape that makes a mid-season
+    role/scheme change visible (the rolling line breaks away from the
+    season-average dashes) before it moves the season number itself. Used
+    for both a player's rate-stat trend (Usage%, 3PA Rate) and a defense's
+    allowed-by-role trend (data.transforms.defense_role_game_series).
+    `labels`: per-game hover text (e.g. dates); `values`: same-length
+    numeric series, None for a game with no data.
+    """
+    n = len(values)
+    if n < 2:
+        return
+    finite = [v for v in values if v is not None and not pd.isna(v)]
+    if len(finite) < 2:
+        return
+    W, H = 860, 190
+    ML, MR, MT, MB = 42, 12, 14, 24
+    plot_w, plot_h = W - ML - MR, H - MT - MB
+    vmin, vmax = min(finite), max(finite)
+    vmin = min(vmin, 0)
+    pad = (vmax - vmin) * 0.12 or 1
+    vmin, vmax = vmin - pad, vmax + pad
+
+    def px(i):
+        return ML + plot_w * i / max(n - 1, 1)
+
+    def py(v):
+        return MT + plot_h * (1 - (v - vmin) / (vmax - vmin))
+
+    roll = []
+    for i in range(n):
+        lo = max(0, i - window + 1)
+        window_vals = [v for v in values[lo:i + 1] if v is not None and not pd.isna(v)]
+        roll.append(sum(window_vals) / len(window_vals) if window_vals else None)
+
+    season_avg = sum(finite) / len(finite)
+
+    parts = [
+        f"<svg viewBox='0 0 {W} {H}' xmlns='http://www.w3.org/2000/svg' "
+        f"style='width:100%; height:auto; font-family:{_BODY_FONT};'>"
+    ]
+    ay = py(season_avg)
+    parts.append(f"<line x1='{ML}' y1='{ay:.1f}' x2='{W - MR}' y2='{ay:.1f}' stroke='{C['on_surface_variant']}' stroke-width='1' stroke-dasharray='4,4' opacity='0.7'/>")
+    parts.append(
+        f"<text x='{W - MR}' y='{ay - 5:.1f}' text-anchor='end' font-size='10' font-family='{_MONO_FONT}' "
+        f"fill='{C['on_surface_variant']}'>season avg {season_avg:.1f}{unit}</text>"
+    )
+    for i, v in enumerate(values):
+        if v is None or pd.isna(v):
+            continue
+        parts.append(
+            f"<circle cx='{px(i):.1f}' cy='{py(v):.1f}' r='3' fill='{C['secondary']}' opacity='0.65'>"
+            f"<title>{_esc(labels[i] if i < len(labels) else '')}: {v:.1f}{unit}</title></circle>"
+        )
+    roll_pts = [(px(i), py(r)) for i, r in enumerate(roll) if r is not None]
+    if len(roll_pts) >= 2:
+        d = " ".join(f"{x:.1f},{y:.1f}" for x, y in roll_pts)
+        parts.append(f"<polyline points='{d}' fill='none' stroke='{C['primary']}' stroke-width='2.4' stroke-linejoin='round' stroke-linecap='round'/>")
+        lx, ly = roll_pts[-1]
+        parts.append(f"<circle cx='{lx:.1f}' cy='{ly:.1f}' r='3.6' fill='{C['primary']}' stroke='{C['surface']}' stroke-width='1'/>")
+        parts.append(
+            f"<text x='{lx:.1f}' y='{ly - 8:.1f}' text-anchor='end' font-size='10.5' font-weight='700' "
+            f"font-family='{_MONO_FONT}' fill='{C['primary']}'>{roll[-1]:.1f}{unit}</text>"
+        )
+    parts.append(
+        f"<text x='{ML}' y='{H - 6}' font-size='10' fill='{C['on_surface_variant']}'>oldest</text>"
+        f"<text x='{W - MR}' y='{H - 6}' text-anchor='end' font-size='10' fill='{C['on_surface_variant']}'>most recent</text>"
+    )
+    parts.append("</svg>")
+    st.markdown("".join(parts), unsafe_allow_html=True)

@@ -528,6 +528,14 @@ def load_all_team_season_stats(season=None):
         o_pts = os_.get('points') or {}
         t_3p = ts.get('threePointFieldGoals') or {}
         t_fg = ts.get('fieldGoals') or {}
+        # Opponent-side shooting splits - same nesting as the offensive side
+        # above, mirrored under opponentStats (confirmed: opponentStats
+        # carries the identical sub-dict shape as teamStats throughout this
+        # payload, e.g. fourFactors/points already relied on that symmetry).
+        # Powers "3PA Rate/3P% allowed" for the defensive matchup profile -
+        # same cached call as everything else here, zero extra API cost.
+        o_3p = os_.get('threePointFieldGoals') or {}
+        o_fg = os_.get('fieldGoals') or {}
         total_pts = (t_pts.get('total') or 0)
         rows.append({
             'Team': t.get('team'),
@@ -543,6 +551,12 @@ def load_all_team_season_stats(season=None):
             'Def ORB%': off_.get('offensiveReboundPct'),
             'Def FT Rate': off_.get('freeThrowRate'),
             '3PA Rate': (t_3p.get('attempted') / t_fg.get('attempted') * 100) if t_fg.get('attempted') else None,
+            'Def 3PA Rate': (o_3p.get('attempted') / o_fg.get('attempted') * 100) if o_fg.get('attempted') else None,
+            # pct fields from CBBD are already 0-100 (same convention as
+            # Off/Def eFG% above, which are used unscaled elsewhere in this
+            # file) - no extra *100 here, unlike the *_Rate fields which are
+            # ratios this loader computes itself from raw attempted counts.
+            'Def 3P%': o_3p.get('pct'),
             'Paint Pts %': (t_pts.get('inPaint') / total_pts * 100) if total_pts else None,
             'Fast Break %': (t_pts.get('fastBreak') / total_pts * 100) if total_pts else None,
             'Opp Paint Pts %': (o_pts.get('inPaint') / o_pts.get('total') * 100) if o_pts.get('total') else None,
@@ -635,6 +649,100 @@ def load_player_game_logs(team, season=None):
             })
     df = pd.DataFrame(rows)
     return df.sort_values('Date').reset_index(drop=True) if not df.empty else df
+
+
+@st.cache_data(ttl=21600)
+def load_defense_allowed_by_role(team, season=None):
+    """
+    Cross-references every opponent on `team`'s schedule to find out what
+    its defense allows by opposing-player ROLE (Ball-Handler/Post Player/
+    Shooter/Wing-Combo, see data.transforms.classify_player_role) - a stat
+    no single CBBD endpoint provides, since "defense vs. role" isn't
+    published anywhere free for CBB (checked directly: CBBD's spec has no
+    shot-location or play-type breakdown; the closest things, /lineups and
+    /plays, are possession/shot-clock logs, not role-tagged defensive
+    splits - see HANDOFF §7).
+
+    Built entirely from three loaders this app already has (zero new
+    endpoints): for every opponent on `team`'s schedule (load_team_games),
+    pulls that OPPONENT's own roster (load_team_roster, for the id<->
+    sourceId bridge - see load_team_roster's docstring on why the season-
+    stats id namespace and the game-log id namespace don't match), their
+    season stats (load_team_player_stats, to compute each of THEIR
+    players' role from their OWN season-long tendency - not from what they
+    did against `team`, which would be circular), and their game log
+    (load_player_game_logs, filtered to just the game(s) they played
+    against `team`). That's "what did this specific opposing player, who
+    IS a Ball-Handler on his own team all season, produce against `team`'s
+    defense specifically" - repeated across the whole schedule.
+
+    This is the heaviest pull in the app - roughly 3 extra API calls per
+    opponent (roster + season stats + game log), so ~60-90 calls for a
+    full ~20-30 game schedule. Every underlying loader is independently
+    cached and shared with Player Search/Compare/Matchup Analyzer, so
+    opponents already viewed elsewhere this session are free; this
+    function itself is also cached. NEVER call this on tab load - only
+    from an explicit "Analyze Defense" button click (see
+    ui/tabs/matchup_analyzer.py), same expensive-pull/user-gated pattern
+    as the NCAA NET manual scrape.
+
+    Returns a DataFrame with one row per (game, opposing player who could
+    be role-classified): Date, Opponent, OpposingPlayer, Role, Points,
+    Rebounds, Assists, ThreesMade - or empty if the schedule can't be
+    resolved. A given opponent is silently skipped (not an error) if any
+    of its three pulls comes back empty, same "never raises" contract as
+    every other loader here.
+    """
+    from data.transforms import player_rate_profile, classify_player_role
+
+    season = season or current_cbb_season()
+    games = load_team_games(team, season)
+    if games.empty:
+        return pd.DataFrame()
+    opponents = sorted(games['Opponent'].dropna().unique().tolist())
+
+    rows = []
+    for opp in opponents:
+        roster = load_team_roster(opp, season)
+        season_stats = load_team_player_stats(opp, season)
+        if roster.empty or season_stats.empty:
+            continue
+        merged = season_stats.merge(
+            roster[['id', 'sourceId', 'name']], left_on='athleteId', right_on='id', how='inner',
+        )
+        if merged.empty:
+            continue
+        role_by_source_id = {}
+        for _, p in merged.iterrows():
+            profile = player_rate_profile(p.to_dict())
+            primary, _ = classify_player_role(profile)
+            if primary and pd.notna(p.get('sourceId')):
+                role_by_source_id[p['sourceId']] = (primary, p.get('name'))
+        if not role_by_source_id:
+            continue
+
+        opp_logs = load_player_game_logs(opp, season)
+        if opp_logs.empty:
+            continue
+        vs_team = opp_logs[opp_logs['Opponent'] == team]
+        if vs_team.empty:
+            continue
+        for _, g in vs_team.iterrows():
+            role_info = role_by_source_id.get(g.get('athleteSourceId'))
+            if not role_info:
+                continue
+            role, player_name = role_info
+            rows.append({
+                'Date': g.get('Date'),
+                'Opponent': opp,
+                'OpposingPlayer': player_name or g.get('name'),
+                'Role': role,
+                'Points': g.get('Points') or 0,
+                'Rebounds': g.get('Rebounds') or 0,
+                'Assists': g.get('Assists') or 0,
+                'ThreesMade': g.get('3PM') or 0,
+            })
+    return pd.DataFrame(rows)
 
 
 def _odds_api_key():
