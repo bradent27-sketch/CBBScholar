@@ -17,9 +17,11 @@ from config import AVAILABLE_SEASONS
 from data.loaders import (
     current_cbb_season, load_efficiency_ratings, load_all_team_season_stats, load_team_games,
 )
-from data.transforms import four_factors_matchup, style_profile, project_score, recent_form, pct_rank
+from data.transforms import (
+    four_factors_matchup, style_profile, project_score, recent_form, pct_rank, margin_volatility,
+)
 from ui.components import render_coming_soon
-from ui.charts import render_mirror_bars, render_form_strip
+from ui.charts import render_mirror_bars, render_form_strip, render_margin_chart
 
 # Standard CBB home-court advantage in points (~3 historically, all venues
 # pooled) - a flat constant, not a per-arena model.
@@ -162,6 +164,30 @@ def render():
     render_form_strip(team_a, chips_a, elo_a)
     render_form_strip(team_b, chips_b, elo_b)
     st.caption("Hover a chip for the score and opponent. Elo trend spans the shown window (Elo via CollegeBasketballData.com).")
+
+    # --- Season margin trend + consistency ----------------------------------
+    st.markdown("<div class='custom-section-header'>SEASON MARGIN TREND &amp; CONSISTENCY</div>", unsafe_allow_html=True)
+    st.caption(
+        "Every completed game this season, bar height = scoring margin (green = win, red = loss, "
+        "split at zero) — same game logs already pulled for Recent Form above, no extra API cost. "
+        "A steady team hugs a consistent band; a streaky one swings wide game to game."
+    )
+    for team, games in ((team_a, games_a), (team_b, games_b)):
+        if games is None or games.empty:
+            continue
+        game_dicts = [{
+            'margin': int(g['Margin']),
+            'tooltip': f"{g['Result']} {g['PF']}-{g['PA']} {g['Home/Away']} {g['Opponent']} ({g['Date']})",
+        } for _, g in games.iterrows()]
+        st.markdown(f"**{team}**")
+        render_margin_chart(game_dicts)
+        vol = margin_volatility(games)
+        if vol:
+            v1, v2, v3, v4 = st.columns(4)
+            v1.metric("Volatility (σ margin)", f"{vol['std']:.1f} pts", help="Population std. dev. of scoring margin — lower means steadier night-to-night performance.")
+            v2.metric("Best Margin", f"+{vol['best_margin']}")
+            v3.metric("Worst Margin", f"{vol['worst_margin']}")
+            v4.metric("Close-Game Record", f"{vol['close_wins']}-{vol['close_losses']}", help="Games decided by 5 points or fewer.")
 
     st.caption(
         "Projected edge, score, and win probability are estimates from adjusted ratings plus a flat "

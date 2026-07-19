@@ -11,6 +11,40 @@ CollegeBasketballData.com (free key, configured), ESPN's public endpoints
 subsystem exists for this app at all — there's no PFF product for college
 basketball.
 
+**Fixed this pass: the "API keys aren't connected" bug.** Both real keys
+had been typed into `.streamlit/secrets.toml.example` (git-tracked)
+instead of `.streamlit/secrets.toml` (git-ignored, the file `st.secrets`
+actually reads) — so `secrets.toml` itself was never created, and the
+sidebar correctly reported "Not set" even though real key values existed
+*somewhere* in the repo. Symptom and root cause matched exactly: a fresh
+clone of this repo had only the `.example` file on disk, no `secrets.toml`.
+Fixed by moving the real values into a local, git-ignored
+`.streamlit/secrets.toml` and restoring `.example` to placeholder text.
+**Consequence: both real keys were committed to git history in the initial
+commit.** Even though this is a private repo, that's a live-credential
+leak via git history, not just the current file tree — **rotate both
+keys** (new CollegeBasketballData.com key at its `/key` page, new Odds API
+key at its dashboard) and update the local `secrets.toml` with the new
+values; the old ones stay recoverable from history otherwise. Purging git
+history (filter-repo/BFG + force-push) is a further option but wasn't done
+here — it rewrites shared history and needs sign-off before doing that on
+a repo that may have been cloned elsewhere.
+
+**Added this pass: three genuinely new analysis/viz pieces, not ported
+from NFL/CFB Scholar** (see §3 for detail): a per-team statistical "DNA"
+radar (Team Efficiency), a live stat-vs-Net-Rating correlation panel
+("What Wins This Season", Team Efficiency), and a season-long margin/
+volatility chart with close-game record (Matchup Analyzer). All three
+reuse data already being pulled elsewhere in the app — zero new API
+calls, zero new endpoints. `ui/charts.py` gained three new chart functions
+for this (`render_radar_chart`, `render_correlation_bars`,
+`render_margin_chart`) — **this breaks the "byte-identical with CFB
+Scholar" invariant** documented in §4/§8 below, since the new functions
+are additions specific to this pass, not yet back-ported to CFB Scholar.
+They're written sport-agnostically on purpose (generic radar/correlation/
+margin primitives, no CBB-specific logic) so back-porting later is a
+straight file sync if wanted — just hasn't been done as part of this pass.
+
 ## 1. Architecture
 
 Same 3-layer separation as NFL Scholar / CFB Scholar. `data/loaders.py`'s
@@ -94,6 +128,38 @@ over scraping" default; nowhere else in either app scrapes anything.
   net rating, split into groups of 4 per seed line (1-16). Explicitly NOT
   a selection-committee simulation - no auto-bids, no resume factors (see
   NET & Resume), no bracket geography. Labeled as such in the tab itself.
+- **Team DNA radar** (`data/transforms.team_dna_profile` +
+  `ui/charts.render_radar_chart`, in Team Efficiency): a 7-axis percentile
+  profile per team - Offense, Defense, Tempo, 3PT Volume, Off. Rebounding,
+  Ball Security, Takeaways - all derived from the two full-D-I pulls
+  (`/ratings/adjusted`, `/stats/team/season`) already cached for other
+  tabs, so this costs zero extra API calls. Ball Security and Takeaways
+  are both oriented so "further out on the axis = better", even though the
+  underlying raw stat (TO Ratio) is lower-is-better on the offense side -
+  every axis on the radar reads the same direction. Up to 3 teams overlay
+  on one chart to compare shape (identity), not just size (quality).
+- **"What Wins This Season" correlation panel**
+  (`data/transforms.stat_win_correlations` +
+  `ui/charts.render_correlation_bars`, in Team Efficiency): live Pearson
+  correlation of every Four Factor/style column against the current
+  season's adjusted Net Rating, across all of D-I, recomputed from real
+  data on every load rather than a hardcoded assumption about what
+  matters. Sign is flipped for defensive-allowed columns (`Def eFG%`,
+  `Def ORB%`, `Def FT Rate`) so the displayed value always means "being
+  good at this stat associates with winning" when positive - style/tempo
+  columns with no inherent good direction (Pace, 3PA Rate, Paint Pts %,
+  Fast Break %) keep their raw sign and render in a neutral color instead
+  of green/red. This is the app's first real inferential-statistics
+  feature (everything else is descriptive/percentile); it's still
+  correlation, not causation, and is labeled as such in the tab.
+- **Season margin trend + consistency**
+  (`data/transforms.margin_volatility` + `ui/charts.render_margin_chart`,
+  in Matchup Analyzer): every completed game's scoring margin as a
+  zero-centered bar (green above for wins, red below for losses) plus
+  population std-dev of margin ("volatility"), best/worst margins, and the
+  close-game (≤5 pt) win-loss split - all computed from the same
+  `load_team_games` pull Recent Form already makes for the last-5 strips,
+  just over the full season instead of the last 5.
 
 ## 4. UI conventions
 
@@ -154,6 +220,18 @@ cards, full-bleed layout. Same `render_coming_soon()` reuse for setup
   but a bare `urllib` probe gets `403 Forbidden` on every path including
   `/api-docs.json`. Easy to misread as an auth/key problem when testing
   endpoints outside the app.
+- **The setup-status sidebar checks `st.secrets`, which ONLY reads
+  `.streamlit/secrets.toml` - never `.streamlit/secrets.toml.example`.**
+  Hit for real: the live keys ended up typed into the `.example` file
+  (git-tracked) instead of `secrets.toml` (git-ignored), so the actual
+  secrets file was never created and the sidebar correctly reported both
+  keys as "Not set" despite real values existing in the repo. Fresh-machine
+  setup (§9) says "copy `.example` to `secrets.toml`" for exactly this
+  reason - editing the `.example` file directly and stopping there looks
+  like it should work (the values are right there) but Streamlit never
+  reads that filename. If setup status ever again disagrees with "I
+  definitely entered a key", check which literal filename holds the values
+  before assuming the key itself is bad.
 
 ## 6. Verification workflow (what "done" means for this pass)
 
@@ -164,6 +242,27 @@ confirm zero `"hit an error"` text anywhere, confirm the live tabs show
 real current data (Live Odds correctly shows "no games" in July - CBB is
 in its off-season).
 
+**Verification note for the API-key-fix + Team DNA / What Wins / Margin
+Trend pass:** done from a sandboxed environment with no outbound network
+access to `collegebasketballdata.com`, `the-odds-api.com`, `espn.com`, or
+`ncaa.com` (confirmed - every direct request was rejected at the network
+policy level, not by the APIs themselves). Verified what was possible from
+there: the secrets fix via a real headless run of the app (Playwright
+screenshot confirmed the sidebar flips from "Not set" to "Configured" for
+both keys once `secrets.toml` exists in the right place - this part needed
+no external network, since it's purely local file → `st.secrets`); the
+three new transforms functions against realistic synthetic DataFrames
+shaped exactly like the real loaders' output (column names/dtypes matched
+by hand against `data/loaders.py`); and both new tab sections end-to-end
+via `streamlit.testing.v1.AppTest` with the loader functions monkeypatched
+to return that same synthetic data - confirms no exceptions across the
+full render path (radar chart, correlation bars, margin chart, all the
+`st.dataframe`/`st.metric`/`st.multiselect` calls around them) without
+needing a live server. **Not yet done: a real click-through with live API
+data**, since that requires normal internet access this sandbox doesn't
+have - do that once on a machine with real connectivity before calling
+this pass fully verified, same bar as every prior pass in this doc.
+
 ## 7. Deliberately NOT done / parked
 
 Formerly parked and now DONE in the data-viz pass: game-by-game logs (with
@@ -173,6 +272,9 @@ Factors/style/efficiency percentiles — the "full-D-I pull" turned out to be
 ONE cached call via `/stats/team/season`, not the per-team fan-out
 originally feared), and `data/transforms.py` is no longer empty.
 
+Also now DONE (this pass): the Team DNA radar, the "What Wins This Season"
+correlation panel, and the season margin trend/consistency chart - see §3.
+
 Still parked: PLAYER-level league-wide percentiles (that one genuinely
 needs a full-D-I player pull; `/stats/player/season` is team-scoped).
 Per-arena home-court values (flat 3-point constant instead). Tempo-free
@@ -180,7 +282,9 @@ possession-length or lineup data (`/lineups`, `/plays` exist in the spec —
 unexplored). `cbbd` Python package vs. raw `requests` - unchanged. UI
 charts are hand-rolled inline SVG on purpose (theme-exact, zero deps,
 native hover tooltips) - revisit only if interactivity needs outgrow
-`<title>` tooltips.
+`<title>` tooltips. Back-porting the three new `ui/charts.py` functions to
+CFB Scholar to restore the "byte-identical" invariant (see note at the top
+of this doc) - not done, needs a separate pass in that repo.
 
 ## 8. Constraints (user-set, don't violate)
 

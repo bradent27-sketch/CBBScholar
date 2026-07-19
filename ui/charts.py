@@ -8,6 +8,7 @@ between CFB Scholar and CBB Scholar (sport-agnostic by design - keep it
 that way; sport-specific logic belongs in the calling tab or transforms).
 """
 import html
+import math
 
 import pandas as pd
 import streamlit as st
@@ -367,6 +368,187 @@ def render_efficiency_scatter(df, x_col, y_col, color_map, invert_y=False,
         parts.append(
             f"<text x='{x + 10:.1f}' y='{yv + 4:.1f}' font-size='11.5' font-weight='700' fill='#ffffff' "
             f"style='paint-order:stroke; stroke:{C['surface']}; stroke-width:3px;'>{_esc(team)}</text>"
+        )
+    parts.append("</svg>")
+    st.markdown("".join(parts), unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
+# Statistical-identity radar ("shape" of a team/player across N dimensions)
+# ---------------------------------------------------------------------------
+
+def render_radar_chart(labels, series, help_texts=None):
+    """
+    Multi-axis percentile radar, up to a few overlaid series. `labels`: N
+    axis names around the ring. `series`: [{'name', 'color', 'values'}, ...]
+    - `values` are 0-100 (percentiles), same order/length as `labels`, so
+    every axis shares one scale regardless of the underlying stat's own
+    units. `help_texts`: optional per-axis tooltip strings (same order as
+    `labels`). Sport-agnostic like every other chart here - which stats
+    become axes, and what "100" means for each, is entirely the caller's
+    call (see data/transforms.py's profile builder).
+    """
+    n = len(labels)
+    if n < 3 or not series:
+        return
+    help_texts = help_texts or [''] * n
+    W, H = 860, 520
+    cx, cy = W / 2, H / 2 - 6
+    R = 185
+
+    def angle(i):
+        return -math.pi / 2 + i * 2 * math.pi / n
+
+    def point(i, val):
+        r = R * max(0.0, min(100.0, val)) / 100.0
+        a = angle(i)
+        return cx + r * math.cos(a), cy + r * math.sin(a)
+
+    parts = [
+        f"<svg viewBox='0 0 {W} {H}' xmlns='http://www.w3.org/2000/svg' "
+        f"style='width:100%; height:auto; font-family:{_BODY_FONT};'>"
+    ]
+    # Grid rings (25/50/75/100) + spokes
+    for ring in (25, 50, 75, 100):
+        pts = " ".join(f"{point(i, ring)[0]:.1f},{point(i, ring)[1]:.1f}" for i in range(n))
+        dash = "none" if ring == 100 else "3,4"
+        parts.append(f"<polygon points='{pts}' fill='none' stroke='{C['outline_variant']}' stroke-width='1' stroke-dasharray='{dash}'/>")
+    for i in range(n):
+        ex, ey = point(i, 100)
+        parts.append(f"<line x1='{cx:.1f}' y1='{cy:.1f}' x2='{ex:.1f}' y2='{ey:.1f}' stroke='{C['outline_variant']}' stroke-width='1'/>")
+        lx, ly = point(i, 118)
+        anchor = 'middle' if abs(lx - cx) < 8 else ('start' if lx > cx else 'end')
+        baseline = ly + (10 if ly > cy + 8 else (-4 if ly < cy - 8 else 4))
+        parts.append(
+            f"<text x='{lx:.1f}' y='{baseline:.1f}' text-anchor='{anchor}' font-size='11' font-weight='600' "
+            f"fill='{C['on_surface_variant']}'>{_esc(labels[i])}"
+            f"<title>{_esc(help_texts[i] if i < len(help_texts) else '')}</title></text>"
+        )
+    # Series polygons (drawn after the grid so they sit on top)
+    for s in series:
+        color = s.get('color') or C['primary']
+        vals = s['values']
+        pts = [point(i, vals[i]) for i in range(n) if vals[i] is not None and not pd.isna(vals[i])]
+        if len(pts) < 3:
+            continue
+        d = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
+        parts.append(f"<polygon points='{d}' fill='{color}' fill-opacity='0.16' stroke='{color}' stroke-width='2.2' stroke-linejoin='round'/>")
+        for i in range(n):
+            v = vals[i]
+            if v is None or pd.isna(v):
+                continue
+            x, y = point(i, v)
+            parts.append(
+                f"<circle cx='{x:.1f}' cy='{y:.1f}' r='3.6' fill='{color}' stroke='{C['surface']}' stroke-width='1'>"
+                f"<title>{_esc(s.get('name', ''))} — {_esc(labels[i])}: {v:.0f}th percentile</title></circle>"
+            )
+    # Legend
+    if len(series) > 1:
+        lx = cx - (len(series) - 1) * 70
+        for s in series:
+            color = s.get('color') or C['primary']
+            parts.append(f"<circle cx='{lx:.1f}' cy='{H - 14}' r='5' fill='{color}'/>")
+            parts.append(f"<text x='{lx + 10:.1f}' y='{H - 10}' font-size='12' font-weight='600' fill='{C['on_surface']}'>{_esc(s.get('name', ''))}</text>")
+            lx += 140
+    parts.append("</svg>")
+    st.markdown("".join(parts), unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
+# Signed correlation bars ("what actually correlates with winning")
+# ---------------------------------------------------------------------------
+
+def render_correlation_bars(rows):
+    """
+    Horizontal bars diverging from a center zero-line - one row per stat,
+    bar length/direction = its correlation with the season's Net Rating
+    (see data/transforms.stat_win_correlations). `rows`: [{'label', 'help',
+    'display_r', 'neutral', 'n'}, ...]. `display_r` in [-1, 1]: positive
+    (green) = being GOOD at this stat associates with winning this season;
+    negative (red) = counterintuitively associates with losing. `neutral`
+    rows (style/tempo stats with no inherent good direction, e.g. pace) get
+    a neutral color instead of green/red since sign there means direction
+    of correlation, not good/bad.
+    """
+    if not rows:
+        return
+    W, ROW_H, LABEL_W = 860, 32, 190
+    half = (W - 40) / 2
+    cx = LABEL_W + half
+    H = ROW_H * len(rows) + 20
+    parts = [
+        f"<svg viewBox='0 0 {W} {H}' xmlns='http://www.w3.org/2000/svg' "
+        f"style='width:100%; height:auto; font-family:{_BODY_FONT};'>"
+    ]
+    parts.append(f"<line x1='{cx:.1f}' y1='4' x2='{cx:.1f}' y2='{H - 4}' stroke='{C['outline_variant']}' stroke-width='1'/>")
+    max_bar = half - 46
+    y = 0
+    for r in rows:
+        cy = y + ROW_H / 2
+        val = r.get('display_r') or 0.0
+        bar_len = max_bar * min(abs(val), 1.0)
+        if r.get('neutral'):
+            color = C['tertiary']
+        else:
+            color = C['positive'] if val >= 0 else C['negative']
+        x0 = cx if val >= 0 else cx - bar_len
+        tooltip = f"{r['label']}: r = {val:+.2f} (n={r.get('n', '?')} teams) — {r.get('help', '')}"
+        parts.append(
+            f"<text x='{LABEL_W - 10}' y='{cy + 4:.1f}' text-anchor='end' font-size='11.5' font-weight='600' "
+            f"fill='{C['on_surface']}'>{_esc(r['label'])}<title>{_esc(tooltip)}</title></text>"
+        )
+        parts.append(
+            f"<rect x='{x0:.1f}' y='{cy - 9:.1f}' width='{max(bar_len, 2.0):.1f}' height='18' rx='3' fill='{color}'>"
+            f"<title>{_esc(tooltip)}</title></rect>"
+        )
+        label_x = x0 + bar_len + 8 if val >= 0 else x0 - 8
+        anchor = 'start' if val >= 0 else 'end'
+        parts.append(
+            f"<text x='{label_x:.1f}' y='{cy + 4:.1f}' text-anchor='{anchor}' font-size='10.5' "
+            f"font-family='{_MONO_FONT}' fill='{C['on_surface_variant']}'>{val:+.2f}</text>"
+        )
+        y += ROW_H
+    parts.append("</svg>")
+    st.markdown("".join(parts), unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
+# Season margin trend (win/loss margin per game, zero-centered)
+# ---------------------------------------------------------------------------
+
+def render_margin_chart(games):
+    """
+    One bar per completed game (season order), height/direction = scoring
+    margin, split at a zero baseline (win margin up in `positive`, loss
+    margin down in `negative`) so a season's shape - steady vs. streaky,
+    building vs. fading - reads at a glance. `games`: [{'margin',
+    'tooltip'}, ...] in chronological order.
+    """
+    if not games:
+        return
+    W, H, MB, MT = 860, 220, 22, 16
+    plot_h = H - MB - MT
+    zero_y = MT + plot_h / 2
+    n = len(games)
+    slot = W / n
+    bar_w = min(40.0, slot * 0.62)
+    vmax = max(abs(g['margin']) for g in games) or 1
+    scale = (plot_h / 2) / vmax
+    parts = [
+        f"<svg viewBox='0 0 {W} {H}' xmlns='http://www.w3.org/2000/svg' "
+        f"style='width:100%; height:auto; font-family:{_BODY_FONT};'>"
+    ]
+    parts.append(f"<line x1='0' y1='{zero_y:.1f}' x2='{W}' y2='{zero_y:.1f}' stroke='{C['outline_variant']}' stroke-width='1.2'/>")
+    for i, g in enumerate(games):
+        margin = g['margin']
+        h = abs(margin) * scale
+        x = slot * i + (slot - bar_w) / 2
+        is_win = margin > 0
+        y = zero_y - h if is_win else zero_y
+        color = C['positive'] if is_win else C['negative']
+        parts.append(
+            f"<rect x='{x:.1f}' y='{y:.1f}' width='{bar_w:.1f}' height='{max(h, 1.5):.1f}' rx='2.5' fill='{color}' opacity='0.85'>"
+            f"<title>{_esc(g['tooltip'])}</title></rect>"
         )
     parts.append("</svg>")
     st.markdown("".join(parts), unsafe_allow_html=True)

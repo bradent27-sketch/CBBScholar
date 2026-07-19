@@ -224,3 +224,145 @@ def last_n_form(player_games, cols=('Points', 'Rebounds', 'Assists'), n=5):
         if len(s) >= max(n, 2):
             out[col] = (float(s.tail(n).mean()), float(s.mean()))
     return out
+
+
+# ---------------------------------------------------------------------------
+# Team DNA radar profile
+# ---------------------------------------------------------------------------
+
+def team_dna_profile(ratings_df, team_stats_df, team):
+    """
+    Seven-axis percentile profile for ui.charts.render_radar_chart - two
+    axes from adjusted efficiency (ratings_df, /ratings/adjusted), five
+    from the Four Factors/style sheet (team_stats_df,
+    /stats/team/season) - both already full-D-I pulls cached elsewhere in
+    the app, so every axis is a real league-wide percentile, not a
+    per-matchup one, at zero extra API cost. Ball Security and Takeaways
+    are both oriented so higher-on-the-axis always means 'better', even
+    though the underlying raw stat (TO Ratio) is 'lower is better' for the
+    offense side. Returns (labels, values, help_texts) or None if the team
+    is missing from either source.
+    """
+    er = ratings_df[ratings_df['Team'] == team]
+    ts = team_stats_df[team_stats_df['Team'] == team]
+    if er.empty or ts.empty:
+        return None
+    er, ts = er.iloc[0], ts.iloc[0]
+    dims = [
+        ('Offense', pct_rank(ratings_df['Off Rating'], er['Off Rating'], higher_is_better=True),
+         "Adjusted offensive rating percentile — points/100 possessions vs. the D-I average, opponent-adjusted."),
+        ('Defense', pct_rank(ratings_df['Def Rating'], er['Def Rating'], higher_is_better=False),
+         "Adjusted defensive rating percentile (lower raw rating = better defense, already inverted here)."),
+        ('Tempo', pct_rank(team_stats_df['Pace'], ts['Pace'], higher_is_better=True),
+         "Possessions per 40 minutes, percentile vs. D-I — style, not a quality judgment; a deliberately slow team scores low here."),
+        ('3PT Volume', pct_rank(team_stats_df['3PA Rate'], ts['3PA Rate'], higher_is_better=True),
+         "Share of field goal attempts from three, percentile vs. D-I — style, not quality."),
+        ('Off. Rebounding', pct_rank(team_stats_df['Off ORB%'], ts['Off ORB%'], higher_is_better=True),
+         "Share of the team's own misses that it rebounds, percentile vs. D-I."),
+        ('Ball Security', pct_rank(team_stats_df['Off TO Ratio'], ts['Off TO Ratio'], higher_is_better=False),
+         "Turnovers per offensive possession, inverted so higher on this axis = fewer turnovers."),
+        ('Takeaways', pct_rank(team_stats_df['Def TO Ratio'], ts['Def TO Ratio'], higher_is_better=True),
+         "Turnovers forced per defensive possession, percentile vs. D-I — higher = more disruptive defense."),
+    ]
+    return [d[0] for d in dims], [d[1] for d in dims], [d[2] for d in dims]
+
+
+# ---------------------------------------------------------------------------
+# "What wins" - live correlation of each Four Factor/style stat with
+# this season's adjusted Net Rating, across the full D-I field.
+# ---------------------------------------------------------------------------
+
+# (display label, team_stats_df column, higher_is_better, help text).
+# higher_is_better=None marks a style/tempo stat with no inherent "good"
+# direction (pace, shot selection) - its correlation sign is reported as-is
+# rather than flipped, and the chart colors it neutrally rather than
+# green/red.
+WIN_CORRELATES = [
+    ('Off eFG%', 'Off eFG%', True, "Effective FG% on offense — the single heaviest Four Factor."),
+    ('Def eFG% Allowed', 'Def eFG%', False, "Effective FG% allowed on defense (lower allowed = better D)."),
+    ('Off TO Ratio', 'Off TO Ratio', False, "Turnovers per offensive possession (lower = better ball security)."),
+    ('Def TO Ratio Forced', 'Def TO Ratio', True, "Turnovers forced per defensive possession (higher = more disruptive)."),
+    ('Off ORB%', 'Off ORB%', True, "Share of own misses rebounded."),
+    ('Def ORB% Allowed', 'Def ORB%', False, "Opponent offensive rebound rate allowed (lower = better defensive rebounding)."),
+    ('Off FT Rate', 'Off FT Rate', True, "Free throw attempts relative to field goal attempts."),
+    ('Def FT Rate Allowed', 'Def FT Rate', False, "Opponent FT rate allowed (lower = fouls less)."),
+    ('Pace', 'Pace', None, "Possessions per 40 minutes — style, no inherent good/bad direction."),
+    ('3PA Rate', '3PA Rate', None, "Share of field goal attempts from three — style."),
+    ('Paint Pts %', 'Paint Pts %', None, "Share of points scored in the paint — style."),
+    ('Fast Break %', 'Fast Break %', None, "Share of points scored in transition — style."),
+]
+
+
+def stat_win_correlations(team_stats_df, ratings_df, min_n=8):
+    """
+    Live Pearson correlation of every Four Factors/style column (from the
+    already-cached full-D-I /stats/team/season pull) against this season's
+    adjusted Net Rating (/ratings/adjusted, also already cached) - zero
+    extra API cost, and genuinely recomputed from real current-season data
+    rather than a hardcoded assumption about "what wins games." `display_r`
+    flips sign for columns whose natural "good" direction is LOWER
+    (defensive-allowed stats) so that positive/green always reads "being
+    good at this associates with winning" - style/tempo columns keep their
+    raw sign and are flagged `neutral`. Returns rows sorted by
+    |display_r| descending; a column is skipped if fewer than `min_n` teams
+    have both values.
+    """
+    if team_stats_df is None or team_stats_df.empty or ratings_df is None or ratings_df.empty:
+        return []
+    merged = team_stats_df.merge(ratings_df[['Team', 'Net Rating']], on='Team', how='inner')
+    if merged.empty:
+        return []
+    y = pd.to_numeric(merged['Net Rating'], errors='coerce')
+    rows = []
+    for label, col, higher_is_better, help_text in WIN_CORRELATES:
+        if col not in merged.columns:
+            continue
+        x = pd.to_numeric(merged[col], errors='coerce')
+        valid = x.notna() & y.notna()
+        if valid.sum() < min_n:
+            continue
+        r = x[valid].corr(y[valid])
+        if r is None or pd.isna(r):
+            continue
+        display_r = r if higher_is_better is not False else -r
+        rows.append({
+            'label': label,
+            'help': help_text,
+            'r': float(r),
+            'display_r': float(display_r),
+            'neutral': higher_is_better is None,
+            'n': int(valid.sum()),
+        })
+    rows.sort(key=lambda d: abs(d['display_r']), reverse=True)
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# Season margin trend + volatility/consistency
+# ---------------------------------------------------------------------------
+
+def margin_volatility(games_df, close_margin=5):
+    """
+    Season-long scoring-margin descriptives from a team's completed
+    schedule (data.loaders.load_team_games): population std dev of margin
+    ("volatility" - lower = steadier performance night to night), best/
+    worst margins, and the close-game record (games decided by
+    `close_margin` points or fewer - the standard "clutch" cut). Returns {}
+    if fewer than 2 completed games.
+    """
+    if games_df is None or games_df.empty:
+        return {}
+    m = pd.to_numeric(games_df['Margin'], errors='coerce')
+    valid = games_df[m.notna()]
+    if len(valid) < 2:
+        return {}
+    mv = pd.to_numeric(valid['Margin'], errors='coerce')
+    close = valid[mv.abs() <= close_margin]
+    return {
+        'std': float(mv.std(ddof=0)),
+        'best_margin': int(mv.max()),
+        'worst_margin': int(mv.min()),
+        'close_wins': int((close['Result'] == 'W').sum()),
+        'close_losses': int((close['Result'] == 'L').sum()),
+        'close_n': int(len(close)),
+    }

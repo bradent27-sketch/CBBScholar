@@ -1,13 +1,18 @@
 """Team Efficiency tab: adjusted offensive/defensive efficiency and net
 rating for every D-I team, live via CollegeBasketballData.com - with an
 offense-vs-defense efficiency landscape scatter (the classic KenPom-style
-four-quadrant view) and in-table rating meters."""
+four-quadrant view), in-table rating meters, a per-team "Team DNA" radar
+(statistical identity across 7 percentile axes), and a live "What Wins"
+correlation panel (every Four Factor/style stat's real correlation with
+this season's Net Rating, recomputed from the current data - not a
+hardcoded assumption)."""
 import streamlit as st
 
 from config import AVAILABLE_SEASONS
-from data.loaders import current_cbb_season, load_efficiency_ratings, team_color_map
+from data.loaders import current_cbb_season, load_efficiency_ratings, load_all_team_season_stats, team_color_map
+from data.transforms import team_dna_profile, stat_win_correlations
 from ui.components import render_coming_soon
-from ui.charts import render_efficiency_scatter
+from ui.charts import render_efficiency_scatter, render_radar_chart, render_correlation_bars
 from ui.styling import style_plain_dataframe, df_auto_height, build_column_help_config
 
 
@@ -72,3 +77,59 @@ def render():
         "for opponent strength — this app's KenPom-equivalent (Def Rating: lower = better). "
         "Net and Off Rating columns render as league-scaled meters."
     )
+
+    team_stats = load_all_team_season_stats(season)
+
+    # --- Team DNA radar -----------------------------------------------------
+    if not team_stats.empty:
+        st.markdown("<div class='custom-section-header'>TEAM DNA</div>", unsafe_allow_html=True)
+        st.caption(
+            "Seven-axis statistical identity — every axis is a real D-I percentile, so the SHAPE "
+            "is what matters: a big, round shape is elite everywhere, a spiky one is boom-or-bust "
+            "by design (e.g. elite three-point volume but weak rebounding). Overlay a second team to "
+            "compare identities, not just quality."
+        )
+        all_teams = sorted(df['Team'].dropna().tolist())
+        dna_default = [t for t in top5[:1] if t in all_teams] or all_teams[:1]
+        dna_teams = st.multiselect(
+            "Team(s) to profile", all_teams, default=dna_default, key="te_dna_teams",
+            help="Pick up to 3 — more than that gets visually noisy on one radar.",
+        )
+        dna_teams = dna_teams[:3]
+        if not dna_teams:
+            st.info("Pick at least one team to see its statistical DNA.")
+        else:
+            radar_series = []
+            radar_labels, radar_help = None, None
+            for t in dna_teams:
+                profile = team_dna_profile(df, team_stats, t)
+                if not profile:
+                    continue
+                labels, values, help_texts = profile
+                radar_labels, radar_help = labels, help_texts
+                radar_series.append({'name': t, 'color': colors.get(t), 'values': values})
+            if radar_series:
+                render_radar_chart(radar_labels, radar_series, radar_help)
+            else:
+                st.info("No Four Factors data available for the selected team(s) this season.")
+
+        # --- What wins this season ------------------------------------------
+        st.markdown("<div class='custom-section-header'>WHAT WINS IN COLLEGE HOOPS — THIS SEASON</div>", unsafe_allow_html=True)
+        st.caption(
+            "Live Pearson correlation of every Four Factor/style stat against this season's adjusted "
+            "Net Rating, across all of D-I — recomputed from the real current data every time this "
+            "loads, not a fixed assumption. Green = being good at that stat associates with winning "
+            "this season; red = it counterintuitively associates with losing. Amber rows (pace, shot "
+            "selection) have no inherent 'good' direction — sign there just shows which way the "
+            "correlation runs, not good vs. bad."
+        )
+        corr_rows = stat_win_correlations(team_stats, df)
+        if corr_rows:
+            render_correlation_bars(corr_rows)
+            top = corr_rows[0]
+            st.caption(
+                f"Strongest signal this season: **{top['label']}** (r = {top['display_r']:+.2f} vs. Net Rating, "
+                f"n={top['n']} teams). Correlation, not causation — and this season's ranking can shift as more games are played."
+            )
+        else:
+            st.info("Not enough teams with both Four Factors and Net Rating data yet to compute correlations.")
