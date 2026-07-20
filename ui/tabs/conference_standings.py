@@ -9,8 +9,6 @@ from ui.styling import style_plain_dataframe, df_auto_height, build_column_help_
 
 
 def render():
-    st.markdown("<div class='custom-section-header'>CONFERENCE STANDINGS</div>", unsafe_allow_html=True)
-
     default_season = current_cbb_season()
     seasons = AVAILABLE_SEASONS_WITH_UPCOMING if default_season in AVAILABLE_SEASONS_WITH_UPCOMING else [default_season] + AVAILABLE_SEASONS_WITH_UPCOMING
     col_season, col_conf = st.columns([1, 2])

@@ -52,15 +52,31 @@ def render():
             {'label': 'Best Defense', 'value_str': top_def['Team'], 'sub': f"{top_def['Def Rating']:.1f} Def Rtg"},
         ])
 
+    # Two sub-tabs, lazily rendered (same tab.open + key/on_change="rerun"
+    # pattern app.py's top-level tabs use) so the expensive Four Factors
+    # pull below only fires when that sub-tab is actually opened - this is
+    # what was making the whole tab feel laggy on first click before.
+    sub_rankings, sub_four_factors = st.tabs(
+        ["RANKINGS", "FOUR FACTORS TIERING"], key="te_subtab", on_change="rerun"
+    )
+    if sub_rankings.open:
+        with sub_rankings:
+            _render_rankings_subtab(df, colors, ranked)
+    if sub_four_factors.open:
+        with sub_four_factors:
+            _render_four_factors_subtab(df, ranked, season)
+
+
+def _render_rankings_subtab(df, colors, ranked):
     # Efficiency landscape: offense (x, right = better) vs defense
     # (y, inverted so up = better since a LOWER defensive rating is better).
     st.markdown("<div class='custom-section-header'>EFFICIENCY LANDSCAPE</div>", unsafe_allow_html=True)
-    top5 = df.dropna(subset=['Rank']).sort_values('Rank')['Team'].head(5).tolist()
+    top1 = ranked.sort_values('Rank')['Team'].head(1).tolist()
     extra = st.multiselect("Highlight teams", sorted(df['Team'].dropna().tolist()), key="te_highlight",
-                           help="Top 5 by net rating are always highlighted; add any others here.")
+                           help="The #1 team is highlighted by default — add any others you want to compare.")
     render_efficiency_scatter(
         df, 'Off Rating', 'Def Rating', colors, invert_y=True,
-        highlight=set(top5) | set(extra),
+        highlight=set(top1) | set(extra),
         x_label="Adjusted offensive rating (right = better offense)",
         y_label="Adjusted defensive rating (up = better defense)",
     )
@@ -84,28 +100,28 @@ def render():
     st.caption(
         "Net Rating: points per 100 possessions better than an average team, adjusted "
         "for opponent strength — this app's KenPom-equivalent (Def Rating: lower = better). "
-        "Net and Off Rating columns render as league-scaled meters."
+        "Net and Off Rating columns render as league-scaled meters. Rows colored by each team's own color."
     )
 
-    # --- Four Factors tiering heatmap (new, additive) --------------------
-    st.markdown("<div class='custom-section-header'>FOUR FACTORS TIERING</div>", unsafe_allow_html=True)
+
+def _render_four_factors_subtab(df, ranked, season):
     team_stats = load_all_team_season_stats(season)
     if team_stats.empty:
         st.info("Four Factors tiering needs /stats/team/season data, which isn't available right now.")
+        return
+    conf_options = ["Top 25 (Net Rating)"] + sorted(df['Conference'].dropna().unique().tolist())
+    scope = st.selectbox("Scope", conf_options, key="te_ff_scope")
+    if scope == "Top 25 (Net Rating)":
+        scope_teams = ranked.sort_values('Net Rating', ascending=False)['Team'].head(25).tolist()
     else:
-        conf_options = ["Top 25 (Net Rating)"] + sorted(df['Conference'].dropna().unique().tolist())
-        scope = st.selectbox("Scope", conf_options, key="te_ff_scope")
-        if scope == "Top 25 (Net Rating)":
-            scope_teams = ranked.sort_values('Net Rating', ascending=False)['Team'].head(25).tolist()
-        else:
-            scope_teams = df[df['Conference'] == scope]['Team'].dropna().tolist()
-        pct_grid, raw_grid, ff_cols = four_factors_percentile_grid(team_stats, teams=scope_teams)
-        if pct_grid.empty:
-            st.info("No Four Factors data for this scope yet.")
-        else:
-            render_percentile_heatmap(pct_grid, raw_grid, ff_cols)
-            st.caption(
-                "Each cell is that team's D-I percentile on Dean Oliver's Four Factors (shooting, turnovers, "
-                "rebounding, free-throw rate), offense and defense sides shown separately — hover a cell for the "
-                "raw value. Rows sorted by average percentile across all eight columns, best profile first."
-            )
+        scope_teams = df[df['Conference'] == scope]['Team'].dropna().tolist()
+    pct_grid, raw_grid, ff_cols = four_factors_percentile_grid(team_stats, teams=scope_teams)
+    if pct_grid.empty:
+        st.info("No Four Factors data for this scope yet.")
+    else:
+        render_percentile_heatmap(pct_grid, raw_grid, ff_cols)
+        st.caption(
+            "Each cell is that team's D-I percentile on Dean Oliver's Four Factors (shooting, turnovers, "
+            "rebounding, free-throw rate), offense and defense sides shown separately — hover a cell for the "
+            "raw value. Rows sorted by average percentile across all eight columns, best profile first."
+        )

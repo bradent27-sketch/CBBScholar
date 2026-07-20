@@ -8,16 +8,33 @@ on purpose - see CFB Scholar's player_search.py docstring for the same
 reasoning (percentile ranking needs a full-league pull this pass doesn't
 do; game-by-game logs are a later pass).
 """
+import pandas as pd
 import streamlit as st
 
 from config import AVAILABLE_SEASONS
 from data.loaders import (
-    current_cbb_season, load_teams, load_team_roster, load_team_player_stats,
+    current_cbb_season, load_teams, load_team_roster,
     get_player_season_stats, team_color_map, load_player_game_logs,
+    load_conference_player_season_stats, load_all_player_season_stats,
 )
-from data.transforms import breakout_flags, last_n_form
-from ui.components import render_coming_soon, render_team_banner, render_bio_strip, render_stat_tiles
-from ui.charts import render_game_log_bars
+from data.transforms import last_n_form, player_rate_stats, pct_rank
+from ui.components import render_coming_soon, render_team_banner, render_bio_strip
+from ui.charts import render_relative_bars
+from ui.styling import style_plain_dataframe, df_auto_height
+
+_STAT_HELP = {
+    'eFG%': "Effective field goal % - field goal % with made threes counted as 1.5 makes.",
+    'TS%': "True shooting % - scoring efficiency including free throws, the most complete shooting number.",
+    'Net Rating': "Team point differential per 100 possessions while this player is on the floor.",
+    'Usage %': "Share of the team's possessions this player uses while on the floor.",
+}
+
+
+def _num_per_game(total, games):
+    try:
+        return float(total) / float(games)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
 
 
 def _fmt_height(inches):
@@ -96,38 +113,79 @@ def render():
     three = stats.get('threePointFieldGoals') or {}
     ft = stats.get('freeThrows') or {}
     reb = stats.get('rebounds') or {}
+    ts_pct = stats.get('trueShootingPct')
 
-    entries = [
-        {'label': 'PPG', 'value_str': _per_game(stats.get('points'), games)},
-        {'label': 'RPG', 'value_str': _per_game(reb.get('total'), games)},
-        {'label': 'APG', 'value_str': _per_game(stats.get('assists'), games)},
-        {'label': 'SPG', 'value_str': _per_game(stats.get('steals'), games)},
-        {'label': 'BPG', 'value_str': _per_game(stats.get('blocks'), games)},
-        {'label': 'MPG', 'value_str': _per_game(stats.get('minutes'), games)},
-        {'label': 'FG%', 'value_str': _pct(fg.get('pct'))},
-        {'label': '3P%', 'value_str': _pct(three.get('pct'))},
-        {'label': 'FT%', 'value_str': _pct(ft.get('pct'))},
-        {'label': 'eFG%', 'value_str': _pct(stats.get('effectiveFieldGoalPct'))},
-        {'label': 'TS%', 'value_str': _pct((stats.get('trueShootingPct') or 0) * 100) if stats.get('trueShootingPct') is not None else '--'},
-        {'label': 'Net Rating', 'value_str': str(stats.get('netRating', '--'))},
-        {'label': 'Usage %', 'value_str': _pct(stats.get('usage'))},
-        {'label': 'Games', 'value_str': str(games)},
-    ]
-    render_stat_tiles(entries)
-    st.caption("Season stats via CollegeBasketballData.com.")
+    player_values = {
+        'PPG': _num_per_game(stats.get('points'), games),
+        'RPG': _num_per_game(reb.get('total'), games),
+        'APG': _num_per_game(stats.get('assists'), games),
+        'SPG': _num_per_game(stats.get('steals'), games),
+        'BPG': _num_per_game(stats.get('blocks'), games),
+        'MPG': _num_per_game(stats.get('minutes'), games),
+        'FG%': fg.get('pct'),
+        '3P%': three.get('pct'),
+        'FT%': ft.get('pct'),
+        'eFG%': stats.get('effectiveFieldGoalPct'),
+        'TS%': (ts_pct * 100) if ts_pct is not None else None,
+        'Net Rating': stats.get('netRating'),
+        'Usage %': stats.get('usage'),
+    }
+
+    player_conf_series = teams_df.loc[teams_df['Team'] == team, 'Conference']
+    player_conf = player_conf_series.iloc[0] if not player_conf_series.empty else None
+
+    compare_all = st.checkbox(
+        "Compare against all of Division I instead of just this conference (slower on first load this session)",
+        key="ps_compare_all",
+    )
+    if compare_all:
+        with st.spinner("Loading Division I player stats..."):
+            group_df = load_all_player_season_stats(season)
+        group_label = "D-I"
+    elif player_conf:
+        with st.spinner(f"Loading {player_conf} player stats..."):
+            group_df = load_conference_player_season_stats(player_conf, season)
+        group_label = player_conf
+    else:
+        group_df = pd.DataFrame()
+        group_label = "conference"
+
+    rates = player_rate_stats(group_df)
+    rows = []
+    for label, value in player_values.items():
+        value_str = f"{value:.1f}%" if (label.endswith('%') and value is not None) else (f"{value:.1f}" if value is not None else '--')
+        pct = avg_pct = None
+        if value is not None and not rates.empty and label in rates.columns:
+            dist = rates[label].dropna()
+            if not dist.empty:
+                pct = pct_rank(dist, value)
+                avg_pct = pct_rank(dist, dist.mean())
+        rows.append({'label': label, 'help': _STAT_HELP.get(label, ''), 'value_str': value_str, 'pct': pct, 'avg_pct': avg_pct})
+
+    render_relative_bars(rows)
+    if not rates.empty:
+        st.caption(
+            f"Bar position + color: this season's percentile vs. {group_label} (≥5 games played, to keep the "
+            f"comparison group clean). Tick mark = the group's average. {games} games played."
+        )
+    else:
+        st.caption(f"No comparison group available right now — showing raw values only. {games} games played.")
 
     _render_game_log_section(team, season, sel_row)
 
 
-_GAME_LOG_STATS = [('Points', 'Points'), ('Rebounds', 'Rebounds'), ('Assists', 'Assists'),
-                   ('Game Score', 'Game Score'), ('Minutes', 'Minutes')]
+_GAME_LOG_COLS = ['Date', 'Home/Away', 'Opponent', 'Minutes', 'Points', 'Rebounds', 'Assists',
+                  'Steals', 'Blocks', 'Turnovers', 'FGM', 'FGA', '3PM', '3PA', 'Usage', 'Net Rating']
+_GAME_LOG_NON_NUMERIC = ('Date', 'Home/Away', 'Opponent')
 
 
 def _render_game_log_section(team, season, sel_row):
-    """Game-by-game bars with season-average line, breakout flags (games
-    >= 1.5 standard deviations above the player's own season mean), and a
-    last-5-vs-season form readout."""
-    st.markdown("<div class='custom-section-header'>GAME LOG &amp; BREAKOUT GAMES</div>", unsafe_allow_html=True)
+    """Full game log table (every completed game, every core box-score
+    column except Game Score) with a season-averages row anchored directly
+    below it - the table itself has a fixed height so it scrolls
+    internally, keeping the averages row visible no matter where you've
+    scrolled within it - plus a last-5-vs-season form readout."""
+    st.markdown("<div class='custom-section-header'>GAME LOG</div>", unsafe_allow_html=True)
     with st.spinner("Loading game log..."):
         logs = load_player_game_logs(team, season)
     if logs.empty:
@@ -145,40 +203,30 @@ def _render_game_log_section(team, season, sel_row):
         st.info("No per-game data for this player yet this season.")
         return
 
-    labels = [label for _, label in _GAME_LOG_STATS]
-    sel = st.selectbox("Stat", labels, key="ps_gamelog_stat")
-    col = _GAME_LOG_STATS[labels.index(sel)][0]
-
-    import pandas as pd
-    series = mine.dropna(subset=[col]).reset_index(drop=True)
-    values = pd.to_numeric(series[col], errors='coerce').fillna(0).tolist()
-    if not values:
-        st.info("No per-game data for this stat.")
-        return
-    flags = breakout_flags(values)
-    tooltips = [
-        f"{sel}: {v:.0f} — {g['Home/Away']} {g['Opponent']} ({g['Date']})" + (" ★ breakout" if flags[i] else "")
-        for i, (v, (_, g)) in enumerate(zip(values, series.iterrows()))
-    ]
-    avg = sum(values) / len(values)
-    render_game_log_bars(values, tooltips, flags, avg=avg)
-
-    n_breakouts = sum(flags)
-    if n_breakouts:
-        star_games = [f"{g['Home/Away']} {g['Opponent']} ({v:.0f})" for v, f, (_, g) in zip(values, flags, series.iterrows()) if f]
-        st.caption(f"★ Breakout game(s) — at least 1.5σ above their own season average: {', '.join(star_games)}.")
-    else:
-        st.caption("No breakout games yet by the 1.5σ-above-season-average threshold.")
-
-    # Last-5 form vs season average - the heating-up/cooling-off readout.
+    # Last-5 form vs season average - season average listed first/primary,
+    # last-5 called out below it (this order, and this section staying,
+    # was requested explicitly - keep it even though the chart above it
+    # went away).
     form = last_n_form(mine)
     if form:
-        st.markdown("**Last 5 games vs season average**")
+        st.markdown("**Season average — last 5 games below**")
         cols = st.columns(len(form))
         for c, (stat, (recent, season_avg)) in zip(cols, form.items()):
-            c.metric(stat, f"{recent:.1f}", f"{recent - season_avg:+.1f} vs season", delta_color="normal")
+            c.metric(stat, f"{season_avg:.1f}", f"last 5: {recent:.1f} ({recent - season_avg:+.1f})", delta_color="off")
 
-    with st.expander("Full game log table"):
-        show_cols = ['Date', 'Home/Away', 'Opponent', 'Minutes', 'Points', 'Rebounds', 'Assists',
-                     'Steals', 'Blocks', 'Turnovers', 'FGM', 'FGA', '3PM', '3PA', 'Game Score', 'Usage']
-        st.dataframe(mine[[c for c in show_cols if c in mine.columns]], width="stretch", hide_index=True)
+    table_cols = [c for c in _GAME_LOG_COLS if c in mine.columns]
+    st.dataframe(
+        style_plain_dataframe(mine[table_cols]),
+        width="stretch", hide_index=True, height=360,
+    )
+
+    numeric_cols = [c for c in table_cols if c not in _GAME_LOG_NON_NUMERIC]
+    avg_row = {c: round(float(pd.to_numeric(mine[c], errors='coerce').mean()), 1) for c in numeric_cols}
+    for c in _GAME_LOG_NON_NUMERIC:
+        if c in table_cols:
+            avg_row[c] = ''
+    if 'Opponent' in table_cols:
+        avg_row['Opponent'] = f"SEASON AVG ({len(mine)} games)"
+    avg_df = pd.DataFrame([avg_row])[table_cols]
+    st.dataframe(style_plain_dataframe(avg_df), width="stretch", hide_index=True, height=df_auto_height(1))
+    st.caption("Season averages above stay pinned below the table regardless of where you've scrolled within it.")

@@ -275,6 +275,58 @@ def get_player_season_stats(team, season, athlete_id):
     return match.iloc[0].to_dict()
 
 
+@st.cache_data(ttl=21600, show_spinner=False)
+def load_conference_player_season_stats(conference, season=None):
+    """
+    Every player's season stats for every team in one conference, fanned
+    out over the existing per-team load_team_player_stats (already cached
+    individually - a team looked up elsewhere this session is a cache hit
+    here too). This is the 'compare this player to their own conference'
+    distribution ui.tabs.player_search uses by default: cheap enough (one
+    conference is ~8-18 teams) to run automatically, unlike a full-D-I
+    pull. Returns one concatenated wide DataFrame, same shape as
+    load_team_player_stats.
+    """
+    season = season or current_cbb_season()
+    teams_df = load_teams(season)
+    if teams_df.empty:
+        return pd.DataFrame()
+    conf_teams = teams_df[teams_df['Conference'] == conference]['Team'].dropna().tolist()
+    frames = [load_team_player_stats(t, season) for t in conf_teams]
+    frames = [f for f in frames if not f.empty]
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def load_all_player_season_stats(season=None):
+    """
+    Every D-I player's season stats in one cached pull, built the same
+    fan-out way as load_conference_player_season_stats but across every
+    team in load_teams() - genuinely expensive (one HTTP call per D-I team,
+    360+), so this is opt-in from the UI (a "compare vs all of D-I"
+    checkbox), never called automatically on every Player Search visit.
+    Long TTL so the cost is paid once per cache window, not per view.
+    """
+    season = season or current_cbb_season()
+    teams_df = load_teams(season)
+    if teams_df.empty:
+        return pd.DataFrame()
+    all_teams = teams_df['Team'].dropna().tolist()
+    progress = st.progress(0.0, text="Loading Division I player stats (first time this session)...")
+    frames = []
+    for i, t in enumerate(all_teams):
+        df = load_team_player_stats(t, season)
+        if not df.empty:
+            frames.append(df)
+        progress.progress((i + 1) / len(all_teams), text=f"Loading Division I player stats... ({i + 1}/{len(all_teams)} teams)")
+    progress.empty()
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+
 @st.cache_data(ttl=3600)
 def load_efficiency_ratings(season=None):
     """
@@ -367,6 +419,14 @@ def load_recruiting_rankings(season=None):
             'Position': p.get('position'),
             'Stars': p.get('stars'),
             'Committed To': committed.get('name') or 'Uncommitted',
+            # Height/weight field names are UNVERIFIED - this sandbox's
+            # network policy blocks reaching CBBD's API spec directly to
+            # confirm them. Guessed from /teams/roster's confirmed 'height'
+            # (inches)/'weight' (lbs) field names on the same API; degrades
+            # to None -> '--' in the UI if the real field is named
+            # differently or absent, same as every other .get() here.
+            'Height': p.get('height'),
+            'Weight': p.get('weight'),
         })
     df = pd.DataFrame(rows)
     return df.sort_values('Rank') if not df.empty else df
@@ -391,6 +451,9 @@ def load_transfer_portal(season=None):
             'To': dest.get('name') or 'Undecided',
             'Stars': p.get('stars'),
             'Eligibility': p.get('eligibility'),
+            # Same unverified-field-name caveat as load_recruiting_rankings.
+            'Height': p.get('height'),
+            'Weight': p.get('weight'),
         })
     return pd.DataFrame(rows)
 

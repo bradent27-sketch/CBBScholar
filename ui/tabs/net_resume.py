@@ -33,8 +33,6 @@ _NET_DISPLAY_COLS = ['Rank', 'Team', 'Conference', 'Record', 'Prev', 'Quad 1', '
 
 
 def render():
-    st.markdown("<div class='custom-section-header'>NET &amp; RESUME</div>", unsafe_allow_html=True)
-
     st.markdown("**NET Rankings &amp; Quad Records**")
     st.caption(
         "Real data from ncaa.com's official NET rankings page — the only place this exists "
@@ -58,7 +56,11 @@ def render():
                 shown = net_df[net_df['Team'].str.contains(filter_text, case=False, na=False)]
             cols = [c for c in _NET_DISPLAY_COLS if c in shown.columns]
             indexed = shown[cols].set_index('Team')
-            st.dataframe(style_plain_dataframe(indexed), width="stretch", height=df_auto_height(min(len(indexed), 30)))
+            net_colors = team_color_map()
+            st.dataframe(
+                style_plain_dataframe(indexed, team_color_map=net_colors),
+                width="stretch", height=df_auto_height(min(len(indexed), 30)),
+            )
             st.caption(f"{len(shown)} of {len(net_df)} teams shown. Source: ncaa.com, fetched on your request, cached 24h.")
     else:
         st.info("Click above to fetch real NET rank and Quad 1-4 records — cached for 24 hours after each fetch.")
@@ -93,8 +95,9 @@ def render():
     st.caption(f"Week {week}, {season - 1}-{str(season)[2:]} season")
     indexed = df.set_index('Team')
     column_config = build_column_help_config(indexed, pinned_cols=['Rank'])
+    poll_colors = team_color_map(season)
     st.dataframe(
-        style_plain_dataframe(indexed),
+        style_plain_dataframe(indexed, team_color_map=poll_colors),
         width="stretch", height=df_auto_height(len(indexed)),
         column_config=column_config,
     )

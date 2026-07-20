@@ -8,6 +8,53 @@ functions makes an API call of its own.
 import pandas as pd
 
 
+def player_rate_stats(df, min_games=5):
+    """
+    Given a wide player-stats DataFrame (one row per player, nested
+    fieldGoals/threePointFieldGoals/freeThrows/rebounds dicts - the same
+    shape data.loaders.load_team_player_stats returns), compute the flat
+    per-game/percentage columns this app displays (PPG, RPG, ... Net
+    Rating) as a new DataFrame - the group-level equivalent of
+    ui.tabs.compare's per-player _numeric_stat_map, used to build a
+    comparison distribution for ui.charts.render_relative_bars. Players
+    under `min_games` are dropped from the distribution (not from any
+    single-player display elsewhere) so garbage-time/injury-shortened
+    small samples don't distort the comparison group's spread.
+    """
+    if df is None or df.empty or 'games' not in df.columns:
+        return pd.DataFrame()
+    games_raw = pd.to_numeric(df['games'], errors='coerce')
+    work = df[games_raw >= min_games].copy()
+    if work.empty:
+        return pd.DataFrame()
+    games = pd.to_numeric(work['games'], errors='coerce')
+
+    def nested(col, key):
+        if col not in work.columns:
+            return pd.Series([None] * len(work), index=work.index)
+        return work[col].apply(lambda d: (d or {}).get(key) if isinstance(d, dict) else None)
+
+    def col_or_none(col):
+        return work[col] if col in work.columns else pd.Series([None] * len(work), index=work.index)
+
+    ts = pd.to_numeric(col_or_none('trueShootingPct'), errors='coerce')
+    return pd.DataFrame({
+        'PPG': pd.to_numeric(col_or_none('points'), errors='coerce') / games,
+        'RPG': pd.to_numeric(nested('rebounds', 'total'), errors='coerce') / games,
+        'APG': pd.to_numeric(col_or_none('assists'), errors='coerce') / games,
+        'SPG': pd.to_numeric(col_or_none('steals'), errors='coerce') / games,
+        'BPG': pd.to_numeric(col_or_none('blocks'), errors='coerce') / games,
+        'MPG': pd.to_numeric(col_or_none('minutes'), errors='coerce') / games,
+        'FG%': pd.to_numeric(nested('fieldGoals', 'pct'), errors='coerce'),
+        '3P%': pd.to_numeric(nested('threePointFieldGoals', 'pct'), errors='coerce'),
+        'FT%': pd.to_numeric(nested('freeThrows', 'pct'), errors='coerce'),
+        'eFG%': pd.to_numeric(col_or_none('effectiveFieldGoalPct'), errors='coerce'),
+        'TS%': ts * 100 if ts.notna().any() else ts,
+        'Net Rating': pd.to_numeric(col_or_none('netRating'), errors='coerce'),
+        'Usage %': pd.to_numeric(col_or_none('usage'), errors='coerce'),
+    })
+
+
 def pct_rank(series, value, higher_is_better=True):
     """League percentile (0-100) of `value` within `series`. NaN-safe:
     returns None when the value or the distribution is missing, so callers

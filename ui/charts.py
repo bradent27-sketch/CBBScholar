@@ -374,6 +374,65 @@ def render_efficiency_scatter(df, x_col, y_col, color_map, invert_y=False,
 
 
 # ---------------------------------------------------------------------------
+# Relative stat bars (Savant-style: value positioned against a comparison
+# group's distribution, average marked - deliberately no percentile NUMBER
+# shown, just the relative position, per how this was asked for)
+# ---------------------------------------------------------------------------
+
+def render_relative_bars(rows):
+    """
+    One horizontal bar per stat, the player's value positioned along the
+    comparison group's distribution - bar length and color driven by
+    percentile (get_grade_color's diverging scale, the same treatment
+    every other grade-like number in this app gets), with a tick marking
+    where the group's average sits, so "about average" reads as a mark
+    near the middle without ever printing a percentile digit. `rows`:
+    [{'label', 'help', 'value_str', 'pct', 'avg_pct'}] - pct/avg_pct
+    already 0-100 from data.transforms.pct_rank (None renders a neutral
+    stub instead of a lying zero-bar).
+    """
+    if not rows:
+        return
+    W, ROW_H, LABEL_W, VAL_W = 860, 32, 108, 60
+    track_w = W - LABEL_W - VAL_W - 16
+    H = ROW_H * len(rows) + 10
+    parts = [
+        f"<svg viewBox='0 0 {W} {H}' xmlns='http://www.w3.org/2000/svg' "
+        f"style='width:100%; height:auto; font-family:{_BODY_FONT};'>"
+    ]
+    y = 6
+    for r in rows:
+        cy = y + ROW_H / 2
+        x0 = LABEL_W
+        pct, avg_pct = r.get('pct'), r.get('avg_pct')
+        parts.append(
+            f"<text x='{LABEL_W - 10}' y='{cy + 4:.1f}' text-anchor='end' font-size='11.5' font-weight='700' "
+            f"fill='{C['on_surface']}'>{_esc(r['label'])}<title>{_esc(r.get('help', ''))}</title></text>"
+        )
+        parts.append(f"<rect x='{x0}' y='{cy - 6:.1f}' width='{track_w}' height='12' rx='6' fill='{C['surface_container_high']}'/>")
+        if pct is not None and pd.notna(pct):
+            bar_w = max(4.0, track_w * max(0.0, min(100.0, float(pct))) / 100.0)
+            color = get_grade_color(pct)
+            parts.append(
+                f"<rect x='{x0}' y='{cy - 6:.1f}' width='{bar_w:.1f}' height='12' rx='6' fill='{color}'>"
+                f"<title>{_esc(r['label'])}: {_esc(r.get('value_str', ''))}</title></rect>"
+            )
+        if avg_pct is not None and pd.notna(avg_pct):
+            ax = x0 + track_w * max(0.0, min(100.0, float(avg_pct))) / 100.0
+            parts.append(
+                f"<line x1='{ax:.1f}' y1='{cy - 10:.1f}' x2='{ax:.1f}' y2='{cy + 10:.1f}' "
+                f"stroke='{C['on_surface_variant']}' stroke-width='2'><title>Group average</title></line>"
+            )
+        parts.append(
+            f"<text x='{x0 + track_w + 14}' y='{cy + 4:.1f}' font-size='12' font-family='{_MONO_FONT}' "
+            f"font-weight='600' fill='{C['on_surface']}'>{_esc(r.get('value_str', '--'))}</text>"
+        )
+        y += ROW_H
+    parts.append("</svg>")
+    st.markdown("".join(parts), unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
 # Radar / spider chart (multi-axis two-entity comparison)
 # ---------------------------------------------------------------------------
 
@@ -521,72 +580,6 @@ def render_percentile_heatmap(pct_df, raw_df, cols, col_labels=None, sort_by_avg
                 f"<rect x='{x + 2:.1f}' y='{y + 3:.1f}' width='{CELL_W - 4:.1f}' height='{ROW_H - 6:.1f}' rx='3' "
                 f"fill='{color}'><title>{_esc(tooltip)}</title></rect>"
             )
-    parts.append("</svg>")
-    st.markdown("".join(parts), unsafe_allow_html=True)
-
-
-# ---------------------------------------------------------------------------
-# Bubble strip (rank-proximity-to-cutoff gradient)
-# ---------------------------------------------------------------------------
-
-def render_bubble_strip(df, rank_col, team_col, cutoff, window=10, value_col=None, value_label=None):
-    """
-    Horizontal strip visualizing teams' proximity to a hard rank cutoff
-    (e.g. Bracketology's projected field-of-68 line) - a "how close is the
-    bubble" gradient rather than a fabricated probability number (no
-    selection-committee model exists to produce a real one - see
-    bracketology.py's own disclaimer about what this app's seed-line
-    projection is and isn't). Shows only the `window` teams on each side of
-    `cutoff`; teams at/inside the cutoff render in the positive color,
-    teams outside it in the negative color, fading toward the cutoff line.
-    `value_col`/`value_label`: optional extra number (e.g. Net Rating)
-    added to each tooltip.
-    """
-    band = df[(df[rank_col] >= cutoff - window) & (df[rank_col] <= cutoff + window)].sort_values(rank_col)
-    if band.empty:
-        return
-    lo, hi = cutoff - window, cutoff + window
-    W, H = 860, 130
-    ML, MR = 26, 26
-    plot_w = W - ML - MR
-    axis_y = 58
-
-    def x_for(rank):
-        return ML + plot_w * (rank - lo) / max(hi - lo, 1)
-
-    parts = [
-        f"<svg viewBox='0 0 {W} {H}' xmlns='http://www.w3.org/2000/svg' "
-        f"style='width:100%; height:auto; font-family:{_BODY_FONT};'>"
-    ]
-    parts.append(f"<line x1='{ML}' y1='{axis_y}' x2='{W - MR}' y2='{axis_y}' stroke='{C['outline_variant']}' stroke-width='2'/>")
-    cutx = x_for(cutoff + 0.5)
-    parts.append(f"<line x1='{cutx:.1f}' y1='{axis_y - 30}' x2='{cutx:.1f}' y2='{axis_y + 30}' stroke='{C['primary']}' stroke-width='1.6' stroke-dasharray='4,3'/>")
-    parts.append(
-        f"<text x='{cutx:.1f}' y='{axis_y - 36}' text-anchor='middle' font-size='10.5' font-weight='700' "
-        f"letter-spacing='0.06em' fill='{C['primary']}'>PROJECTED CUTOFF</text>"
-    )
-
-    for idx, (_, row) in enumerate(band.iterrows()):
-        rank = row[rank_col]
-        team = row[team_col]
-        x = x_for(rank)
-        is_in = rank <= cutoff
-        color = C['positive'] if is_in else C['negative']
-        dist = abs(rank - cutoff)
-        opacity = max(0.35, 1.0 - dist / (window + 1) * 0.55)
-        tooltip = f"{team} — Rank #{int(rank)} — {'in the projected field' if is_in else 'on the outside looking in'}"
-        if value_col and value_col in row.index and pd.notna(row[value_col]):
-            tooltip += f" — {value_label or value_col}: {row[value_col]:.1f}"
-        parts.append(
-            f"<circle cx='{x:.1f}' cy='{axis_y}' r='5' fill='{color}' fill-opacity='{opacity:.2f}' "
-            f"stroke='{C['surface']}' stroke-width='1'><title>{_esc(tooltip)}</title></circle>"
-        )
-        above = idx % 2 == 0
-        ly = axis_y - 14 if above else axis_y + 24
-        parts.append(
-            f"<text x='{x:.1f}' y='{ly:.1f}' text-anchor='middle' font-size='9.5' font-weight='600' "
-            f"fill='{C['on_surface_variant']}'>{_esc(team)}</text>"
-        )
     parts.append("</svg>")
     st.markdown("".join(parts), unsafe_allow_html=True)
 
