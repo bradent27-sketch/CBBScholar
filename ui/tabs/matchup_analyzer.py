@@ -8,6 +8,18 @@ actual score and total), Dean Oliver's Four Factors matched unit-vs-unit
 (each side's factor percentile-ranked against all of D-I), and last-5 form
 strips with Elo trend from /games. Still explicitly labeled an estimate,
 not a possession-by-possession simulation.
+
+Grown well past a single flat scroll (Projected Score, Unit vs Unit, Four
+Factors, Style Profile, Matchup Edges, Recent Form, Season Margin Trend all
+stacked) - user feedback was "feels like three different pages at once."
+Team/venue selection and the headline metrics stay visible above
+everything (that context should never scroll out of view), but the rest is
+split into sub-tabs by QUESTION being answered: how do the raw numbers
+compare (Overview), how does each team actually generate/allow production
+(Efficiency & Style), which specific opposing player types exploit this
+matchup (Matchup Edges), and how has each team performed recently /
+game-to-game (Form & Trends). Same st.tabs() pattern the Four Factors
+section already used internally, just applied one level up.
 """
 import math
 
@@ -92,7 +104,29 @@ def render():
 
     team_stats = load_all_team_season_stats(season)
 
-    # --- Projected score (tempo x efficiency) ------------------------------
+    tab_overview, tab_style, tab_edges, tab_form = st.tabs([
+        "Overview", "Efficiency & Style", "Matchup Edges", "Form & Trends",
+    ])
+    with tab_overview:
+        _render_overview(ratings, team_stats, team_a, team_b, row_a, row_b, hca)
+    with tab_style:
+        _render_efficiency_style(ratings, team_stats, team_a, team_b, row_a, row_b)
+    with tab_edges:
+        _render_matchup_edges(team_stats, team_a, team_b, season)
+    with tab_form:
+        _render_form_and_trends(team_a, team_b, season)
+
+    st.caption(
+        "Projected edge, score, and win probability are estimates from adjusted ratings plus a flat "
+        f"{HOME_COURT_POINTS}-point home-court constant when a venue is chosen — injuries, matchup-specific "
+        "lineups, and shot-variance aren't modeled."
+    )
+
+
+def _render_overview(ratings, team_stats, team_a, team_b, row_a, row_b, hca):
+    """Quick numeric snapshot: tempo-adjusted projected score, and the raw
+    offense-vs-defense efficiency matchup - the "what do the top-line
+    numbers say" answer, no digging required."""
     if not team_stats.empty:
         proj = project_score(ratings, team_stats, team_a, team_b, hfa_margin=hca)
         if proj:
@@ -108,7 +142,6 @@ def render():
                 "this game's likely tempo, not a simulation."
             )
 
-    # --- Unit vs unit: adjusted efficiency ---------------------------------
     st.markdown("<div class='custom-section-header'>UNIT VS UNIT (ADJUSTED EFFICIENCY)</div>", unsafe_allow_html=True)
     unit_rows = []
     for off_team, off_row, def_team, def_row in ((team_a, row_a, team_b, row_b), (team_b, row_b, team_a, row_a)):
@@ -122,52 +155,61 @@ def render():
         })
     render_mirror_bars("Offense", "Defense", unit_rows)
 
-    # --- Four Factors -------------------------------------------------------
-    if not team_stats.empty:
-        rows_ab, rows_ba = four_factors_matchup(team_stats, team_a, team_b)
-        if rows_ab:
-            st.markdown("<div class='custom-section-header'>FOUR FACTORS — WHERE GAMES ARE WON</div>", unsafe_allow_html=True)
-            st.caption(
-                "Dean Oliver's four factors, matched unit against unit. Bar length and color = D-I percentile "
-                "with the correct 'better' direction per side, so on BOTH sides a long bar means that team is "
-                "winning this specific battle. Hover any bar for the raw value."
-            )
-            tab_ab, tab_ba = st.tabs([f"{team_a} offense vs {team_b} defense", f"{team_b} offense vs {team_a} defense"])
-            for tab, rows, off_t, def_t in ((tab_ab, rows_ab, team_a, team_b), (tab_ba, rows_ba, team_b, team_a)):
-                with tab:
-                    render_mirror_bars(
-                        f"{off_t} offense", f"{def_t} defense",
-                        [{**r,
-                          'left_val_str': _fmt(r['off_val'], 2 if 'TO' in r['label'] else 1),
-                          'left_pct': r['off_pct'],
-                          'right_val_str': _fmt(r['def_val'], 2 if 'TO' in r['label'] else 1),
-                          'right_pct': r['def_pct']} for r in rows],
-                    )
 
-        # --- Style profile --------------------------------------------------
-        style_rows = style_profile(team_stats, team_a, team_b)
-        if style_rows:
-            st.markdown("<div class='custom-section-header'>STYLE PROFILE</div>", unsafe_allow_html=True)
-            st.caption(
-                "How each offense generates its points (tempo, three-point volume, paint share, transition share). "
-                "Descriptive contrast — percentile shows where each team sits across D-I, not who is better."
-            )
-            render_mirror_bars(
-                team_a, team_b,
-                [{'label': r['label'], 'help': r['help'],
-                  'left_val_str': _fmt(r['left_val']), 'left_pct': r['left_pct'],
-                  'right_val_str': _fmt(r['right_val']), 'right_pct': r['right_pct']} for r in style_rows],
-            )
+def _render_efficiency_style(ratings, team_stats, team_a, team_b, row_a, row_b):
+    """How each team actually generates/allows production: Dean Oliver's
+    Four Factors matched unit-vs-unit, then a descriptive style contrast
+    (tempo, shot selection, transition share)."""
+    if team_stats.empty:
+        st.info("Four Factors and style data need the CollegeBasketballData.com key configured.")
+        return
 
-    # --- Matchup Edges: defense vs. role ------------------------------------
+    rows_ab, rows_ba = four_factors_matchup(team_stats, team_a, team_b)
+    if rows_ab:
+        st.markdown("<div class='custom-section-header'>FOUR FACTORS — WHERE GAMES ARE WON</div>", unsafe_allow_html=True)
+        st.caption(
+            "Dean Oliver's four factors, matched unit against unit. Bar length and color = D-I percentile "
+            "with the correct 'better' direction per side, so on BOTH sides a long bar means that team is "
+            "winning this specific battle. Hover any bar for the raw value."
+        )
+        tab_ab, tab_ba = st.tabs([f"{team_a} offense vs {team_b} defense", f"{team_b} offense vs {team_a} defense"])
+        for tab, rows, off_t, def_t in ((tab_ab, rows_ab, team_a, team_b), (tab_ba, rows_ba, team_b, team_a)):
+            with tab:
+                render_mirror_bars(
+                    f"{off_t} offense", f"{def_t} defense",
+                    [{**r,
+                      'left_val_str': _fmt(r['off_val'], 2 if 'TO' in r['label'] else 1),
+                      'left_pct': r['off_pct'],
+                      'right_val_str': _fmt(r['def_val'], 2 if 'TO' in r['label'] else 1),
+                      'right_pct': r['def_pct']} for r in rows],
+                )
+
+    style_rows = style_profile(team_stats, team_a, team_b)
+    if style_rows:
+        st.markdown("<div class='custom-section-header'>STYLE PROFILE</div>", unsafe_allow_html=True)
+        st.caption(
+            "How each offense generates its points (tempo, three-point volume, paint share, transition share). "
+            "Descriptive contrast — percentile shows where each team sits across D-I, not who is better."
+        )
+        render_mirror_bars(
+            team_a, team_b,
+            [{'label': r['label'], 'help': r['help'],
+              'left_val_str': _fmt(r['left_val']), 'left_pct': r['left_pct'],
+              'right_val_str': _fmt(r['right_val']), 'right_pct': r['right_pct']} for r in style_rows],
+        )
+
+
+def _render_matchup_edges(team_stats, team_a, team_b, season):
+    """The real matchup question: which opposing player TYPES does each
+    defense struggle with, and does the other team have that type? Direct
+    shooting/rebounding-allowed numbers are free; the full points-by-role
+    breakdown is a heavier on-demand pull (see load_defense_allowed_by_role)."""
     colors = team_color_map(season)
-    st.markdown("<div class='custom-section-header'>MATCHUP EDGES — DEFENSE VS. ROLE</div>", unsafe_allow_html=True)
     st.caption(
-        "The real matchup question: which opposing player TYPES does each defense struggle with, and "
-        "does the other team have that type? No free CBB source publishes 'defense vs. role' directly "
-        "(checked — see HANDOFF), so the full breakdown below is built by cross-referencing every "
-        "opponent's own game log. Shooting/rebounding-allowed numbers are free (same cached pull as "
-        "everything else on this tab); the full points-by-role breakdown is a heavier on-demand pull."
+        "No free CBB source publishes 'defense vs. role' directly (checked — see HANDOFF), so the full "
+        "breakdown below is built by cross-referencing every opponent's own game log. Shooting/rebounding-"
+        "allowed numbers are free (same cached pull as the Efficiency & Style tab); the full points-by-role "
+        "breakdown is a heavier on-demand pull."
     )
 
     if not team_stats.empty:
@@ -189,11 +231,12 @@ def render():
                     'right_val_str': _fmt(db[col]), 'right_pct': pct_rank(team_stats[col], db[col], higher_is_better=False),
                 })
             if allowed_rows:
+                st.markdown("<div class='custom-section-header'>SHOOTING &amp; REBOUNDING ALLOWED</div>", unsafe_allow_html=True)
                 render_mirror_bars(f"{team_a} allows", f"{team_b} allows", allowed_rows)
                 st.caption("D-I percentile — longer/greener bar = allows LESS of that shot type (i.e. defends it better).")
 
     league_rates = league_rate_profiles(get_league_player_stats(season))
-    st.markdown("**Roster Tendencies**")
+    st.markdown("<div class='custom-section-header'>ROSTER TENDENCIES</div>", unsafe_allow_html=True)
     st.caption(
         ("Every rostered player's primary role, ranked against REAL D-I percentiles" if not league_rates.empty else
          "Every rostered player's primary role from a fixed-threshold heuristic (build the League Player "
@@ -225,11 +268,11 @@ def render():
                 render_role_badges(role, [], primary_color=pill_color)
                 st.caption(", ".join(role_groups[role]))
 
-    st.markdown("**Defense vs. Role — Full Breakdown**")
+    st.markdown("<div class='custom-section-header'>DEFENSE VS. ROLE — FULL BREAKDOWN</div>", unsafe_allow_html=True)
     st.caption(
-        "Roughly 60-90 extra API calls for a full schedule (one roster + season-stats + game-log pull "
-        "per opponent) — not run automatically. Cached once run, and opponents already viewed elsewhere "
-        "this session are free."
+        "Up to ~60-90 extra API calls for a full schedule (roster + season-stats + game-log pull per "
+        "opponent, less once a League Player Database exists — see Team Efficiency) — not run "
+        "automatically. Cached once run, and opponents already viewed elsewhere this session are free."
     )
     edge_a, edge_b = st.columns(2)
     for col, team_name in ((edge_a, team_a), (edge_b, team_b)):
@@ -251,7 +294,12 @@ def render():
                         render_trend_line(trend['Date'].tolist(), trend['Points'].tolist(), window=5, unit=' pts')
                         st.caption(f"Points allowed to {role_pick} per game — rolling 5-game average (violet) vs. season average (dashed). A rising line with the game log still showing the same opponents is the earliest sign of a scheme or personnel change.")
 
-    # --- Recent form --------------------------------------------------------
+
+def _render_form_and_trends(team_a, team_b, season):
+    """Recent results (last-5 chips + Elo trend) and the full-season
+    margin/consistency picture - "how has each team actually been playing,"
+    as opposed to the season-long averages everything else on this tab
+    uses."""
     st.markdown("<div class='custom-section-header'>RECENT FORM (LAST 5)</div>", unsafe_allow_html=True)
     with st.spinner("Loading results..."):
         games_a = load_team_games(team_a, season)
@@ -262,7 +310,6 @@ def render():
     render_form_strip(team_b, chips_b, elo_b)
     st.caption("Hover a chip for the score and opponent. Elo trend spans the shown window (Elo via CollegeBasketballData.com).")
 
-    # --- Season margin trend + consistency ----------------------------------
     st.markdown("<div class='custom-section-header'>SEASON MARGIN TREND &amp; CONSISTENCY</div>", unsafe_allow_html=True)
     st.caption(
         "Every completed game this season, bar height = scoring margin (green = win, red = loss, "
@@ -285,9 +332,3 @@ def render():
             v2.metric("Best Margin", f"+{vol['best_margin']}")
             v3.metric("Worst Margin", f"{vol['worst_margin']}")
             v4.metric("Close-Game Record", f"{vol['close_wins']}-{vol['close_losses']}", help="Games decided by 5 points or fewer.")
-
-    st.caption(
-        "Projected edge, score, and win probability are estimates from adjusted ratings plus a flat "
-        f"{HOME_COURT_POINTS}-point home-court constant when a venue is chosen — injuries, matchup-specific "
-        "lineups, and shot-variance aren't modeled."
-    )

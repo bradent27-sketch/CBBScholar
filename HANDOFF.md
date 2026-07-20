@@ -11,6 +11,49 @@ CollegeBasketballData.com (free key, configured), ESPN's public endpoints
 subsystem exists for this app at all — there's no PFF product for college
 basketball.
 
+**Latest pass: stale recruiting-commitment data + Matchup Analyzer feeling
+like three separate pages.** Two independent user reports.
+1. **Transfer Portal showing "Uncommitted" for players who are actually
+   committed.** Root cause is genuinely unresolved from this dev
+   environment (no live network access - see §6): `/recruiting/players`
+   and `/recruiting/portal` both take a `year` param that this app
+   previously reused from the main team-season selector
+   (`current_cbb_season()`, which labels a season by its SPRING/ending
+   year - confirmed for `/stats`/`/ratings`, NOT confirmed for
+   recruiting). Recruiting classes everywhere else are labeled by
+   HS-grad/enrollment year, a different, unrelated convention - the two
+   MAY already coincide for "the class currently enrolling" by
+   coincidence, or may not. Rather than guess, `ui/tabs/transfer_portal.py`
+   now exposes an independent "Recruiting / Portal Class Year" selector
+   (not tied to the team-season picker) plus a "Refresh now" button that
+   bypasses the 6-hour cache, a Committed/Total metric, and a
+   "show only Uncommitted" filter - lets a real user with real knowledge
+   of who's committed self-diagnose which year value is actually current,
+   which is more reliable than a guess baked into the code. If commitment
+   data is STILL stale on the correct year after a refresh, that's
+   CBBD's own database lagging real announcements, not something this app
+   computes - see the caveat text now shown under both tables. Considered
+   and explicitly NOT done without asking first: scraping a live
+   commitment tracker (247Sports/On3) as a fresher supplementary source -
+   same "explicit user-authorized exception" bar as the NCAA NET scrape
+   (see §8), not extended here without a separate ask.
+2. **Matchup Analyzer reorganized into sub-tabs.** Had grown to Projected
+   Score, Unit vs Unit, Four Factors, Style Profile, Matchup Edges (three
+   sub-sections of its own), Recent Form, and Season Margin Trend all in
+   one flat scroll. Team/venue selection and the headline metrics
+   (Net Rating x2, Projected Edge, win probability) stay always-visible
+   above everything; the rest is now four `st.tabs()` grouped by the
+   QUESTION each answers: **Overview** (Projected Score, Unit vs Unit),
+   **Efficiency & Style** (Four Factors, Style Profile), **Matchup Edges**
+   (shooting/rebounding allowed, roster tendencies, the full
+   defense-by-role breakdown), **Form & Trends** (Recent Form, Season
+   Margin Trend). Same pattern the Four Factors section already used
+   internally (its own nested `st.tabs()` for the two offense/defense
+   directions), just applied one level up. No logic changed, purely a
+   layout reorganization - see `ui/tabs/matchup_analyzer.py`'s
+   `_render_overview`/`_render_efficiency_style`/`_render_matchup_edges`/
+   `_render_form_and_trends` helpers.
+
 **Fixed this pass: the "API keys aren't connected" bug.** Both real keys
 had been typed into `.streamlit/secrets.toml.example` (git-tracked)
 instead of `.streamlit/secrets.toml` (git-ignored, the file `st.secrets`
