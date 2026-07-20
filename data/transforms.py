@@ -73,6 +73,37 @@ def four_factors_matchup(stats_df, team_a, team_b):
     return rows(a, b), rows(b, a)
 
 
+def four_factors_percentile_grid(stats_df, teams=None):
+    """
+    Team x Four-Factors D-I percentile grid (offense AND defense side of
+    each factor - 8 columns), for a league-wide tiering heatmap - the
+    "whole league at a glance" complement to four_factors_matchup's
+    pairwise (two-team) view above. Reuses FOUR_FACTORS' own column/
+    direction mapping so the heatmap and the matchup engine can't silently
+    drift apart. teams=None keeps every team in stats_df; pass a list to
+    scope to one conference or group.
+
+    Returns (pct_df, raw_df, cols): both DataFrames share a 'Team' column
+    plus the same ordered `cols` list - pct_df's cells are 0-100 D-I
+    percentiles (for cell color), raw_df's are the actual stat values (for
+    tooltip text). Empty inputs return (empty df, empty df, []).
+    """
+    if stats_df is None or stats_df.empty:
+        return pd.DataFrame(), pd.DataFrame(), []
+    work = stats_df if teams is None else stats_df[stats_df['Team'].isin(teams)]
+    if work.empty:
+        return pd.DataFrame(), pd.DataFrame(), []
+    cols, higher_is_better = [], {}
+    for _, off_col, def_col, off_hib, def_hib, _help in FOUR_FACTORS:
+        cols += [off_col, def_col]
+        higher_is_better[off_col], higher_is_better[def_col] = off_hib, def_hib
+    raw = work[['Team'] + cols].reset_index(drop=True)
+    pct = raw[['Team']].copy()
+    for col in cols:
+        pct[col] = raw[col].apply(lambda v, c=col: pct_rank(stats_df[c], v, higher_is_better=higher_is_better[c]))
+    return pct, raw, cols
+
+
 def style_profile(stats_df, team_a, team_b):
     """Scoring-style rows (3PA rate, paint share, fast-break share, pace)
     for both teams - descriptive contrast, percentiles vs D-I to show HOW

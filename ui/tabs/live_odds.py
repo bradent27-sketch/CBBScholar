@@ -11,6 +11,7 @@ import streamlit as st
 from config import ODDS_API_PLAYER_PROP_MARKETS
 from data.loaders import fetch_ncaab_odds, fetch_ncaab_player_props
 from ui.components import render_coming_soon
+from ui.charts import render_prop_line_shop
 from ui.styling import style_plain_dataframe, df_auto_height
 
 
@@ -160,8 +161,35 @@ def render():
                 comparison_df = _build_props_comparison_table(filtered_long)
                 st.markdown("**Cross-book comparison** — one row per bet, one column per bookmaker (odds shown as `price (line)`; click a column header to sort)")
                 st.dataframe(
-                    style_plain_dataframe(comparison_df.set_index('Player')),
+                    # NOT .set_index('Player') - a player with both an Over
+                    # and Under row (the normal case for any prop market)
+                    # makes 'Player' non-unique, and Styler.apply/.map raise
+                    # on a non-unique index (same class of bug HANDOFF.md
+                    # documents hitting elsewhere in this app). The pivot
+                    # already returns a clean sequential index - keep it.
+                    style_plain_dataframe(comparison_df),
                     width="stretch", height=df_auto_height(min(len(comparison_df), 30))
                 )
+
+                st.markdown("<div class='custom-section-header'>LINE SHOPPING</div>", unsafe_allow_html=True)
+                bet_tuples = list(
+                    filtered_long[['Market', 'Player', 'Selection']].drop_duplicates().itertuples(index=False, name=None)
+                )
+                if bet_tuples:
+                    bet_pick = st.selectbox(
+                        "Compare one bet across every book", bet_tuples,
+                        format_func=lambda t: f"{t[0]} — {t[1]} ({t[2]})",
+                        key="odds_line_shop_pick",
+                    )
+                    m_name, p_name, sel = bet_pick
+                    bet_rows = filtered_long[
+                        (filtered_long['Market'] == m_name) & (filtered_long['Player'] == p_name) & (filtered_long['Selection'] == sel)
+                    ]
+                    shop_rows = [{'book': r['Book'], 'line': r['Line'], 'odds': r['Odds']} for _, r in bet_rows.iterrows()]
+                    render_prop_line_shop(shop_rows)
+                    st.caption(
+                        "Sorted best price first (★) — for American odds, less-negative/more-positive is always "
+                        "the better price for the bettor, regardless of which side of zero it's on."
+                    )
             else:
                 st.info("No player props posted for this game yet by any tracked bookmaker.")

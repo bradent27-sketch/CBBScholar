@@ -12,6 +12,7 @@ import streamlit as st
 from config import AVAILABLE_SEASONS
 from data.loaders import current_cbb_season, load_efficiency_ratings
 from ui.components import render_coming_soon
+from ui.charts import render_bubble_strip
 from ui.styling import style_plain_dataframe, df_auto_height
 
 
@@ -47,3 +48,12 @@ def render():
 
     st.dataframe(style_plain_dataframe(shown), width="stretch", height=df_auto_height(len(shown)))
     st.caption(f"Projected field of 68 (last 4 teams on the seed-line-16 group are effectively First Four). Source: CollegeBasketballData.com adjusted ratings.")
+
+    st.markdown("<div class='custom-section-header'>BUBBLE WATCH</div>", unsafe_allow_html=True)
+    full_sorted = ratings.dropna(subset=['Rank']).sort_values('Rank')
+    render_bubble_strip(full_sorted, 'Rank', 'Team', cutoff=68, window=10, value_col='Net Rating', value_label='Net Rating')
+    st.caption(
+        "Teams within 10 spots of the projected cutoff (rank 68) — green = projected in the field, red = "
+        "projected out, fading toward the line. A proximity gradient, not a selection-committee probability "
+        "(this app has no resume/auto-bid model — see the note above)."
+    )

@@ -5,9 +5,10 @@ four-quadrant view) and in-table rating meters."""
 import streamlit as st
 
 from config import AVAILABLE_SEASONS
-from data.loaders import current_cbb_season, load_efficiency_ratings, team_color_map
-from ui.components import render_coming_soon
-from ui.charts import render_efficiency_scatter
+from data.loaders import current_cbb_season, load_efficiency_ratings, load_all_team_season_stats, team_color_map
+from data.transforms import four_factors_percentile_grid
+from ui.components import render_coming_soon, render_hero_tiles
+from ui.charts import render_efficiency_scatter, render_percentile_heatmap
 from ui.styling import style_plain_dataframe, df_auto_height, build_column_help_config
 
 
@@ -37,6 +38,19 @@ def render():
     # index value) - applying the same fix here proactively rather than
     # waiting to hit it again. Team names are reliably unique within a season.
     colors = team_color_map(season)
+
+    # League-leader hero strip - spotlights the single most important
+    # number in each direction before the full scatter/table detail below.
+    ranked = df.dropna(subset=['Rank'])
+    if not ranked.empty:
+        top_net = ranked.sort_values('Net Rating', ascending=False).iloc[0]
+        top_off = ranked.sort_values('Off Rating', ascending=False).iloc[0]
+        top_def = ranked.sort_values('Def Rating', ascending=True).iloc[0]  # lower Def Rating = better
+        render_hero_tiles([
+            {'label': 'Best Net Rating', 'value_str': top_net['Team'], 'sub': f"{top_net['Net Rating']:+.1f}"},
+            {'label': 'Best Offense', 'value_str': top_off['Team'], 'sub': f"{top_off['Off Rating']:.1f} Off Rtg"},
+            {'label': 'Best Defense', 'value_str': top_def['Team'], 'sub': f"{top_def['Def Rating']:.1f} Def Rtg"},
+        ])
 
     # Efficiency landscape: offense (x, right = better) vs defense
     # (y, inverted so up = better since a LOWER defensive rating is better).
@@ -72,3 +86,26 @@ def render():
         "for opponent strength — this app's KenPom-equivalent (Def Rating: lower = better). "
         "Net and Off Rating columns render as league-scaled meters."
     )
+
+    # --- Four Factors tiering heatmap (new, additive) --------------------
+    st.markdown("<div class='custom-section-header'>FOUR FACTORS TIERING</div>", unsafe_allow_html=True)
+    team_stats = load_all_team_season_stats(season)
+    if team_stats.empty:
+        st.info("Four Factors tiering needs /stats/team/season data, which isn't available right now.")
+    else:
+        conf_options = ["Top 25 (Net Rating)"] + sorted(df['Conference'].dropna().unique().tolist())
+        scope = st.selectbox("Scope", conf_options, key="te_ff_scope")
+        if scope == "Top 25 (Net Rating)":
+            scope_teams = ranked.sort_values('Net Rating', ascending=False)['Team'].head(25).tolist()
+        else:
+            scope_teams = df[df['Conference'] == scope]['Team'].dropna().tolist()
+        pct_grid, raw_grid, ff_cols = four_factors_percentile_grid(team_stats, teams=scope_teams)
+        if pct_grid.empty:
+            st.info("No Four Factors data for this scope yet.")
+        else:
+            render_percentile_heatmap(pct_grid, raw_grid, ff_cols)
+            st.caption(
+                "Each cell is that team's D-I percentile on Dean Oliver's Four Factors (shooting, turnovers, "
+                "rebounding, free-throw rate), offense and defense sides shown separately — hover a cell for the "
+                "raw value. Rows sorted by average percentile across all eight columns, best profile first."
+            )

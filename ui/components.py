@@ -130,3 +130,24 @@ def render_stat_tiles(entries):
             f"<div class='t-value'>{value}</div>{pct_html}</div>"
         )
     st.markdown(f"<div class='stat-tile-grid'>{''.join(tiles)}</div>", unsafe_allow_html=True)
+
+
+def render_hero_tiles(entries):
+    """Bigger-emphasis tile row for the 1-3 headline numbers on a tab (e.g.
+    a league-leader net rating, or a matchup's win probability) - a step up
+    in visual weight from render_stat_tiles' detail grid, for drawing the
+    eye to whatever matters most on that page first. Wires up the
+    .hero-tile/.hero-tile-grid CSS in ui/styling.py, which was ported over
+    from the sibling apps but had no caller in this app until now. entries:
+    list of {'label', 'value_str', 'sub' (optional secondary line)}."""
+    tiles = []
+    for e in entries:
+        label = str(e.get('label', ''))
+        value = str(e.get('value_str', '--'))
+        sub = e.get('sub')
+        sub_html = f"<div class='h-sub'>{sub}</div>" if sub else ""
+        tiles.append(
+            f"<div class='hero-tile'><div class='h-label' title='{label}'>{label}</div>"
+            f"<div class='h-value'>{value}</div>{sub_html}</div>"
+        )
+    st.markdown(f"<div class='hero-tile-grid'>{''.join(tiles)}</div>", unsafe_allow_html=True)

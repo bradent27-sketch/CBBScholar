@@ -421,6 +421,36 @@ def inject_theme():
             color: {C['on_surface']} !important;
             font-family: {F['mono']} !important;
         }}
+
+        /* --- Elevation & depth polish (additive - no rule above changes) --- */
+        .stat-tile, .hero-tile, .team-banner, .coming-soon-card {{
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 8px 20px -10px rgba(0, 0, 0, 0.55);
+        }}
+        div[data-testid="stMetric"], div[data-testid="stAlert"], div[data-testid="stExpander"],
+        div[data-testid="stDataFrame"], div[data-testid="stTable"] {{
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 8px 20px -10px rgba(0, 0, 0, 0.55) !important;
+        }}
+        .stat-tile, .hero-tile {{
+            transition: transform 140ms ease-out, border-color 140ms ease-out, box-shadow 140ms ease-out;
+        }}
+        .stat-tile:hover, .hero-tile:hover {{
+            border-color: rgba({_PRIMARY_RGB}, 0.55);
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 10px 22px -10px rgba({_PRIMARY_RGB}, 0.3) !important;
+            transform: translateY(-1px);
+        }}
+
+        /* Dataframe toolbar icons (sort/search/download/fullscreen overlays)
+           default to a light-mode gray - retint to the dark theme + accent
+           hover so they don't read as a foreign widget. Selector confirmed
+           live elsewhere in this file (stFullScreenFrame image-toolbar rule
+           above uses the same testid). */
+        button[data-testid="stBaseButton-elementToolbar"] {{
+            color: {C['on_surface_variant']} !important;
+            transition: color 120ms ease-out;
+        }}
+        button[data-testid="stBaseButton-elementToolbar"]:hover {{
+            color: {C['primary']} !important;
+        }}
         </style>
     """, unsafe_allow_html=True)
 

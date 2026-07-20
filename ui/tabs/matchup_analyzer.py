@@ -18,7 +18,7 @@ from data.loaders import (
     current_cbb_season, load_efficiency_ratings, load_all_team_season_stats, load_team_games,
 )
 from data.transforms import four_factors_matchup, style_profile, project_score, recent_form, pct_rank
-from ui.components import render_coming_soon
+from ui.components import render_coming_soon, render_hero_tiles
 from ui.charts import render_mirror_bars, render_form_strip
 
 # Standard CBB home-court advantage in points (~3 historically, all venues
@@ -73,6 +73,19 @@ def render():
 
     hca = HOME_COURT_POINTS if venue == f"At {team_a}" else (-HOME_COURT_POINTS if venue == f"At {team_b}" else 0.0)
     margin = float(row_a['Net Rating']) - float(row_b['Net Rating']) + hca
+
+    # Headline hero callout - the "who wins and by how much" story up front,
+    # before the supporting per-team metrics below.
+    hero_win_prob_a = _margin_to_win_prob(margin) * 100
+    if margin >= 0:
+        leader, leader_prob = team_a, hero_win_prob_a
+    else:
+        leader, leader_prob = team_b, 100 - hero_win_prob_a
+    hca_sub = f"per 100 poss, incl. {HOME_COURT_POINTS:+.1f} HCA" if hca else "per 100 poss (neutral court)"
+    render_hero_tiles([
+        {'label': 'Projected Winner', 'value_str': leader, 'sub': f"{leader_prob:.0f}% win probability"},
+        {'label': 'Projected Edge', 'value_str': f"{abs(margin):.1f}", 'sub': hca_sub},
+    ])
 
     m1, m2, m3 = st.columns(3)
     m1.metric(f"{team_a} Net Rating", f"{row_a['Net Rating']:.1f}", f"Rank #{int(row_a['Rank'])}" if row_a['Rank'] == row_a['Rank'] else None)

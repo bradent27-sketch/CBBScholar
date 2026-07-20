@@ -7,6 +7,7 @@ from data.loaders import (
     current_cbb_season, load_teams, load_team_roster, get_player_season_stats, team_color_map,
 )
 from ui.components import render_coming_soon, render_team_banner, render_bio_strip, render_stat_tiles
+from ui.charts import render_radar
 from ui.tabs.player_search import _fmt_height, _pct, _per_game
 
 
@@ -82,6 +83,7 @@ def render():
     _render_player_column(col_b2, team_b, row_b, season, colors)
 
     _render_delta_table(team_a, row_a, team_b, row_b, season)
+    _render_radar_section(team_a, row_a, team_b, row_b, season, colors)
     st.caption("Season stats via CollegeBasketballData.com.")
 
 
@@ -160,3 +162,27 @@ def _render_delta_table(team_a, row_a, team_b, row_b, season):
         width="stretch", height=df_auto_height(len(df)),
     )
     st.caption(f"Edge %: relative difference — green = {row_a['name']} leads, red = {row_b['name']} leads.")
+
+
+_RADAR_AXES = ['PPG', 'RPG', 'APG', 'FG%', '3P%', 'Usage %']
+
+
+def _render_radar_section(team_a, row_a, team_b, row_b, season, colors):
+    """Shape-comparison radar - a visual complement to the delta table
+    above, not a replacement: axes are scaled to just these two players
+    (see ui.charts.render_radar's docstring for why - no league-wide
+    player percentile source exists yet)."""
+    stats_a = _numeric_stat_map(get_player_season_stats(team_a, season, row_a['id']))
+    stats_b = _numeric_stat_map(get_player_season_stats(team_b, season, row_b['id']))
+    axes = [ax for ax in _RADAR_AXES if ax in stats_a and ax in stats_b]
+    if len(axes) < 3:
+        return
+    st.markdown("<div class='custom-section-header'>SHAPE COMPARISON</div>", unsafe_allow_html=True)
+    render_radar(
+        axes, stats_a, stats_b, row_a['name'], row_b['name'],
+        color_a=colors.get(team_a), color_b=colors.get(team_b),
+    )
+    st.caption(
+        "Each axis is scaled to these two players only (not a league percentile) — the shape shows relative "
+        "strengths between them, not where either player ranks nationally."
+    )

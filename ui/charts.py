@@ -8,6 +8,7 @@ between CFB Scholar and CBB Scholar (sport-agnostic by design - keep it
 that way; sport-specific logic belongs in the calling tab or transforms).
 """
 import html
+import math
 
 import pandas as pd
 import streamlit as st
@@ -367,6 +368,279 @@ def render_efficiency_scatter(df, x_col, y_col, color_map, invert_y=False,
         parts.append(
             f"<text x='{x + 10:.1f}' y='{yv + 4:.1f}' font-size='11.5' font-weight='700' fill='#ffffff' "
             f"style='paint-order:stroke; stroke:{C['surface']}; stroke-width:3px;'>{_esc(team)}</text>"
+        )
+    parts.append("</svg>")
+    st.markdown("".join(parts), unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
+# Radar / spider chart (multi-axis two-entity comparison)
+# ---------------------------------------------------------------------------
+
+def render_radar(axes, values_a, values_b, name_a, name_b, color_a=None, color_b=None):
+    """
+    Inline-SVG radar/spider chart overlaying two entities (e.g. two
+    players) across N axes. `axes`: ordered list of axis labels.
+    `values_a`/`values_b`: {axis_label: raw_value} dicts for each entity -
+    a missing/None/NaN value is treated as 0. Each axis is scaled
+    independently to whichever of the two values is larger on THAT axis
+    (plus headroom) - a relative shape comparison between these two
+    entities only, not a league percentile (no full-D-I player-level
+    percentile source exists yet - see HANDOFF.md's parked items). Hover
+    any vertex for the raw value.
+    """
+    n = len(axes)
+    if n < 3:
+        return
+    W = H = 460
+    cx, cy = W / 2, H / 2 + 2
+    radius = 158
+    color_a = color_a or C['primary']
+    color_b = color_b or C['secondary']
+
+    def _v(values, label):
+        val = values.get(label)
+        return 0.0 if val is None or pd.isna(val) else float(val)
+
+    a_vals = [_v(values_a, ax) for ax in axes]
+    b_vals = [_v(values_b, ax) for ax in axes]
+    peaks = [max(a_vals[i], b_vals[i], 1e-9) * 1.15 for i in range(n)]
+
+    def point(i, frac):
+        angle = -math.pi / 2 + 2 * math.pi * i / n
+        r = radius * max(0.0, min(1.0, frac))
+        return cx + r * math.cos(angle), cy + r * math.sin(angle)
+
+    parts = [
+        f"<svg viewBox='0 0 {W} {H}' xmlns='http://www.w3.org/2000/svg' "
+        f"style='width:100%; max-width:460px; height:auto; font-family:{_BODY_FONT}; display:block; margin:0 auto;'>"
+    ]
+    for frac in (0.33, 0.66, 1.0):
+        ring = " ".join(f"{point(i, frac)[0]:.1f},{point(i, frac)[1]:.1f}" for i in range(n))
+        parts.append(f"<polygon points='{ring}' fill='none' stroke='{C['outline_variant']}' stroke-width='1'/>")
+    for i in range(n):
+        x, y = point(i, 1.0)
+        parts.append(f"<line x1='{cx:.1f}' y1='{cy:.1f}' x2='{x:.1f}' y2='{y:.1f}' stroke='{C['outline_variant']}' stroke-width='1'/>")
+
+    for i, label in enumerate(axes):
+        lx, ly = point(i, 1.22)
+        angle = -math.pi / 2 + 2 * math.pi * i / n
+        anchor = 'start' if math.cos(angle) > 0.3 else 'end' if math.cos(angle) < -0.3 else 'middle'
+        parts.append(
+            f"<text x='{lx:.1f}' y='{ly:.1f}' text-anchor='{anchor}' dominant-baseline='middle' "
+            f"font-size='11' font-weight='600' fill='{C['on_surface_variant']}'>{_esc(label)}</text>"
+        )
+
+    def draw_entity(vals, color, name):
+        pts, dots = [], []
+        for i in range(n):
+            frac = vals[i] / peaks[i] if peaks[i] else 0.0
+            x, y = point(i, frac)
+            pts.append(f"{x:.1f},{y:.1f}")
+            dots.append((x, y, axes[i], vals[i]))
+        parts.append(
+            f"<polygon points='{' '.join(pts)}' fill='{color}' fill-opacity='0.16' "
+            f"stroke='{color}' stroke-width='2.2' stroke-linejoin='round'/>"
+        )
+        for x, y, label, v in dots:
+            parts.append(
+                f"<circle cx='{x:.1f}' cy='{y:.1f}' r='3.6' fill='{color}' stroke='{C['surface']}' stroke-width='1'>"
+                f"<title>{_esc(name)} — {_esc(label)}: {v:.1f}</title></circle>"
+            )
+
+    draw_entity(a_vals, color_a, name_a)
+    draw_entity(b_vals, color_b, name_b)
+
+    parts.append(f"<text x='4' y='{H - 6}' font-size='12' font-weight='700' fill='{color_a}'>● {_esc(name_a)}</text>")
+    parts.append(f"<text x='{W - 4}' y='{H - 6}' text-anchor='end' font-size='12' font-weight='700' fill='{color_b}'>● {_esc(name_b)}</text>")
+    parts.append("</svg>")
+    st.markdown("".join(parts), unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
+# Percentile heatmap (team x stat grid, D-I percentile-colored)
+# ---------------------------------------------------------------------------
+
+def render_percentile_heatmap(pct_df, raw_df, cols, col_labels=None, sort_by_avg=True):
+    """
+    Team x stat-column percentile grid - each cell colored by D-I percentile
+    (get_grade_color's diverging scale) for a "whole league at a glance"
+    tiering view. `pct_df`/`raw_df`: same-shape DataFrames sharing a 'Team'
+    column plus `cols` (see data.transforms.four_factors_percentile_grid) -
+    pct_df drives cell color, raw_df drives the tooltip's raw value.
+    `col_labels`: optional {col: shorter_display_label} override.
+    `sort_by_avg`: rank rows by mean percentile (best profile first) rather
+    than whatever order the input arrived in.
+    """
+    if pct_df is None or pct_df.empty or not cols:
+        return
+    col_labels = col_labels or {}
+    work = pct_df.copy()
+    work['_avg'] = work[cols].mean(axis=1, skipna=True)
+    if sort_by_avg:
+        work = work.sort_values('_avg', ascending=False)
+    raw_by_team = raw_df.set_index('Team') if raw_df is not None and not raw_df.empty else pd.DataFrame()
+
+    n_rows, n_cols = len(work), len(cols)
+    ROW_H, CELL_W, LABEL_W, HEADER_H, MR = 26, 74, 132, 78, 60
+    W = LABEL_W + CELL_W * n_cols + MR  # MR: room for the last rotated column header's overhang
+    H = HEADER_H + ROW_H * n_rows + 6
+
+    parts = [
+        f"<svg viewBox='0 0 {W} {H}' xmlns='http://www.w3.org/2000/svg' "
+        f"style='width:100%; height:auto; font-family:{_BODY_FONT};'>"
+    ]
+    for j, col in enumerate(cols):
+        col_x = LABEL_W + CELL_W * j + CELL_W / 2
+        label = col_labels.get(col, col)
+        parts.append(
+            f"<text x='{col_x:.1f}' y='{HEADER_H - 14}' text-anchor='start' font-size='10.5' font-weight='700' "
+            f"letter-spacing='0.02em' fill='{C['on_surface_variant']}' "
+            f"transform='rotate(-28 {col_x:.1f} {HEADER_H - 14})'>{_esc(label)}</text>"
+        )
+    for i, (_, row) in enumerate(work.iterrows()):
+        team = row['Team']
+        y = HEADER_H + ROW_H * i
+        parts.append(
+            f"<text x='{LABEL_W - 8}' y='{y + ROW_H / 2 + 4:.1f}' text-anchor='end' font-size='11' "
+            f"font-weight='600' fill='{C['on_surface']}'>{_esc(team)}</text>"
+        )
+        raw_row = raw_by_team.loc[team] if team in raw_by_team.index else None
+        for j, col in enumerate(cols):
+            pct = row[col]
+            x = LABEL_W + CELL_W * j
+            color = get_grade_color(pct) if pd.notna(pct) else C['surface_container_high']
+            raw_val = raw_row[col] if raw_row is not None else None
+            if raw_val is not None and pd.notna(raw_val):
+                tooltip = f"{team} — {col_labels.get(col, col)}: {raw_val:.1f}"
+            else:
+                tooltip = f"{team} — {col_labels.get(col, col)}: --"
+            if pd.notna(pct):
+                tooltip += f" ({pct:.0f}th pctl)"
+            parts.append(
+                f"<rect x='{x + 2:.1f}' y='{y + 3:.1f}' width='{CELL_W - 4:.1f}' height='{ROW_H - 6:.1f}' rx='3' "
+                f"fill='{color}'><title>{_esc(tooltip)}</title></rect>"
+            )
+    parts.append("</svg>")
+    st.markdown("".join(parts), unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
+# Bubble strip (rank-proximity-to-cutoff gradient)
+# ---------------------------------------------------------------------------
+
+def render_bubble_strip(df, rank_col, team_col, cutoff, window=10, value_col=None, value_label=None):
+    """
+    Horizontal strip visualizing teams' proximity to a hard rank cutoff
+    (e.g. Bracketology's projected field-of-68 line) - a "how close is the
+    bubble" gradient rather than a fabricated probability number (no
+    selection-committee model exists to produce a real one - see
+    bracketology.py's own disclaimer about what this app's seed-line
+    projection is and isn't). Shows only the `window` teams on each side of
+    `cutoff`; teams at/inside the cutoff render in the positive color,
+    teams outside it in the negative color, fading toward the cutoff line.
+    `value_col`/`value_label`: optional extra number (e.g. Net Rating)
+    added to each tooltip.
+    """
+    band = df[(df[rank_col] >= cutoff - window) & (df[rank_col] <= cutoff + window)].sort_values(rank_col)
+    if band.empty:
+        return
+    lo, hi = cutoff - window, cutoff + window
+    W, H = 860, 130
+    ML, MR = 26, 26
+    plot_w = W - ML - MR
+    axis_y = 58
+
+    def x_for(rank):
+        return ML + plot_w * (rank - lo) / max(hi - lo, 1)
+
+    parts = [
+        f"<svg viewBox='0 0 {W} {H}' xmlns='http://www.w3.org/2000/svg' "
+        f"style='width:100%; height:auto; font-family:{_BODY_FONT};'>"
+    ]
+    parts.append(f"<line x1='{ML}' y1='{axis_y}' x2='{W - MR}' y2='{axis_y}' stroke='{C['outline_variant']}' stroke-width='2'/>")
+    cutx = x_for(cutoff + 0.5)
+    parts.append(f"<line x1='{cutx:.1f}' y1='{axis_y - 30}' x2='{cutx:.1f}' y2='{axis_y + 30}' stroke='{C['primary']}' stroke-width='1.6' stroke-dasharray='4,3'/>")
+    parts.append(
+        f"<text x='{cutx:.1f}' y='{axis_y - 36}' text-anchor='middle' font-size='10.5' font-weight='700' "
+        f"letter-spacing='0.06em' fill='{C['primary']}'>PROJECTED CUTOFF</text>"
+    )
+
+    for idx, (_, row) in enumerate(band.iterrows()):
+        rank = row[rank_col]
+        team = row[team_col]
+        x = x_for(rank)
+        is_in = rank <= cutoff
+        color = C['positive'] if is_in else C['negative']
+        dist = abs(rank - cutoff)
+        opacity = max(0.35, 1.0 - dist / (window + 1) * 0.55)
+        tooltip = f"{team} — Rank #{int(rank)} — {'in the projected field' if is_in else 'on the outside looking in'}"
+        if value_col and value_col in row.index and pd.notna(row[value_col]):
+            tooltip += f" — {value_label or value_col}: {row[value_col]:.1f}"
+        parts.append(
+            f"<circle cx='{x:.1f}' cy='{axis_y}' r='5' fill='{color}' fill-opacity='{opacity:.2f}' "
+            f"stroke='{C['surface']}' stroke-width='1'><title>{_esc(tooltip)}</title></circle>"
+        )
+        above = idx % 2 == 0
+        ly = axis_y - 14 if above else axis_y + 24
+        parts.append(
+            f"<text x='{x:.1f}' y='{ly:.1f}' text-anchor='middle' font-size='9.5' font-weight='600' "
+            f"fill='{C['on_surface_variant']}'>{_esc(team)}</text>"
+        )
+    parts.append("</svg>")
+    st.markdown("".join(parts), unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
+# Prop line-shopping strip (per-book price/line comparison for one bet)
+# ---------------------------------------------------------------------------
+
+def render_prop_line_shop(rows):
+    """
+    Horizontal book-by-book comparison for ONE prop bet (a single Market +
+    Player + Selection combo, already filtered to that by the caller - see
+    ui/tabs/live_odds.py). `rows`: list of {'book', 'line', 'odds'} dicts.
+    Sorted best-price-first (for American odds, numerically larger is
+    always the better price for the bettor - true whether the price is
+    positive or negative) with the best price highlighted, so "which book
+    has the number" reads at a glance without cross-referencing the wide
+    comparison table by hand.
+    """
+    valid = [r for r in rows if r.get('odds') is not None and pd.notna(r.get('odds'))]
+    if not valid:
+        return
+    valid.sort(key=lambda r: r['odds'], reverse=True)
+    best_odds = valid[0]['odds']
+
+    ROW_H, W = 30, 860
+    H = ROW_H * len(valid) + 14
+    label_w, bar_zone_w = 160, 300
+    max_abs = max(abs(r['odds']) for r in valid) or 1
+    parts = [
+        f"<svg viewBox='0 0 {W} {H}' xmlns='http://www.w3.org/2000/svg' "
+        f"style='width:100%; height:auto; font-family:{_BODY_FONT};'>"
+    ]
+    for i, r in enumerate(valid):
+        y = 8 + ROW_H * i
+        cy = y + ROW_H / 2
+        is_best = r['odds'] == best_odds
+        color = C['primary'] if is_best else C['secondary']
+        bar_len = max(6.0, bar_zone_w * abs(r['odds']) / max_abs)
+        has_line = r.get('line') is not None and pd.notna(r.get('line'))
+        line_txt = f" ({r['line']:g})" if has_line else ""
+        odds_txt = f"{int(r['odds']):+d}"
+        parts.append(
+            f"<text x='{label_w - 8}' y='{cy + 4:.1f}' text-anchor='end' font-size='11.5' "
+            f"font-weight='{700 if is_best else 500}' fill='{C['on_surface'] if is_best else C['on_surface_variant']}'>"
+            f"{_esc(r['book'])}{' ★' if is_best else ''}</text>"
+        )
+        parts.append(
+            f"<rect x='{label_w}' y='{cy - 7:.1f}' width='{bar_len:.1f}' height='14' rx='3' fill='{color}' "
+            f"opacity='{1.0 if is_best else 0.55}'><title>{_esc(r['book'])}: {odds_txt}{line_txt}</title></rect>"
+        )
+        parts.append(
+            f"<text x='{label_w + bar_len + 8:.1f}' y='{cy + 4:.1f}' font-size='11' font-family='{_MONO_FONT}' "
+            f"font-weight='{700 if is_best else 400}' fill='{C['on_surface']}'>{odds_txt}{line_txt}</text>"
         )
     parts.append("</svg>")
     st.markdown("".join(parts), unsafe_allow_html=True)
