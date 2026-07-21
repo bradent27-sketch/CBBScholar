@@ -2,5 +2,13 @@ streamlit>=1.59
 pandas>=3.0
 numpy>=2.5
 requests>=2.34
-pyarrow>=25.0
+# streamlit 1.59 pins pyarrow<25 internally (its own setup metadata) - the
+# previous floor here (>=25.0) directly violated that and could resolve to
+# a pyarrow whose compiled libarrow ABI doesn't match what streamlit's own
+# compiled extensions expect. Confirmed as a REAL crash, not just a pip
+# warning: hit a hard segfault in libarrow.so from inside a streamlit
+# dataframe render with a mismatched pyarrow installed. Keep this upper
+# bound in sync with whatever streamlit actually declares if streamlit is
+# ever upgraded past 1.59.
+pyarrow>=14.0,<25.0
 matplotlib>=3.11

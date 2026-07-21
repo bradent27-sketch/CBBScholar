@@ -50,7 +50,7 @@ efficiency ratings, rankings — without the bot-wall problem.
 | Bracketology | CollegeBasketballData.com API `/ratings/adjusted` (simplified seed-line projection) | **Live**, explicitly not a committee simulation |
 | Transfer Portal | CollegeBasketballData.com API `/recruiting/players`, `/recruiting/portal` | **Live** |
 | Fantasy & Pools | CollegeBasketballData.com API stats + local scoring config | **Live** — season totals only |
-| Matchup Analyzer | CollegeBasketballData.com API — `/ratings/adjusted`, `/stats/team/season`, `/games`, `/games/players`, `/teams/roster` | **Live** — simple projection, not a simulation. Team Defense's positional breakdown is built from `/games` + `/games/players` scoped to each team's actual opponents (not a full-D-I pull) — see HANDOFF.md §3 |
+| Matchup Analyzer | CollegeBasketballData.com API — `/ratings/adjusted`, `/stats/team/season`, `/games`, `/games/players`, `/teams/roster` — PLUS a free ESPN/SportsDataverse season file, preferred first, for Team Defense's positional breakdown | **Live** — simple projection, not a simulation. Team Defense's positional breakdown tries the free ESPN/SportsDataverse file first (zero CBBD-quota cost) and falls back to `/games` + `/games/players` scoped to each team's actual opponents (not a full-D-I pull) whenever that free source is stale/unavailable — see "ESPN/SportsDataverse fallback" below and HANDOFF.md §2/§3 |
 | Live Odds | The Odds API `basketball_ncaab` | **Live** (shows "no games" in the off-season — correct behavior) |
 | Player Compare | CollegeBasketballData.com API | **Live** |
 
@@ -90,6 +90,47 @@ is wired as a manual, click-triggered fetch only (24h cache) — never
 called automatically on tab load or on any schedule. See
 `ui/tabs/net_resume.py`.
 
+## ESPN/SportsDataverse fallback for positional matchup defense
+
+`data.loaders.load_positional_matchup_data` (the data source behind
+Matchup Analyzer's Team Defense positional breakdown) now tries a free,
+keyless alternative FIRST before falling back to the CBBD approach
+described above: **SportsDataverse's published season file**
+(`sportsdataverse/sportsdataverse-data` on GitHub Releases — the Python
+sibling of the R `hoopR` package, same maintainers as `cfbfastR`). It
+publishes one parquet file per season with every D-I team's game-by-game
+player box scores already in it — ESPN-sourced, no API key, no CBBD-style
+monthly quota, one file download instead of a per-opponent fan-out.
+
+**Why CBBD stays as the fallback, not the other way around:** this file's
+freshness depends entirely on SportsDataverse's OWN scrape/publish
+schedule, which this project has no control over and — as of this
+writing, before the 2026-27 season has started — has not been possible to
+verify live (this build environment's network policy blocks GitHub
+release-asset downloads the same way it blocks CBBD/ESPN directly).
+`load_positional_matchup_data` checks the file's own coverage of a team
+against CBBD's confirmed schedule (`_is_espn_data_fresh_enough`, a
+10-day-lag tolerance) before trusting it, and falls back to the CBBD path
+automatically — silently, no error shown — whenever the file is missing,
+unreachable, or too far behind. **What to actually check once the 2026-27
+season starts:** open Matchup Analyzer → Team Defense for any team with a
+few games played, and see whether the "Positional Matchup Defense" section
+loads without hitting the CBBD-cost path (nothing definitive to check for
+in the UI yet either way — if this matters, ask for a small "data source
+used: ESPN file / CBBD fallback" indicator to be added to that section).
+If the file turns out to consistently lag more than a couple weeks behind
+the live season, CBBD's per-opponent fan-out (with the `max_recent_games`
+cap below) remains the reliable path — nothing about this fallback risks
+making the feature WORSE than it already was, only better when it works.
+
+Implemented as a direct `requests.get()` + `pandas.read_parquet()` call
+against SportsDataverse's own published URL — deliberately NOT the
+`sportsdataverse` PyPI package, which pulls in scikit-learn, xgboost,
+scipy, pyreadr, and beautifulsoup4 for no benefit here, and whose own
+pyarrow pin conflicts with the one Streamlit itself requires (see
+HANDOFF.md §5's pyarrow gotcha for the segfault that combination caused
+elsewhere in this app).
+
 ## API budget: CBBD's 1,000 calls/month free tier
 
 Confirmed via CBBD's own docs/socials (this sandbox can't reach the API
@@ -104,7 +145,11 @@ Student/Academic tier (register with a `.edu` email) raises this to
 GraphQL API access for more flexible/efficient querying.
 
 **Cost breakdown** (steady-state, i.e. what a normal week of use costs,
-not first-ever-load):
+not first-ever-load). **These positional-matchup-defense rows are now the
+WORST case, not the expected case** — they're what CBBD-only cost looks
+like whenever the free ESPN/SportsDataverse fallback above isn't usable
+for a given team; when it IS usable, that cost drops to zero (one shared
+file download, cached weekly, covers every team/matchup at once):
 
 | What | Cost | Notes |
 |---|---|---|

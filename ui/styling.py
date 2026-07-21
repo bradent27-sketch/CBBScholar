@@ -8,12 +8,15 @@ primary color instead, so the accent is driven entirely by config.py.
 """
 import base64
 import os
-import re
 
 import pandas as pd
 import streamlit as st
 
 from config import THEME, TEAM_CONFIG
+from data.utils import (
+    normalize_team_name as _normalize_team_name,
+    expand_team_name_aliases as _expand_with_aliases,
+)
 
 C = THEME['colors']
 F = THEME['fonts']
@@ -745,69 +748,6 @@ def style_plain_dataframe(df, numeric_pct_cols=None, diverging_cols=None, matchu
         styler = styler.format(fmt, na_rep='--')
 
     return styler
-
-
-def _normalize_team_name(name):
-    """
-    Loose match key for team names that get formatted differently across
-    this app's data sources for the exact same school - punctuation,
-    case, a trailing 'University'/'College', possessive apostrophes. An
-    exact-string dict lookup silently returns no color (not an error) on
-    any of these mismatches, which is why a team-colored table can end up
-    mostly uncolored even though the code path passes a real color map -
-    this loose key is the fallback `style_plain_dataframe` tries when the
-    exact key misses. Does NOT resolve true word-different aliases (see
-    _TEAM_NAME_ALIASES below for those - normalizing punctuation alone
-    can't turn 'NC State' into 'North Carolina State').
-    """
-    if not name:
-        return ''
-    s = re.sub(r"[^a-z0-9\s]", "", str(name).lower())
-    for noise in (' university', ' univ', ' college'):
-        s = s.replace(noise, '')
-    return re.sub(r"\s+", " ", s).strip()
-
-
-# Common short-name/full-name aliases seen across ncaa.com, CBBD, and ESPN
-# for the same school - NOT exhaustive (this sandbox's network policy
-# blocked live-checking every source's exact naming - see HANDOFF.md), just
-# the well-known ones. Keyed/valued as normalized (_normalize_team_name)
-# strings both directions get registered under each other's color. Extend
-# this list if a real run still shows a team missing its color.
-_TEAM_NAME_ALIASES = [
-    ('uconn', 'connecticut'),
-    ('ole miss', 'mississippi'),
-    ('pitt', 'pittsburgh'),
-    ('nc state', 'north carolina state'),
-    ('usc', 'southern california'),
-    ('smu', 'southern methodist'),
-    ('lsu', 'louisiana state'),
-    ('byu', 'brigham young'),
-    ('vcu', 'virginia commonwealth'),
-    ('unlv', 'nevada las vegas'),
-    ('utep', 'texas el paso'),
-    ('uab', 'alabama birmingham'),
-    ('uic', 'illinois chicago'),
-    ('umass', 'massachusetts'),
-    ('ucf', 'central florida'),
-    ('fiu', 'florida international'),
-    ('miami', 'miami fl'),
-    ('st johns', 'st johns ny'),
-    ("saint marys", "saint marys ca"),
-]
-
-
-def _expand_with_aliases(norm_map):
-    """Adds each _TEAM_NAME_ALIASES pair's other spelling to `norm_map`
-    (pointing at the same color) whenever exactly one side is already
-    present - never overwrites a real direct hit with a guessed one."""
-    expanded = dict(norm_map)
-    for a, b in _TEAM_NAME_ALIASES:
-        if a in norm_map and b not in expanded:
-            expanded[b] = norm_map[a]
-        if b in norm_map and a not in expanded:
-            expanded[a] = norm_map[b]
-    return expanded
 
 
 def df_auto_height(n_rows, row_px=35, header_px=38, padding_px=3):

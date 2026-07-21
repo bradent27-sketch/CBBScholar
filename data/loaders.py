@@ -16,13 +16,40 @@ get past - confirmed via direct curl with a real browser User-Agent, still
 blocked. It is NOT used here. See DATA_SOURCES.md for the corrected plan
 (CollegeBasketballData.com's cbbd API in its place).
 """
+import datetime
 import io
 
 import requests
 import pandas as pd
 import streamlit as st
 
+from data.utils import resolve_team_name
+
 NCAA_NET_RANKINGS_URL = "https://www.ncaa.com/rankings/basketball-men/d1/ncaa-mens-basketball-net-rankings"
+
+
+def _week_bucket():
+    """
+    ISO (year, week) string, e.g. '2026-W04' - threaded as a hidden extra
+    argument into every weekly, disk-persisted league-wide loader below.
+
+    Necessary because `st.cache_data(ttl=..., persist="disk")` SILENTLY
+    IGNORES `ttl` - confirmed directly in Streamlit's own source
+    (streamlit.runtime.caching.storage.local_disk_cache_storage: "The
+    cached function '%s' has a TTL that will be ignored. Persistent cached
+    functions currently don't support TTL."), not just a docs gap. Without
+    this, a `persist="disk"` cache never expires on its own - it would
+    have kept serving the SAME snapshot forever until someone clicked the
+    manual "Refresh league-wide data" button, contrary to every "cached
+    ~weekly" claim made about these loaders. Including this bucket as an
+    actual (cache-key-hashed) argument makes each entry naturally
+    superseded once a week without needing an active TTL at all - the
+    standard workaround for this exact Streamlit limitation. Old weeks'
+    entries are superseded, not deleted; harmless disk usage at this app's
+    scale, not worth adding cleanup for.
+    """
+    year, week, _ = datetime.date.today().isocalendar()
+    return f"{year}-W{week:02d}"
 
 
 @st.cache_data(ttl=86400)
@@ -293,30 +320,8 @@ def get_player_season_stats(team, season, athlete_id):
     return match.iloc[0].to_dict()
 
 
-@st.cache_data(ttl=604800, show_spinner=False, persist="disk")
-def load_conference_player_season_stats(conference, season=None):
-    """
-    Every player's season stats for every team in one conference, fanned
-    out over the existing per-team load_team_player_stats (already cached
-    individually - a team looked up elsewhere this session is a cache hit
-    here too). This is the 'compare this player to their own conference'
-    distribution ui.tabs.player_search uses by default: cheap enough (one
-    conference is ~8-18 teams) to run automatically, unlike a full-D-I
-    pull. Returns one concatenated wide DataFrame, same shape as
-    load_team_player_stats.
-
-    Weekly TTL + disk persistence (not the short per-team TTLs): this is a
-    LEAGUE-WIDE reference distribution used only for percentile context, not
-    a specific team/player's own current stats - the user explicitly asked
-    for "pull league averages weekly, compare current stats against week-old
-    context" instead of re-fetching/recomputing the whole distribution on
-    every tab visit. `persist="disk"` survives an app restart (Streamlit
-    Community Cloud can restart the process on inactivity, which would
-    otherwise silently drop the in-memory cache and eat the full fan-out
-    cost again) - see clear_league_wide_caches() for the manual-refresh path
-    wired to the sidebar, for whenever fresher-than-a-week data is wanted.
-    """
-    season = season or current_cbb_season()
+@st.cache_data(show_spinner=False, persist="disk")
+def _load_conference_player_season_stats_cached(conference, season, _week):
     teams_df = load_teams(season)
     if teams_df.empty:
         return pd.DataFrame()
@@ -328,27 +333,38 @@ def load_conference_player_season_stats(conference, season=None):
     return pd.concat(frames, ignore_index=True)
 
 
-@st.cache_data(ttl=604800, show_spinner=False, persist="disk")
-def load_all_player_season_stats(season=None):
+def load_conference_player_season_stats(conference, season=None):
     """
-    Every D-I player's season stats in one cached pull, built the same
-    fan-out way as load_conference_player_season_stats but across every
-    team in load_teams() - genuinely expensive (one HTTP call per D-I team,
-    360+), so this is opt-in from the UI (a "compare vs all of D-I"
-    checkbox), never called automatically on every Player Search visit.
+    Every player's season stats for every team in one conference, fanned
+    out over the existing per-team load_team_player_stats (already cached
+    individually - a team looked up elsewhere this session is a cache hit
+    here too). This is the 'compare this player to their own conference'
+    distribution ui.tabs.player_search uses by default: cheap enough (one
+    conference is ~8-18 teams) to run automatically, unlike a full-D-I
+    pull. Returns one concatenated wide DataFrame, same shape as
+    load_team_player_stats.
 
-    Weekly TTL + disk persistence, not the old 6h in-memory-only cache: the
-    fan-out cost was previously being re-paid every 6 hours (and on every
-    app restart, since in-memory cache doesn't survive that) even though
-    this is league-CONTEXT data, not any specific player's own stats - the
-    user explicitly asked to treat this like a weekly snapshot ("compare
-    current stats to week-old averages, not a huge deal") rather than
-    something that needs to feel live. `persist="disk"` means a restarted
-    app reuses last week's pull instead of re-running the full 360-team
-    fan-out on the next visit. See clear_league_wide_caches() for the
-    manual "refresh now" escape hatch (wired to the sidebar).
+    Weekly refresh + disk persistence (not the short per-team TTLs): this
+    is a LEAGUE-WIDE reference distribution used only for percentile
+    context, not a specific team/player's own current stats - the user
+    explicitly asked for "pull league averages weekly, compare current
+    stats against week-old context" instead of re-fetching/recomputing the
+    whole distribution on every tab visit. The actual weekly-refresh
+    mechanism is `_week_bucket()` (see its docstring for why - `ttl=` on a
+    persist="disk" cache is silently ignored by Streamlit, confirmed in
+    its own source, not a real expiry). `persist="disk"` survives an app
+    restart (Streamlit Community Cloud can restart the process on
+    inactivity, which would otherwise silently drop an in-memory-only
+    cache and eat the full fan-out cost again) - see
+    clear_league_wide_caches() for the manual-refresh path wired to the
+    sidebar, for whenever fresher-than-a-week data is wanted.
     """
     season = season or current_cbb_season()
+    return _load_conference_player_season_stats_cached(conference, season, _week_bucket())
+
+
+@st.cache_data(show_spinner=False, persist="disk")
+def _load_all_player_season_stats_cached(season, _week):
     teams_df = load_teams(season)
     if teams_df.empty:
         return pd.DataFrame()
@@ -366,14 +382,34 @@ def load_all_player_season_stats(season=None):
     return pd.concat(frames, ignore_index=True)
 
 
-@st.cache_data(ttl=604800, persist="disk")
-def load_efficiency_ratings(season=None):
+def load_all_player_season_stats(season=None):
     """
-    Adjusted offensive/defensive efficiency and net rating for every D-I
-    team - CBBD's KenPom-equivalent. Verified live against /ratings/adjusted
-    before writing this parser; field names below are exact.
+    Every D-I player's season stats in one cached pull, built the same
+    fan-out way as load_conference_player_season_stats but across every
+    team in load_teams() - genuinely expensive (one HTTP call per D-I team,
+    360+), so this is opt-in from the UI (a "compare vs all of D-I"
+    checkbox), never called automatically on every Player Search visit.
+
+    Weekly refresh + disk persistence, not the old 6h in-memory-only
+    cache: the fan-out cost was previously being re-paid every 6 hours
+    (and on every app restart, since in-memory cache doesn't survive that)
+    even though this is league-CONTEXT data, not any specific player's own
+    stats - the user explicitly asked to treat this like a weekly snapshot
+    ("compare current stats to week-old averages, not a huge deal") rather
+    than something that needs to feel live. The actual weekly-refresh
+    mechanism is `_week_bucket()` (`ttl=` on a persist="disk" cache is
+    silently ignored by Streamlit - confirmed in its own source, not a
+    real expiry - see that function's docstring). `persist="disk"` means a
+    restarted app reuses last week's pull instead of re-running the full
+    360-team fan-out on the next visit. See clear_league_wide_caches() for
+    the manual "refresh now" escape hatch (wired to the sidebar).
     """
     season = season or current_cbb_season()
+    return _load_all_player_season_stats_cached(season, _week_bucket())
+
+
+@st.cache_data(persist="disk")
+def _load_efficiency_ratings_cached(season, _week):
     data = _cbbd_get("/ratings/adjusted", params={"season": season})
     if not data:
         return pd.DataFrame()
@@ -392,6 +428,21 @@ def load_efficiency_ratings(season=None):
         })
     df = pd.DataFrame(rows)
     return df.sort_values('Rank') if not df.empty and 'Rank' in df.columns else df
+
+
+def load_efficiency_ratings(season=None):
+    """
+    Adjusted offensive/defensive efficiency and net rating for every D-I
+    team - CBBD's KenPom-equivalent. Verified live against /ratings/adjusted
+    before writing this parser; field names below are exact.
+
+    Weekly refresh + disk persistence via `_week_bucket()`, not a `ttl=`
+    (silently ignored on a persist="disk" cache by Streamlit - see that
+    function's docstring) - same league-context-data reasoning as the
+    other full-league loaders in this file.
+    """
+    season = season or current_cbb_season()
+    return _load_efficiency_ratings_cached(season, _week_bucket())
 
 
 @st.cache_data(ttl=3600)
@@ -497,34 +548,8 @@ def load_transfer_portal(season=None):
     return pd.DataFrame(rows)
 
 
-@st.cache_data(ttl=604800, persist="disk")
-def load_all_team_season_stats(season=None):
-    """
-    Every D-I team's full season stat sheet in ONE call via /stats/team/season
-    - verified live before writing this (700 rows for 2025; exact shape:
-    pace at top level, teamStats/opponentStats sub-dicts each containing a
-    fourFactors dict, a points dict with inPaint/fastBreak splits, and
-    made/attempted/pct shooting splits). This single cached pull powers the
-    Four Factors matchup engine, the tempo-based score projection, and (the
-    Def 3PA Rate/3P%/DREB% columns added below) the Matchup Analyzer's Team
-    Defense profile.
-
-    Weekly TTL + disk persistence like the other full-league pulls (see
-    load_all_player_season_stats) - this is a single API call regardless, so
-    it was never the expensive one, but it's still league-CONTEXT data the
-    user wants treated as a weekly snapshot rather than re-pulled every 6h.
-
-    Def 3PA Rate/Def 3P%/Def DREB% are NEW columns built from
-    opponentStats.threePointFieldGoals and opponentStats.fieldGoals - the
-    same opponentStats sub-object whose .fourFactors and .points siblings
-    are already used above and confirmed live, so this leans on an already-
-    verified parent shape rather than a new unverified endpoint. Def DREB%
-    is computed as the complement of Def ORB% (100 - opponent offensive
-    rebound % allowed) rather than a separate unverified field - defensive
-    and opponent-offensive rebound share are complementary by definition,
-    so no new field is needed to state it as "your own DREB%".
-    """
-    season = season or current_cbb_season()
+@st.cache_data(persist="disk")
+def _load_all_team_season_stats_cached(season, _week):
     data = _cbbd_get("/stats/team/season", params={"season": season})
     if not data:
         return pd.DataFrame()
@@ -564,6 +589,30 @@ def load_all_team_season_stats(season=None):
             'Def DREB%': (100 - def_orb_pct) if def_orb_pct is not None else None,
         })
     return pd.DataFrame(rows)
+
+
+def load_all_team_season_stats(season=None):
+    """
+    Every D-I team's full season stat sheet in ONE call via /stats/team/season
+    - verified live before writing this (700 rows for 2025; teamStats and
+    opponentStats each carry a fourFactors block plus points/fieldGoals/
+    threePointFieldGoals detail). This single cached pull powers the Four
+    Factors matchup engine, the tempo-based score projection, and the
+    Matchup Analyzer's Team Defense profile.
+
+    Def 3PA Rate/Def 3P%/Def DREB% are derived from the opponentStats side
+    of the payload (i.e. what opponents did AGAINST this team), not a
+    separate defense endpoint - opponentStats.fourFactors.offensiveReboundPct
+    is opponents' OWN offensive rebound rate against this team, so
+    Def DREB% = 100 - that value.
+
+    Weekly refresh + disk persistence via `_week_bucket()`, not a `ttl=`
+    (silently ignored on a persist="disk" cache by Streamlit - see that
+    function's docstring) - same league-wide-data reasoning as the other
+    full-league loaders in this file.
+    """
+    season = season or current_cbb_season()
+    return _load_all_team_season_stats_cached(season, _week_bucket())
 
 
 @st.cache_data(ttl=21600)
@@ -653,8 +702,8 @@ def load_player_game_logs(team, season=None):
     return df.sort_values('Date').reset_index(drop=True) if not df.empty else df
 
 
-@st.cache_data(ttl=604800, show_spinner=False, persist="disk")
-def load_team_opponent_game_logs(team, season=None, max_recent_games=20):
+@st.cache_data(show_spinner=False, persist="disk")
+def _load_team_opponent_game_logs_cached(team, season, max_recent_games, _week):
     """
     Every OPPOSING player's box score from `team`'s `max_recent_games` MOST
     RECENT games this season - the data source behind the Matchup
@@ -698,7 +747,9 @@ def load_team_opponent_game_logs(team, season=None, max_recent_games=20):
     games played, not by D-I's full 360+ teams) - and each of those calls is
     independently cached per-opponent, so it's shared/reused by every OTHER
     matchup that also involves that same opponent (heavy overlap in-
-    conference), not paid fresh per matchup. Weekly TTL + disk persistence
+    conference), not paid fresh per matchup. Weekly refresh + disk
+    persistence via `_week_bucket()`, not a `ttl=` (silently ignored on a
+    persist="disk" cache by Streamlit - see that function's docstring),
     like the other league-context pulls above.
 
     Returns columns: Opponent Team (who `team` played), Player,
@@ -708,7 +759,6 @@ def load_team_opponent_game_logs(team, season=None, max_recent_games=20):
     Season Avg Points/Rebounds/Assists/FGA/3PA (that player's own full-
     season average, all games, from the same cached frame).
     """
-    season = season or current_cbb_season()
     games = load_team_games(team, season)
     if games.empty:
         return pd.DataFrame()
@@ -742,6 +792,226 @@ def load_team_opponent_game_logs(team, season=None, max_recent_games=20):
     return pd.DataFrame(rows)
 
 
+def load_team_opponent_game_logs(team, season=None, max_recent_games=20):
+    """
+    Public wrapper - resolves `season` and threads `_week_bucket()` through
+    to `_load_team_opponent_game_logs_cached` (see its docstring for the
+    full behavior/cost breakdown). This is CBBD's own positional-matchup
+    data source; `load_positional_matchup_data` below tries the free ESPN/
+    SportsDataverse season file first and falls back to this.
+    """
+    season = season or current_cbb_season()
+    return _load_team_opponent_game_logs_cached(team, season, max_recent_games, _week_bucket())
+
+
+# ===========================================================
+# ESPN box scores via SportsDataverse's free published season file
+# (GitHub Releases, hoopR's Python sibling project) - built specifically
+# to cut CBBD's 1,000-call/month free-tier pressure from the positional
+# matchup defense engine above: ONE file download covers every D-I team's
+# WHOLE SEASON of game logs, vs. load_team_opponent_game_logs' ~1 CBBD
+# call per opponent per team. No API key, no CBBD-style monthly quota.
+#
+# Deliberately NOT using the `sportsdataverse` PyPI package - same "raw
+# requests over an SDK wrapper" call this app already made for cbbd (see
+# HANDOFF.md), doubly justified here: sportsdataverse pulls in scikit-
+# learn/xgboost/scipy/pyreadr/beautifulsoup4/etc (none of which this
+# needs just to download one parquet file) and its own pyarrow pin
+# actively conflicts with the one streamlit already requires. This hits
+# the exact same published parquet file directly with `requests` +
+# `pd.read_parquet`, both already dependencies - zero new install weight.
+#
+# NOT verified against a live payload - this sandbox's network policy
+# blocks GitHub release-asset downloads (confirmed via the same egress-
+# proxy 403 pattern hit on CBBD/ESPN all along; only raw.githubusercontent
+# .com file blobs are reachable here, not release assets) - see
+# DATA_SOURCES.md. The URL and schema below come from SportsDataverse's
+# own published field docs and R/Python source (fetched via
+# raw.githubusercontent.com, which IS reachable), not a live response.
+# Every function below treats empty/failed as "unavailable" and falls
+# back to the already-proven CBBD path - this can only help, never break
+# what already worked. Confirm against real data before fully trusting it.
+# ===========================================================
+ESPN_SEASON_PLAYER_BOX_URL = (
+    "https://github.com/sportsdataverse/sportsdataverse-data/releases/download/"
+    "espn_mens_college_basketball_player_boxscores/player_box_{season}.parquet"
+)
+
+_ESPN_BOX_AVG_COLS = ['Points', 'Rebounds', 'Assists', 'FGA', '3PA']
+
+
+@st.cache_data(show_spinner=False, persist="disk")
+def _load_espn_season_player_box_cached(season, _week):
+    """
+    Every D-I player's game-by-game box score for the WHOLE season, from
+    one free file download - see module docstring above for the full
+    rationale and the "not live-verified" caveat.
+
+    Team names are reconciled to THIS app's canonical CBBD team names
+    (data.utils.resolve_team_name against load_teams()) once here, for
+    the whole file, rather than per-caller - rows whose team/opponent
+    can't be resolved to a known CBBD team are dropped rather than joined
+    to the wrong team.
+
+    Returns columns: GameId, Date, Team, Opponent, Home/Away,
+    athleteSourceId (ESPN's own athlete id - see the field-level comment
+    below for why this is expected, not confirmed, to line up with CBBD's
+    sourceId/athleteSourceId), name, Position ('Guard'/'Forward'/'Center'
+    - this source's one clear edge over the CBBD path: no separate roster
+    call needed for position), Minutes, Points, Rebounds, Assists, Steals,
+    Blocks, Turnovers, FGM, FGA, 3PM, 3PA. Empty DataFrame on any failure.
+
+    Weekly refresh + disk persistence via `_week_bucket()`, not a `ttl=`
+    (silently ignored on a persist="disk" cache by Streamlit - see that
+    function's docstring).
+    """
+    try:
+        resp = requests.get(ESPN_SEASON_PLAYER_BOX_URL.format(season=season), timeout=45)
+        resp.raise_for_status()
+        raw = pd.read_parquet(io.BytesIO(resp.content))
+    except Exception:
+        return pd.DataFrame()
+    if raw is None or raw.empty:
+        return pd.DataFrame()
+
+    def col(name):
+        return raw[name] if name in raw.columns else pd.Series([None] * len(raw), index=raw.index)
+
+    teams_df = load_teams(season)
+    canonical = teams_df['Team'].dropna().tolist() if not teams_df.empty else []
+    distinct_names = set(col('team_location').dropna()) | set(col('opponent_team_location').dropna())
+    name_map = {n: resolve_team_name(n, canonical) for n in distinct_names} if canonical else {}
+
+    game_date = pd.to_datetime(col('game_date'), errors='coerce')
+    out = pd.DataFrame({
+        'GameId': col('game_id'),
+        'Date': game_date.dt.strftime('%Y-%m-%d'),
+        'Team': col('team_location').map(name_map) if name_map else None,
+        'Opponent': col('opponent_team_location').map(name_map) if name_map else None,
+        'Home/Away': col('home_away').map({'home': 'vs', 'away': '@'}),
+        # SportsDataverse's athlete_id IS ESPN's own athlete id - the SAME
+        # "ESPN-side id" namespace load_team_roster's sourceId and
+        # load_player_game_logs' athleteSourceId already document
+        # themselves as being (see HANDOFF.md's id-namespace gotcha) -
+        # both this field and CBBD's ultimately trace back to the same
+        # ESPN athlete record. Reasoned, not live-confirmed (see module
+        # docstring) - kept under the SAME column name so existing
+        # sourceId-based joins work unmodified regardless of which source
+        # produced a given row; falls back to name matching wherever this
+        # assumption is wrong, same as the CBBD path already does.
+        'athleteSourceId': col('athlete_id'),
+        'name': col('athlete_display_name'),
+        'Position': col('athlete_position_name'),
+        'Minutes': pd.to_numeric(col('minutes'), errors='coerce'),
+        'Points': pd.to_numeric(col('points'), errors='coerce'),
+        'Rebounds': pd.to_numeric(col('rebounds'), errors='coerce'),
+        'Assists': pd.to_numeric(col('assists'), errors='coerce'),
+        'Steals': pd.to_numeric(col('steals'), errors='coerce'),
+        'Blocks': pd.to_numeric(col('blocks'), errors='coerce'),
+        'Turnovers': pd.to_numeric(col('turnovers'), errors='coerce'),
+        'FGM': pd.to_numeric(col('field_goals_made'), errors='coerce'),
+        'FGA': pd.to_numeric(col('field_goals_attempted'), errors='coerce'),
+        '3PM': pd.to_numeric(col('three_point_field_goals_made'), errors='coerce'),
+        '3PA': pd.to_numeric(col('three_point_field_goals_attempted'), errors='coerce'),
+    })
+    out = out.dropna(subset=['Team', 'Opponent', 'Date'])
+    return out.sort_values('Date').reset_index(drop=True) if not out.empty else out
+
+
+def load_espn_season_player_box(season=None):
+    """
+    Public wrapper - resolves `season` and threads `_week_bucket()` through
+    to `_load_espn_season_player_box_cached` (see its docstring for the
+    full field-level breakdown and freshness caveats).
+    """
+    season = season or current_cbb_season()
+    return _load_espn_season_player_box_cached(season, _week_bucket())
+
+
+def load_positional_matchup_data(team, season=None, max_recent_games=20):
+    """
+    Positional-matchup-defense data source for `team`, preferring the free
+    ESPN season file (load_espn_season_player_box - zero CBBD-quota cost,
+    every opposing player's box score already in one place, no per-
+    opponent fan-out needed at all) and falling back to the proven CBBD
+    path (load_team_opponent_game_logs) whenever the ESPN file is missing,
+    unreachable, or too far behind `team`'s actual CBBD-confirmed schedule
+    to trust (see _is_espn_data_fresh_enough) - most likely early in a
+    brand-new season, before SportsDataverse's own scrape/publish job has
+    caught up. This fallback means switching to ESPN can only ever help or
+    be a no-op; it can't make this feature less reliable than it already
+    was on CBBD alone.
+
+    Same output shape as load_team_opponent_game_logs PLUS a Position
+    column when the ESPN path is used (None when the CBBD fallback is
+    used) - callers should build their position map from this column when
+    present (see ui.tabs.matchup_analyzer._position_map_for_matchup) and
+    only fall back to a roster lookup when it's absent, saving the roster
+    API calls entirely on top of the game-log savings.
+    """
+    season = season or current_cbb_season()
+    espn_df = load_espn_season_player_box(season)
+    if not espn_df.empty and 'Team' in espn_df.columns:
+        team_games_espn = espn_df[espn_df['Team'] == team]
+        if not team_games_espn.empty and _is_espn_data_fresh_enough(team, season, team_games_espn):
+            scoped_dates = sorted(team_games_espn['Date'].dropna().unique())
+            if max_recent_games:
+                scoped_dates = scoped_dates[-max_recent_games:]
+            vs_team = espn_df[(espn_df['Opponent'] == team) & (espn_df['Date'].isin(scoped_dates))]
+            if not vs_team.empty:
+                season_avgs = espn_df.groupby('athleteSourceId')[_ESPN_BOX_AVG_COLS].mean()
+                rows = []
+                for _, r in vs_team.iterrows():
+                    sid = r.get('athleteSourceId')
+                    avg = season_avgs.loc[sid] if sid in season_avgs.index else None
+                    # `vs_team` was filtered on Opponent == `team`, so
+                    # r['Opponent'] is just `team` itself on every row -
+                    # the OTHER team, the one whose defense this row is
+                    # evidence against, is r['Team'] (whichever squad this
+                    # specific opposing player actually plays for).
+                    row = {
+                        'Opponent Team': r.get('Team'),
+                        'Player': r.get('name'),
+                        'athleteSourceId': sid,
+                        'Date': r.get('Date'),
+                        'Position': r.get('Position'),
+                    }
+                    for c in _ESPN_BOX_AVG_COLS:
+                        row[c] = r.get(c)
+                        row[f'Season Avg {c}'] = avg[c] if avg is not None else None
+                    rows.append(row)
+                return pd.DataFrame(rows)
+    # Fallback: the proven CBBD path, unchanged.
+    fallback = load_team_opponent_game_logs(team, season, max_recent_games=max_recent_games)
+    if not fallback.empty:
+        fallback = fallback.copy()
+        fallback['Position'] = None
+    return fallback
+
+
+def _is_espn_data_fresh_enough(team, season, team_games_espn, max_lag_days=10):
+    """
+    True if the ESPN season file's coverage of `team` is recent enough to
+    trust over the CBBD fallback - compares the ESPN file's most recent
+    game date for `team` against CBBD's own load_team_games (already
+    cached, effectively free to check). Missing/unparseable dates on
+    either side fail safe (return False -> caller falls back to CBBD).
+    """
+    try:
+        espn_latest = pd.to_datetime(team_games_espn['Date'], errors='coerce').max()
+        cbbd_games = load_team_games(team, season)
+        if cbbd_games.empty:
+            # No CBBD schedule to compare against - trust the ESPN file
+            # rather than refusing to use it at all.
+            return pd.notna(espn_latest)
+        cbbd_latest = pd.to_datetime(cbbd_games['Date'], errors='coerce').max()
+        if pd.isna(espn_latest) or pd.isna(cbbd_latest):
+            return False
+        return (cbbd_latest - espn_latest).days <= max_lag_days
+    except Exception:
+        return False
+
+
 def clear_league_wide_caches():
     """
     Manual "refresh league-wide data now" escape hatch for every long
@@ -750,14 +1020,21 @@ def clear_league_wide_caches():
     schedule, matching this app's existing manual-refresh precedent
     (fetch_net_rankings_manual). `st.cache_data`'s .clear() drops every
     cached call of that function regardless of arguments (every team/
-    season/conference combo at once) - correct here since "refresh" should
-    mean everything, not one team at a time.
+    season/conference/_week combo at once) - correct here since "refresh"
+    should mean everything, not one team at a time.
+
+    Targets the PRIVATE `_..._cached` inner functions, not the public
+    wrappers above them - since the `_week_bucket()` refactor (see that
+    function's docstring), the public functions are plain Python functions
+    with no `.clear()` of their own; `st.cache_data` decorates only the
+    inner function now.
     """
-    load_all_player_season_stats.clear()
-    load_conference_player_season_stats.clear()
-    load_all_team_season_stats.clear()
-    load_efficiency_ratings.clear()
-    load_team_opponent_game_logs.clear()
+    _load_all_player_season_stats_cached.clear()
+    _load_conference_player_season_stats_cached.clear()
+    _load_all_team_season_stats_cached.clear()
+    _load_efficiency_ratings_cached.clear()
+    _load_team_opponent_game_logs_cached.clear()
+    _load_espn_season_player_box_cached.clear()
 
 
 def _odds_api_key():

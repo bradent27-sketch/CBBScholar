@@ -30,7 +30,7 @@ import streamlit as st
 from config import AVAILABLE_SEASONS
 from data.loaders import (
     current_cbb_season, load_efficiency_ratings, load_all_team_season_stats, load_team_games,
-    load_team_roster, load_team_opponent_game_logs, get_player_season_stats, load_player_game_logs,
+    load_team_roster, load_positional_matchup_data, get_player_season_stats, load_player_game_logs,
     load_conference_player_season_stats, load_all_player_season_stats, load_teams,
 )
 from data.transforms import (
@@ -260,20 +260,33 @@ def _render_overview(season, team_a, team_b, row_a, row_b, ratings, team_stats, 
 
 def _position_map_for_matchup(matchup_df, season):
     """{athleteSourceId(str): position_bucket} for every opposing player in
-    `matchup_df` (data.loaders.load_team_opponent_game_logs output), built
-    by pulling each distinct opponent's roster (already independently
-    cached per-team, so this reuses whatever's already been fetched
-    elsewhere this session/week rather than adding new API surface)."""
+    `matchup_df` (data.loaders.load_positional_matchup_data output).
+
+    Prefers the 'Position' column directly on `matchup_df` when present -
+    the ESPN/SportsDataverse source (see data.loaders.load_positional_
+    matchup_data) carries athlete_position_name on every row, so no extra
+    lookup is needed at all for those rows: zero CBBD roster calls. Only
+    rows without a usable Position (the CBBD-fallback path, which doesn't
+    carry position) fall back to pulling that opponent's roster - already
+    independently cached per-team, so this reuses whatever's already been
+    fetched elsewhere this session/week rather than adding new API
+    surface."""
     if matchup_df is None or matchup_df.empty:
         return {}
     pos_map = {}
-    for opp in matchup_df['Opponent Team'].dropna().unique():
+    has_position_col = 'Position' in matchup_df.columns
+    if has_position_col:
+        with_pos = matchup_df.dropna(subset=['Position', 'athleteSourceId'])
+        for _, r in with_pos.iterrows():
+            pos_map[str(r['athleteSourceId'])] = position_bucket(r['Position'])
+    missing_position = matchup_df[~matchup_df['athleteSourceId'].astype(str).isin(pos_map)] if has_position_col else matchup_df
+    for opp in missing_position['Opponent Team'].dropna().unique():
         roster = load_team_roster(opp, season)
         if roster.empty:
             continue
         for _, r in roster.iterrows():
             sid = r.get('sourceId')
-            if sid is not None:
+            if sid is not None and str(sid) not in pos_map:
                 pos_map[str(sid)] = position_bucket(r.get('position'))
     return pos_map
 
@@ -305,17 +318,18 @@ def _render_team_defense(season, team_a, team_b, team_stats):
     st.markdown("---")
     st.markdown("**Positional Matchup Defense**")
     st.caption(
-        f"Built from {team_a} and {team_b}'s own recent games (not a full D-I pull) — roughly one API call per "
-        "opponent already faced, cached ~weekly and shared with any other matchup touching the same opponent. "
-        "CBBD's free tier caps out at 1,000 calls/month, so this is capped to each team's most recent games by "
-        "default rather than the full season — see HANDOFF.md for the full architecture, the API-cost math, and "
-        "the position-field granularity caveat (this sandbox couldn't verify it live against a real payload)."
+        f"Built from {team_a} and {team_b}'s own recent games, preferring a free ESPN season file (zero "
+        "CBBD-quota cost, whole D-I already in one place) and falling back to CBBD's API — roughly one call per "
+        "opponent already faced — only where that free file isn't available yet or is stale (most likely early in "
+        "a brand-new season). CBBD's free tier caps out at 1,000 calls/month, so this stays capped to each team's "
+        "most recent games either way. See HANDOFF.md for the full architecture and the caveats (position-field "
+        "granularity and the ESPN source's freshness couldn't be verified live against a real payload)."
     )
     recent_games_cap = st.slider(
         "Games per team to include (most recent)", min_value=5, max_value=30, value=20, step=5,
         key="ma_pos_defense_window",
-        help="Lower = fewer API calls and a more CURRENT read on each defense; higher = more complete but costs "
-             "more of CBBD's monthly call quota. Cost is roughly this number of calls per team, once per week.",
+        help="Lower = fewer CBBD calls (only matters if the free ESPN source isn't available/fresh for this team) "
+             "and a more CURRENT read on each defense; higher = more complete but costs more quota on the fallback.",
     )
     trigger_key = f"ma_pos_defense_loaded_{season}_{recent_games_cap}"
     triggered = st.session_state.get(trigger_key, False)
@@ -324,12 +338,12 @@ def _render_team_defense(season, team_a, team_b, team_stats):
             st.session_state[trigger_key] = True
             triggered = True
         else:
-            st.info(f"Click above to pull it — up to ~{recent_games_cap} API calls per team, cached ~weekly.")
+            st.info(f"Click above to pull it — free where possible, up to ~{recent_games_cap} CBBD calls per team otherwise.")
             return
 
     for team in (team_a, team_b):
         with st.spinner(f"Loading {team}'s opponent game logs..."):
-            matchup_df = load_team_opponent_game_logs(team, season, max_recent_games=recent_games_cap)
+            matchup_df = load_positional_matchup_data(team, season, max_recent_games=recent_games_cap)
         st.markdown(f"**{team} — defense by position**")
         if matchup_df.empty:
             st.info(f"No opponent game log data available for {team} yet.")

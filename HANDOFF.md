@@ -39,6 +39,22 @@ Gonzaga forwards, UNC/UConn centers) run through the real transform
 functions to validate the positional defense engine tells the right
 story - all three matched their intended narrative.
 
+**Second follow-up pass:** wired in a free, keyless ESPN/SportsDataverse
+data source (`data.loaders.load_espn_season_player_box`) as a
+zero-CBBD-quota-cost PREFERRED source for the positional matchup defense
+feature, with the existing CBBD path (`load_team_opponent_game_logs`) kept
+as the automatic fallback whenever the free source is missing, unreachable,
+or too stale to trust — see the new "ESPN/SportsDataverse fallback" entry
+in §2/§3 below and DATA_SOURCES.md. Also fixed two real bugs found while
+building that: (1) `@st.cache_data(ttl=604800, persist="disk")` — the
+pattern every "weekly cache" claim in this doc was based on — turns out to
+SILENTLY IGNORE the `ttl` entirely once `persist="disk"` is set (confirmed
+in Streamlit's own source; caches never expired on their own, contrary to
+every "refreshes weekly" claim above), fixed app-wide via a new
+`_week_bucket()` mechanism — see §5; (2) a real segfault traced to a
+`pyarrow>=25.0` floor in `requirements.txt` conflicting with Streamlit's
+own internal `pyarrow<25` pin — fixed to `pyarrow>=14.0,<25.0` — see §5.
+
 **Important caveat on this pass:** this sandbox's network policy blocks
 outbound access to api.collegebasketballdata.com and ESPN's endpoints
 (confirmed: `curl` gets a 403 from the egress proxy on both hosts) - so
@@ -161,12 +177,16 @@ Pack for historical backfill).
   net rating, split into groups of 4 per seed line (1-16). Explicitly NOT
   a selection-committee simulation - no auto-bids, no resume factors (see
   NET & Resume), no bracket geography. Labeled as such in the tab itself.
-- **Positional matchup defense** (`data/loaders.load_team_opponent_game_logs`
+- **Positional matchup defense** (`data/loaders.load_positional_matchup_data`
   + `data/transforms.position_bucket`/`positional_defense_summary`/
   `positional_defense_trend`, rendered in Matchup Analyzer's TEAM DEFENSE
   sub-tab): "what have opposing guards/forwards/centers actually done
-  against this team" WITHOUT a per-matchup or full-D-I API fan-out. The
-  trick: a team's own schedule (`load_team_games`) already lists every
+  against this team" WITHOUT a per-matchup or full-D-I API fan-out.
+  `load_positional_matchup_data` tries the free ESPN/SportsDataverse
+  season file first (zero CBBD-quota cost - see §2) and falls back to
+  `load_team_opponent_game_logs`'s CBBD-based approach below whenever that
+  free source isn't usable. The CBBD fallback's trick: a team's own
+  schedule (`load_team_games`) already lists every
   opponent it has actually played (typically 12-30, not 360+) - for each of
   those, `load_player_game_logs(opponent, season)` (the SAME already-
   verified per-team `/games/players` call Player Search's game log already
@@ -207,15 +227,62 @@ Pack for historical backfill).
   wired to a sidebar button): every full-league/percentile-context pull
   (`load_all_player_season_stats`, `load_all_team_season_stats`,
   `load_efficiency_ratings`, `load_conference_player_season_stats`,
-  `load_team_opponent_game_logs`) uses `@st.cache_data(ttl=604800,
-  persist="disk")` instead of the old 1-6h in-memory-only TTLs - this was
-  the direct fix for "percentile rankings are a slow load-in": league
-  CONTEXT data doesn't need to feel live the way a specific team/player's
-  OWN stats do (those keep their short TTLs, unchanged), and `persist=
-  "disk"` means an app restart (Streamlit Community Cloud can do this on
-  inactivity) reuses last week's pull instead of re-running a 360-team
-  fan-out cold. The sidebar button clears all of them on demand for
-  whenever fresher-than-a-week data is wanted.
+  `load_team_opponent_game_logs`, `load_espn_season_player_box`) uses
+  `@st.cache_data(persist="disk")` plus a `_week_bucket()`-derived cache
+  key instead of the old 1-6h in-memory-only TTLs - this was the direct
+  fix for "percentile rankings are a slow load-in": league CONTEXT data
+  doesn't need to feel live the way a specific team/player's OWN stats do
+  (those keep their short TTLs, unchanged), and `persist="disk"` means an
+  app restart (Streamlit Community Cloud can do this on inactivity) reuses
+  this week's pull instead of re-running a 360-team fan-out cold. The
+  sidebar button clears all of them on demand for whenever fresher-than-
+  a-week data is wanted. **Correction:** this originally used
+  `@st.cache_data(ttl=604800, persist="disk")` directly - discovered
+  mid-build that Streamlit SILENTLY IGNORES `ttl` whenever `persist="disk"`
+  is also set (confirmed in Streamlit's own source,
+  `local_disk_cache_storage.py`'s `check_context` - it logs a one-line
+  warning, not an error, easy to miss), meaning these caches never
+  actually expired on their own. Fixed by threading an ISO year-week
+  string (`_week_bucket()`, e.g. `'2026-W04'`) through as a real hashed
+  argument via a public-wrapper/private-`_..._cached`-inner-function split
+  per function (e.g. `load_efficiency_ratings(season=None)` calls
+  `_load_efficiency_ratings_cached(season, _week_bucket())`) - a new
+  ISO week naturally produces a new cache key, forcing weekly rollover,
+  while `persist="disk"` still gives the cross-restart survival within
+  that week. `clear_league_wide_caches()` calls `.clear()` on the PRIVATE
+  `_..._cached` functions now, not the public wrappers (which are plain
+  Python functions post-refactor, with no `.clear()` of their own).
+- **ESPN/SportsDataverse fallback for positional matchup defense**
+  (`data.loaders.load_espn_season_player_box` / `load_positional_matchup_data`):
+  a free, keyless alternative game-log source for the positional-defense
+  feature specifically, published by the SportsDataverse project (same team
+  as `cfbfastR`/hoopR) as one parquet file per season on GitHub Releases -
+  every D-I team's whole season of player box scores in ONE download, vs.
+  CBBD's ~1-call-per-opponent fan-out. `load_positional_matchup_data(team,
+  season)` tries this first and falls back to the proven CBBD path
+  (`load_team_opponent_game_logs`) whenever the ESPN file is missing,
+  unreachable, or its coverage of `team` lags CBBD's own schedule by more
+  than 10 days (`_is_espn_data_fresh_enough`) - most likely early in a
+  brand-new season before SportsDataverse's own scrape/publish job has
+  caught up. This fallback means the ESPN path can only ever help (save
+  CBBD quota) or be a silent no-op; it cannot make the feature less
+  reliable than the CBBD-only version already was. Bonus: the ESPN file
+  carries its own `Position` field per player, so when it's used
+  `_position_map_for_matchup` (ui/tabs/matchup_analyzer.py) skips the
+  roster-lookup fallback entirely - fewer calls on top of the game-log
+  savings. Implemented as a direct `requests.get()` + `pd.read_parquet()`
+  against SportsDataverse's published URL, NOT the `sportsdataverse` PyPI
+  package (pulls in scikit-learn/xgboost/scipy/pyreadr/beautifulsoup4 for
+  no benefit here, and its own pyarrow pin conflicts with Streamlit's -
+  see the pyarrow gotcha in §5). **Not live-verified** - this sandbox's
+  network policy blocks GitHub release-asset downloads the same way it
+  blocks CBBD/ESPN (confirmed: 403 from the egress proxy); the URL pattern
+  and column names come from reading SportsDataverse's own R/Python source
+  via `raw.githubusercontent.com` (which IS reachable here), not a live
+  payload. Every failure mode (bad URL, 403, schema drift, empty file)
+  degrades to an empty DataFrame, which `load_positional_matchup_data`
+  treats as "unavailable" and falls back to CBBD - confirm against a real
+  response once the season starts (see DATA_SOURCES.md's freshness note).
 
 ## 4. UI conventions
 
@@ -318,6 +385,42 @@ cards, full-bleed layout. Same `render_coming_soon()` reuse for setup
   gotcha already listed above - worth remembering that even a server
   started AFTER an edit can be the stale one if it was left running
   through a LATER edit.
+- **`@st.cache_data(ttl=..., persist="disk")` silently ignores `ttl`
+  entirely** - confirmed in Streamlit's own source
+  (`streamlit/runtime/caching/storage/local_disk_cache_storage.py`'s
+  `check_context` method): a disk-persisted cache with a finite `ttl` logs
+  a one-line warning ("has a TTL that will be ignored...") and then never
+  expires anything on its own. Every "cached ~weekly" claim in this app up
+  to that point (all six full-league loaders in `data/loaders.py`) was
+  built on `ttl=604800, persist="disk"` and was therefore wrong - those
+  caches would have lived forever, not refreshed weekly, until the sidebar
+  "refresh" button was clicked or the disk cache was manually cleared. The
+  warning is easy to miss (it's a log line, not an exception, and the app
+  still runs and still returns data - just stale data, silently). **Fix:
+  don't rely on `ttl` at all when `persist="disk"` is set - instead make
+  the desired refresh cadence part of the CACHE KEY** (a real, hashed
+  function argument, not a default), so a new key naturally invalidates
+  the old entry. This app's `_week_bucket()` helper (an ISO year-week
+  string like `'2026-W04'`) is that key for the weekly-refresh case,
+  threaded through a public-wrapper/private-`_..._cached`-function split
+  per loader (see the Weekly league-wide caching entry in §3). Worth
+  checking for this same silent-ignore pattern before trusting any
+  `ttl=`+`persist="disk"` combination in NFL Scholar or CFB Scholar too -
+  it wasn't specific to this app's use of it.
+- **A `pyarrow` version floor above what Streamlit itself pins internally
+  caused a real segfault, not just a pip warning** - `requirements.txt`
+  had `pyarrow>=25.0`, but Streamlit 1.59.2 declares its own internal
+  `pyarrow<25,>=7.0` requirement; `dmesg` showed a hard `segfault ... in
+  libarrow.so.2500` from inside a `streamlit` dataframe render with a
+  pyarrow version installed that violated that ceiling (the specific
+  trigger here was an unrelated `pip install sportsdataverse` done for
+  research, which pulled in a newer pyarrow and tipped an already-latent
+  conflict into an actual crash). Fixed by pinning
+  `pyarrow>=14.0,<25.0` in `requirements.txt`, matching Streamlit's own
+  ceiling - re-ran the full smoke-test suite after the fix and confirmed
+  it was the actual root cause (not any of this pass's own code). Keep
+  this upper bound in sync with whatever Streamlit itself declares if
+  Streamlit is ever upgraded past 1.59.
 - **Secrets committed to the wrong file** - `.streamlit/secrets.toml.example`
   (the tracked TEMPLATE file, meant to hold placeholders) had real-looking
   working API keys in it from the initial commit, not placeholder text -
@@ -380,6 +483,18 @@ summary-table delta but not their own trend line) - straightforward to
 add, just scoped down to keep this pass's UI from getting overloaded with
 charts; the data (`positional_defense_trend` accepts any `stat` column
 already in `load_team_opponent_game_logs`' output) already supports it.
+A THIRD data tier for positional matchup defense - live per-game ESPN
+calls (`site.api.espn.com`'s scoreboard/summary endpoints, the same
+public endpoints already used elsewhere in this app, rather than
+SportsDataverse's batch-published season file) - was considered as a
+middle ground between "free but possibly laggy at season start" (the
+ESPN/SportsDataverse file) and "always current but quota-metered" (CBBD),
+but deliberately NOT built this pass: it can't be tested live in this
+sandbox either, and stacking a third fallback tier on top of two already-
+unverified ones adds real complexity for a case (the bulk file being
+stale) that might not even happen. Revisit only if the two-tier fallback
+proves insufficient once the 2026-27 season actually starts and the bulk
+file's freshness can be checked for real.
 
 ## 8. Constraints (user-set, don't violate)
 
