@@ -7,6 +7,7 @@ effect, this version computes the same rgba string from config.THEME's
 primary color instead, so the accent is driven entirely by config.py.
 """
 import base64
+import html
 import os
 
 import pandas as pd
@@ -513,30 +514,6 @@ def inject_theme():
             cursor: pointer;
         }}
 
-        /* Game log table + pinned season-average row (ui.tabs.player_search)
-           - two separate st.dataframe widgets scoped inside one
-           st.container(key="ps_game_log_wrap") so they read as ONE table
-           with a highlighted footer row, not two stacked disconnected
-           cards (each st.dataframe otherwise draws its own full border +
-           shadow + margin, which is what read as "broken"/split before). */
-        .st-key-ps_game_log_wrap div[data-testid="stVerticalBlock"] {{
-            gap: 0 !important;
-        }}
-        .st-key-ps_game_log_wrap div[data-testid="stElementContainer"]:has(div[data-testid="stDataFrame"]) {{
-            margin: 0 !important;
-        }}
-        .st-key-ps_game_log_wrap div[data-testid="stElementContainer"]:has(div[data-testid="stDataFrame"]):first-of-type div[data-testid="stDataFrame"] {{
-            border-bottom-left-radius: 0 !important;
-            border-bottom-right-radius: 0 !important;
-            border-bottom: none !important;
-        }}
-        .st-key-ps_game_log_wrap div[data-testid="stElementContainer"]:has(div[data-testid="stDataFrame"]):last-of-type div[data-testid="stDataFrame"] {{
-            border-top-left-radius: 0 !important;
-            border-top-right-radius: 0 !important;
-            border-top: 2px solid {C['primary']} !important;
-            background-color: rgba({_PRIMARY_RGB}, 0.10) !important;
-        }}
-
         /* Dataframe toolbar icons (sort/search/download/fullscreen overlays)
            default to a light-mode gray - retint to the dark theme + accent
            hover so they don't read as a foreign widget. Selector confirmed
@@ -754,3 +731,112 @@ def df_auto_height(n_rows, row_px=35, header_px=38, padding_px=3):
     """Sizes an st.dataframe to its actual row count so nothing needs an
     internal scrollbar to be fully visible. Ported as-is from NFL Scholar."""
     return header_px + max(n_rows, 1) * row_px + padding_px
+
+
+def _table_decimals(series):
+    """0 decimals if every non-null value in `series` is (near enough)
+    whole, else 1 - same rule style_plain_dataframe's own Styler.format
+    uses, applied here per-column so a hand-rolled table formats the same
+    way a Styler-driven st.dataframe would."""
+    s = pd.to_numeric(series, errors='coerce').dropna()
+    if s.empty:
+        return 1
+    return 0 if (s.round(0) - s).abs().max() < 0.05 else 1
+
+
+def render_sticky_footer_table(df, footer, numeric_cols=None, team_color_map=None,
+                                opponent_col=None, win_loss_col=None, height=360):
+    """
+    Hand-rolled scrollable HTML table with a CSS `position: sticky` FOOTER
+    row (a season-average row, in practice) that stays visible at the
+    bottom of the scroll area no matter how far you've scrolled through the
+    rows above it. st.dataframe/glide-data-grid has no row-pinning API at
+    all (only COLUMN pinning via column_config) - confirmed no such option
+    exists in this Streamlit version - so two stacked st.dataframe widgets
+    (a game log + a separate "average row" table, CSS-seamed to look like
+    one) was the earlier approach here, but that's still two independent
+    canvas grids under the hood: each has its own horizontal scroll state,
+    so scrolling one sideways doesn't move the other and the illusion
+    breaks - which is exactly the "still reads as two disjointed tables"
+    complaint this replaces. Same "real platform limitation → hand-roll it"
+    call this app already made for its SVG charts (see ui/charts.py's
+    module docstring) - here the limitation is row-pinning, not charting.
+
+    `df`: the body rows, already in display order (NOT sorted here - a
+    sortable interactive grid isn't the point of this table, a durable
+    scroll-anchored summary row is, and re-sorting would fight that).
+    `footer`: a single-row dict/Series of the SAME columns as `df`, always
+    rendered pinned at the bottom. `numeric_cols`: which columns right-align
+    + get numeric decimal formatting (auto-detected from `df` if omitted).
+    `team_color_map`/`opponent_col`/`win_loss_col`: same semantics as
+    style_plain_dataframe, applied to `df`'s rows only - the footer row
+    gets its own fixed highlighted treatment instead (it isn't a real
+    per-game Opponent/Result, so team/W-L tinting doesn't apply to it).
+    """
+    if df is None or df.empty:
+        return
+    cols = list(df.columns)
+    numeric_cols = set(numeric_cols) if numeric_cols is not None else {
+        c for c in cols if pd.api.types.is_numeric_dtype(df[c])
+    }
+    decimals = {c: _table_decimals(df[c]) for c in numeric_cols}
+
+    team_color_map = team_color_map or {}
+    norm_team_map = _expand_with_aliases({_normalize_team_name(k): v for k, v in team_color_map.items()})
+
+    def _team_color(name):
+        if name is None:
+            return None
+        return team_color_map.get(str(name)) or norm_team_map.get(_normalize_team_name(str(name)))
+
+    def _fmt(col, value):
+        if col in numeric_cols:
+            v = pd.to_numeric(pd.Series([value]), errors='coerce').iloc[0]
+            return '--' if pd.isna(v) else f"{v:.{decimals.get(col, 1)}f}"
+        return '' if value is None or (isinstance(value, float) and pd.isna(value)) else html.escape(str(value))
+
+    def _row_cell(col, value):
+        text = _fmt(col, value)
+        align = "text-align:right;" if col in numeric_cols else ""
+        style = f"padding:6px 10px; white-space:nowrap; {align}"
+        if opponent_col and col == opponent_col:
+            c = _team_color(value)
+            if c:
+                style += f"background:{c}66; color:#ffffff; font-weight:600;"
+        elif win_loss_col and col == win_loss_col:
+            v = str(value).strip().upper()
+            if v == 'W':
+                style += f"background:{C['positive']}2e; color:{C['positive']}; font-weight:800;"
+            elif v == 'L':
+                style += f"background:{C['negative']}2e; color:{C['negative']}; font-weight:800;"
+        return f"<td style='{style}'>{text}</td>"
+
+    header_html = "".join(
+        f"<th style='position:sticky; top:0; z-index:2; background:{C['surface_container_high']}; "
+        f"color:{C['on_surface_variant']}; font-size:10.5px; font-weight:700; text-transform:uppercase; "
+        f"letter-spacing:0.05em; padding:8px 10px; text-align:{'right' if c in numeric_cols else 'left'}; "
+        f"border-bottom:1px solid {C['outline_variant']}; white-space:nowrap;'>{html.escape(str(c))}</th>"
+        for c in cols
+    )
+    body_html = "".join(
+        f"<tr class='sft-row'>{''.join(_row_cell(c, row[c]) for c in cols)}</tr>"
+        for _, row in df.iterrows()
+    )
+    footer_get = footer.get if hasattr(footer, 'get') else (lambda c: footer[c])
+    footer_html = "".join(
+        f"<td style='position:sticky; bottom:0; z-index:2; background:{C['surface_container_high']}; "
+        f"border-top:2px solid {C['primary']}; padding:7px 10px; font-weight:700; white-space:nowrap; "
+        f"text-align:{'right' if c in numeric_cols else 'left'};'>{_fmt(c, footer_get(c))}</td>"
+        for c in cols
+    )
+    st.markdown(
+        f"<div style='max-height:{height}px; overflow:auto; border:1px solid {C['outline_variant']}; "
+        f"border-radius:{R['sm']}; background:{C['surface_container']};'>"
+        f"<style>.sft-row:hover td {{ background:rgba({_PRIMARY_RGB}, 0.06); }}</style>"
+        f"<table style='width:100%; border-collapse:collapse; font-family:{F['mono']}; font-size:12px; "
+        f"color:{C['on_surface']};'>"
+        f"<thead><tr>{header_html}</tr></thead>"
+        f"<tbody>{body_html}<tr>{footer_html}</tr></tbody>"
+        f"</table></div>",
+        unsafe_allow_html=True,
+    )

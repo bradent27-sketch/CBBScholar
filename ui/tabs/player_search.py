@@ -1,27 +1,32 @@
 """
 Player Search tab: flagship player lookup - bio and season stats, live via
-CollegeBasketballData.com. Team-first UX (pick a team, then a player) since
-CBBD has no global name-search endpoint the way CFBD does (confirmed live -
-there's a /teams/roster and a /stats/player/season, both team-scoped, no
-/player/search equivalent). Scoped down from NFL Scholar's 660-line version
-on purpose - see CFB Scholar's player_search.py docstring for the same
-reasoning (percentile ranking needs a full-league pull this pass doesn't
-do; game-by-game logs are a later pass).
+CollegeBasketballData.com. Team-first UX by default (pick a team, then a
+player) since CBBD has no global name-search endpoint the way CFBD does
+(confirmed live - there's a /teams/roster and a /stats/player/season, both
+team-scoped, no /player/search equivalent) - but an "All Teams" option on
+the team picker plus a fuzzy-matched search box let a player be found by
+name alone, without knowing their team first (data.loaders.load_all_rosters
+fans that same team-scoped roster call out across all of D-I, weekly-cached
+like this app's other full-league pulls). Scoped down from NFL Scholar's
+660-line version on purpose - see CFB Scholar's player_search.py docstring
+for the same reasoning (percentile ranking needs a full-league pull this
+pass doesn't do; game-by-game logs are a later pass).
 """
 import pandas as pd
 import streamlit as st
 
 from config import AVAILABLE_SEASONS
 from data.loaders import (
-    current_cbb_season, load_teams, load_team_roster,
+    current_cbb_season, load_teams, load_team_roster, load_all_rosters,
     get_player_season_stats, team_color_map, load_player_game_logs,
     load_conference_player_season_stats, load_all_player_season_stats,
     load_team_games,
 )
 from data.transforms import last_n_form, player_percentile_rows
-from ui.components import render_coming_soon, render_team_banner, render_bio_strip
+from data.utils import fuzzy_filter_names
+from ui.components import render_coming_soon, render_team_banner, render_bio_strip, render_metric_tiles
 from ui.charts import render_relative_bars
-from ui.styling import style_plain_dataframe, df_auto_height
+from ui.styling import render_sticky_footer_table
 
 _STAT_HELP = {
     'eFG%': "Effective field goal % - field goal % with made threes counted as 1.5 makes.",
@@ -32,6 +37,8 @@ _STAT_HELP = {
     '2PT Rate': "Share of this player's own field goal attempts from two-point range.",
     'FT Rate': "Free throw attempts relative to field goal attempts - how often this player gets to the line.",
 }
+
+_ALL_TEAMS_OPTION = "All Teams (search any player)"
 
 
 def _fmt_height(inches):
@@ -73,19 +80,50 @@ def render():
 
     with c2:
         team_names = sorted(teams_df['Team'].dropna().unique().tolist())
-        default_team_idx = team_names.index('Duke') if 'Duke' in team_names else 0
-        team = st.selectbox("Team", team_names, index=default_team_idx, key="ps_team")
+        team_options = [_ALL_TEAMS_OPTION] + team_names
+        default_team_idx = team_options.index('Duke') if 'Duke' in team_options else 0
+        team_choice = st.selectbox("Team", team_options, index=default_team_idx, key="ps_team")
 
-    with st.spinner("Loading roster..."):
-        roster_df = load_team_roster(team, season)
+    all_teams_mode = team_choice == _ALL_TEAMS_OPTION
+
+    if all_teams_mode:
+        with st.spinner("Loading all Division I rosters (cached ~weekly - first pull each week takes a bit)..."):
+            roster_df = load_all_rosters(season)
+    else:
+        with st.spinner("Loading roster..."):
+            roster_df = load_team_roster(team_choice, season)
 
     if roster_df.empty:
-        st.info(f"No roster data found for {team} in {season}.")
+        st.info(f"No roster data found for {'Division I' if all_teams_mode else team_choice} in {season}.")
         return
 
-    labels = [f"{r['name']} ({r['position'] or '?'})" for _, r in roster_df.iterrows()]
-    sel_label = st.selectbox("Select player", labels, key="ps_player_select")
+    labels = [
+        f"{r['name']} ({r['position'] or '?'})" + (f" — {r['Team']}" if all_teams_mode else '')
+        for _, r in roster_df.iterrows()
+    ]
+
+    if all_teams_mode:
+        query = st.text_input(
+            "Search player name", key="ps_player_query",
+            placeholder="Start typing any player's name — partial or slightly misspelled is fine",
+        )
+        if not query:
+            st.info("Type a player's name above to search across all of Division I.")
+            return
+        matched_labels = fuzzy_filter_names(query, labels, limit=25)
+        if not matched_labels:
+            st.info("No players matched that spelling — try a shorter or different fragment.")
+            return
+    else:
+        query = st.text_input(
+            "Filter roster (optional)", key="ps_player_query_team",
+            placeholder="Start typing to narrow the roster below…",
+        )
+        matched_labels = fuzzy_filter_names(query, labels, limit=len(labels)) if query else labels
+
+    sel_label = st.selectbox("Select player", matched_labels, key="ps_player_select")
     sel_row = roster_df.iloc[labels.index(sel_label)]
+    team = sel_row['Team'] if all_teams_mode else team_choice
 
     with st.spinner("Loading stats..."):
         stats = get_player_season_stats(team, season, sel_row['id'])
@@ -171,13 +209,18 @@ def _join_team_result(mine, team, season):
 
 def _render_game_log_section(team, season, sel_row, colors):
     """Full game log table (every completed game, every core box-score
-    column except Game Score) with a season-averages row visually pinned
-    directly beneath it as one unified card (not two separate boxes - see
-    the ps_game_log_wrap CSS in ui.styling.inject_theme) - the table itself
-    has a fixed height so it scrolls internally, keeping the averages row
-    visible no matter where you've scrolled within it - plus a last-5-vs-
-    season form readout. Opponent cells tint with that team's color, Result
-    (W/L) tints green/red, matching the color language used elsewhere."""
+    column except Game Score) with a season-averages row rendered as a
+    real, pinned FOOTER of the same table (ui.styling.render_sticky_footer_table
+    - see its docstring for why this is a hand-rolled table rather than
+    st.dataframe: no row-pinning API exists in this Streamlit version, and
+    two separate st.dataframe widgets never actually shared scroll state
+    even when CSS-seamed to look connected) - the average row stays visible
+    at the bottom of the scroll area no matter how far down the game list
+    you've scrolled, and it's the same table now, not a second one. Plus a
+    last-5-vs-season form readout, colored green when recent form beats the
+    season average and red when it's below. Opponent cells tint with that
+    team's color, Result (W/L) tints green/red, matching the color language
+    used elsewhere."""
     st.markdown("<div class='custom-section-header'>GAME LOG</div>", unsafe_allow_html=True)
     with st.spinner("Loading game log..."):
         logs = load_player_game_logs(team, season)
@@ -200,13 +243,22 @@ def _render_game_log_section(team, season, sel_row, colors):
     # Last-5 form vs season average - season average listed first/primary,
     # last-5 called out below it (this order, and this section staying,
     # was requested explicitly - keep it even though the chart above it
-    # went away).
+    # went away). Delta text is exactly the same as before; only the color
+    # is new (green = last 5 ahead of season average, red = behind).
     form = last_n_form(mine)
     if form:
         st.markdown("**Season average — last 5 games below**")
-        cols = st.columns(len(form))
-        for c, (stat, (recent, season_avg)) in zip(cols, form.items()):
-            c.metric(stat, f"{season_avg:.1f}", f"last 5: {recent:.1f} ({recent - season_avg:+.1f})", delta_color="off")
+        entries = []
+        for stat, (recent, season_avg) in form.items():
+            delta = recent - season_avg
+            better = None if abs(delta) < 1e-9 else delta > 0
+            entries.append({
+                'label': stat,
+                'value_str': f"{season_avg:.1f}",
+                'delta_str': f"last 5: {recent:.1f} ({delta:+.1f})",
+                'better': better,
+            })
+        render_metric_tiles(entries)
 
     table_cols = [c for c in _GAME_LOG_COLS if c in mine.columns]
     numeric_cols = [c for c in table_cols if c not in _GAME_LOG_NON_NUMERIC]
@@ -216,22 +268,12 @@ def _render_game_log_section(team, season, sel_row, colors):
             avg_row[c] = ''
     if 'Opponent' in table_cols:
         avg_row['Opponent'] = f"SEASON AVG ({len(mine)} games)"
-    avg_df = pd.DataFrame([avg_row])[table_cols]
 
-    # Both dataframes share one CSS-scoped container (see the
-    # .st-key-ps_game_log_wrap rules in ui.styling.inject_theme) so the seam
-    # between them collapses and the average row reads as a highlighted
-    # footer of the SAME table, not a second disconnected card.
-    with st.container(key="ps_game_log_wrap"):
-        st.dataframe(
-            style_plain_dataframe(mine[table_cols], team_color_map=colors, opponent_col='Opponent', win_loss_col='Result'),
-            width="stretch", hide_index=True, height=360,
-        )
-        st.dataframe(
-            style_plain_dataframe(avg_df, team_color_map=colors),
-            width="stretch", hide_index=True, height=df_auto_height(1),
-        )
+    render_sticky_footer_table(
+        mine[table_cols], avg_row, numeric_cols=numeric_cols, team_color_map=colors,
+        opponent_col='Opponent', win_loss_col='Result', height=360,
+    )
     st.caption(
-        "Season averages stay pinned directly below the table (highlighted row) no matter where you've "
-        "scrolled within it. Opponent tinted by that team's color; Result (W/L) tinted green/red."
+        "Season averages stay pinned to the bottom of the table no matter where you've scrolled within it. "
+        "Opponent tinted by that team's color; Result (W/L) tinted green/red."
     )

@@ -408,6 +408,48 @@ def load_all_player_season_stats(season=None):
     return _load_all_player_season_stats_cached(season, _week_bucket())
 
 
+@st.cache_data(show_spinner=False, persist="disk")
+def _load_all_rosters_cached(season, _week):
+    teams_df = load_teams(season)
+    if teams_df.empty:
+        return pd.DataFrame()
+    all_teams = teams_df['Team'].dropna().tolist()
+    progress = st.progress(0.0, text="Loading Division I rosters (cached ~weekly - this only runs when the cache is cold)...")
+    frames = []
+    for i, t in enumerate(all_teams):
+        df = load_team_roster(t, season)
+        if not df.empty:
+            df = df.copy()
+            df['Team'] = t
+            frames.append(df)
+        progress.progress((i + 1) / len(all_teams), text=f"Loading Division I rosters... ({i + 1}/{len(all_teams)} teams)")
+    progress.empty()
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+
+def load_all_rosters(season=None):
+    """
+    Every D-I team's roster in one cached pull (same per-team fan-out over
+    load_teams() as load_all_player_season_stats, just against
+    load_team_roster instead of load_team_player_stats) - the corpus behind
+    Player Search's "All Teams" option, so a player can be found by name
+    without picking their team first (CBBD has no roster-by-name search of
+    its own - see HANDOFF.md). Adds a 'Team' column (load_team_roster's own
+    output doesn't carry one, since it's normally called already scoped to
+    a single team) so a name match can be traced back to the right team's
+    stats/game-log calls downstream.
+
+    Weekly refresh + disk persistence via `_week_bucket()`, not a `ttl=`
+    (silently ignored on a persist="disk" cache by Streamlit - see that
+    function's docstring) - same league-wide-data reasoning as
+    load_all_player_season_stats.
+    """
+    season = season or current_cbb_season()
+    return _load_all_rosters_cached(season, _week_bucket())
+
+
 @st.cache_data(persist="disk")
 def _load_efficiency_ratings_cached(season, _week):
     data = _cbbd_get("/ratings/adjusted", params={"season": season})
@@ -565,6 +607,12 @@ def _load_all_team_season_stats_cached(season, _week):
         t_fg = ts.get('fieldGoals') or {}
         o_3p = os_.get('threePointFieldGoals') or {}
         o_fg = os_.get('fieldGoals') or {}
+        # twoPointFieldGoals - a documented sibling of the already-verified
+        # threePointFieldGoals/fieldGoals sub-objects on the same
+        # teamStats/opponentStats parent (same "sibling of a confirmed
+        # field" reasoning as every other derived stat in this loader - see
+        # HANDOFF.md). Not independently live-verified this pass.
+        o_2p = os_.get('twoPointFieldGoals') or {}
         total_pts = (t_pts.get('total') or 0)
         def_orb_pct = off_.get('offensiveReboundPct')
         rows.append({
@@ -586,6 +634,7 @@ def _load_all_team_season_stats_cached(season, _week):
             'Opp Paint Pts %': (o_pts.get('inPaint') / o_pts.get('total') * 100) if o_pts.get('total') else None,
             'Def 3PA Rate': (o_3p.get('attempted') / o_fg.get('attempted') * 100) if o_fg.get('attempted') else None,
             'Def 3P%': o_3p.get('pct'),
+            'Def 2P%': o_2p.get('pct'),
             'Def DREB%': (100 - def_orb_pct) if def_orb_pct is not None else None,
         })
     return pd.DataFrame(rows)
@@ -600,11 +649,15 @@ def load_all_team_season_stats(season=None):
     Factors matchup engine, the tempo-based score projection, and the
     Matchup Analyzer's Team Defense profile.
 
-    Def 3PA Rate/Def 3P%/Def DREB% are derived from the opponentStats side
-    of the payload (i.e. what opponents did AGAINST this team), not a
+    Def 3PA Rate/Def 3P%/Def 2P%/Def DREB% are derived from the opponentStats
+    side of the payload (i.e. what opponents did AGAINST this team), not a
     separate defense endpoint - opponentStats.fourFactors.offensiveReboundPct
     is opponents' OWN offensive rebound rate against this team, so
-    Def DREB% = 100 - that value.
+    Def DREB% = 100 - that value. Def 2P% reads opponentStats.
+    twoPointFieldGoals.pct, a documented sibling of the already-verified
+    threePointFieldGoals/fieldGoals sub-objects on the same parent object -
+    not independently live-verified (see HANDOFF.md's usual caveat for
+    fields added without live network access).
 
     Weekly refresh + disk persistence via `_week_bucket()`, not a `ttl=`
     (silently ignored on a persist="disk" cache by Streamlit - see that
@@ -1030,6 +1083,7 @@ def clear_league_wide_caches():
     inner function now.
     """
     _load_all_player_season_stats_cached.clear()
+    _load_all_rosters_cached.clear()
     _load_conference_player_season_stats_cached.clear()
     _load_all_team_season_stats_cached.clear()
     _load_efficiency_ratings_cached.clear()

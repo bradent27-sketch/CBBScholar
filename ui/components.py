@@ -144,6 +144,33 @@ def render_stat_tiles(entries):
     st.markdown(f"<div class='stat-tile-grid'>{''.join(tiles)}</div>", unsafe_allow_html=True)
 
 
+def render_metric_tiles(entries):
+    """Stat tiles with a colored secondary delta line - built for "recent
+    form vs season average" readouts (Player Search's last-5 form) where
+    the delta TEXT should stay exactly as computed by the caller, just
+    colored green when it's an improvement and red when it's a decline.
+    Deliberately not st.metric: st.metric's own delta-coloring only reads a
+    plain leading +/- number, and this delta text is a full sentence
+    ("last 5: 24.3 (+2.1)") - custom HTML gives direct control over the
+    color instead of depending on how st.metric parses an arbitrary string.
+    entries: list of {'label', 'value_str', 'delta_str', 'better'} where
+    'better' is True (green) / False (red) / None (neutral, no signal)."""
+    tiles = []
+    for e in entries:
+        label = str(e.get('label', ''))
+        value = str(e.get('value_str', '--'))
+        delta = str(e.get('delta_str', ''))
+        better = e.get('better')
+        color = C['positive'] if better is True else (C['negative'] if better is False else C['on_surface_variant'])
+        tiles.append(
+            f"<div class='stat-tile'><div class='t-label' title='{label}'>{label}</div>"
+            f"<div class='t-value'>{value}</div>"
+            f"<div style='font-family:{F['mono']}; font-size:11px; font-weight:700; color:{color}; margin-top:4px;'>{delta}</div>"
+            f"</div>"
+        )
+    st.markdown(f"<div class='stat-tile-grid'>{''.join(tiles)}</div>", unsafe_allow_html=True)
+
+
 def render_hero_tiles(entries):
     """Bigger-emphasis tile row for the 1-3 headline numbers on a tab (e.g.
     a league-leader net rating, or a matchup's win probability) - a step up

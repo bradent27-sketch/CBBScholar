@@ -98,9 +98,17 @@ def _render_rankings_subtab(df, colors, ranked):
         if not vals.empty:
             meter_cols[col] = (float(vals.min()), float(vals.max()))
     column_config = build_column_help_config(display_df, pinned_cols=['Rank'], meter_cols=meter_cols)
+    # Height capped to ~30 visible rows (internal scroll for the rest) - not
+    # sized to fit all 360+ D-I teams. An uncapped df_auto_height(len(...))
+    # here was rendering a ~12,000px-tall grid on every single visit to this
+    # (default, eagerly-rendered) sub-tab, a real and measurable contributor
+    # to "this tab feels slow to load in" - the NET & Resume table already
+    # caps the same way for the same reason (see ui/tabs/net_resume.py);
+    # this just brings Team Efficiency's rankings table in line with that
+    # established pattern instead of being the one outlier.
     st.dataframe(
         style_plain_dataframe(display_df, team_color_map=colors),
-        width="stretch", height=df_auto_height(len(display_df)),
+        width="stretch", height=df_auto_height(min(len(display_df), 30)),
         column_config=column_config, hide_index=True,
     )
     st.caption(

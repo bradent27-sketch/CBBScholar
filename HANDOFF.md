@@ -11,7 +11,43 @@ CollegeBasketballData.com (free key, configured), ESPN's public endpoints
 subsystem exists for this app at all — there's no PFF product for college
 basketball.
 
-**Refinement pass (this doc's most recent update):** weekly caching for
+**User-driven optimization pass (this doc's most recent update):** a
+tab-by-tab pass based on real usage (personal team-watching, bracketology,
+and player-prop betting - the stated primary use case). Player Search: an
+"All Teams" option on the team picker plus a fuzzy-matched search box
+(`data.utils.fuzzy_filter_names`, stdlib `difflib` - no new dependency) so a
+player can be found by name without picking their team first, backed by a
+new `data.loaders.load_all_rosters` (same weekly-cached per-team fan-out
+pattern as `load_all_player_season_stats`); season stat bars reordered to a
+user-specified sequence (`data.transforms.player_profile_values`); last-5
+form deltas now color-coded green/red (`ui.components.render_metric_tiles`);
+the game log table and its season-average row are now ONE real table with a
+CSS `position: sticky` footer (`ui.styling.render_sticky_footer_table`) -
+replacing two separately-scrolling `st.dataframe` widgets that never
+actually shared horizontal scroll state despite being CSS-seamed to look
+connected. Team Efficiency: the rankings table was rendering height-uncapped
+for 360+ teams (a ~12,000px-tall grid on every visit to the tab's default
+sub-tab) - capped to a scrollable ~30-row window matching NET & Resume's own
+existing precedent; the efficiency scatter's SVG-string build is now
+`st.cache_data`-cached so it isn't rebuilt from scratch on every unrelated
+widget rerun elsewhere on the page. Matchup Analyzer: rebuilt from a
+team-vs-team projector (win probability, projected score, Four Factors
+matchup, style profile, recent-form chips, OVERVIEW/TEAM DEFENSE/PLAYER
+TRENDS sub-tabs) into a two-column PLAYER-vs-TEAM-DEFENSE layout per
+explicit request - team-vs-team wasn't the actual use case (prop research
+against one player and one defense was) - see §3 below for the new
+`team_defense_profile_rows` single-team percentile-bar function and the two
+new defensive columns (2P% Allowed, FT Rate Allowed) added to it. The
+now-fully-orphaned team-vs-team compute functions (`four_factors_matchup`,
+`style_profile`, `project_score`, `recent_form`, the old paired
+`team_defense_profile`) were removed from `data/transforms.py` rather than
+left as dead code - `ui/charts.py`'s `render_mirror_bars`/`render_form_strip`
+were deliberately LEFT IN PLACE despite having no caller left in this app,
+since that file is documented as byte-identical across this app and CFB
+Scholar (team-vs-team is a much more natural fit for football) - don't
+delete from `ui/charts.py` without checking CFB Scholar's own usage first.
+
+**Previous refinement pass:** weekly caching for
 league-wide/percentile data, expanded player rate stats (3PT/2PT/FT rate),
 Player Search game log polish (opponent color, W/L, unified pinned average
 row), Four Factors tiering now shows raw numbers alongside color, a fixed
@@ -140,35 +176,27 @@ Pack for historical backfill).
   + rebounds + assists + steals + blocks − turnovers, user-adjustable
   weights) applied to real season totals, with a per-game average computed
   from `games`.
-- **Matchup win probability** (`ui/tabs/matchup_analyzer.py`): net-rating
-  differential through a logistic curve (`scale=11.0`), explicitly labeled
-  as an estimate.
-- **Four Factors matchup engine** (`data/transforms.four_factors_matchup` +
-  `ui/charts.render_mirror_bars`): Dean Oliver's four factors matched
-  offense-vs-defense from `/stats/team/season` — ONE call returns all 700
-  D-I teams (verified live: `teamStats.fourFactors` and
-  `opponentStats.fourFactors`, plus pace and paint/fast-break point splits),
-  so every D-I percentile is free local compute over that cached pull. Each
-  side's percentile uses the correct better-direction per factor (e.g. Def
-  TO Ratio = turnovers FORCED, higher is better) so both mirrored bars read
-  "longer = winning this battle."
-- **Projected score** (`data/transforms.project_score`): adjusted
-  off/def ratings (per-100-poss) combined additively vs the league-average
-  offense, scaled by the two teams' mean pace into an actual score/total,
-  with the home-court constant split across the sides. Knowingly mixes
-  opponent-adjusted ratings with raw pace — labeled an estimate in the UI.
-  The headline "Projected Edge" metric stays on the per-100-possessions
-  scale (it feeds the win-prob logistic, whose `scale=11.0` was calibrated
-  against that input) and is labeled "(per 100 poss)" so it doesn't read as
-  a game-margin claim next to the score projection.
-- **Venue adjustment** (`ui/tabs/matchup_analyzer.HOME_COURT_POINTS`): flat
-  3-point home-court constant — a selector, not a per-arena model.
+- **~~Matchup win probability~~ / ~~Four Factors matchup engine~~ /
+  ~~Projected score~~ / ~~Venue adjustment~~ — REMOVED** in the
+  player-vs-team-defense pass (see this doc's top entry): Matchup Analyzer
+  is no longer a team-vs-team projector, so the logistic win-probability
+  curve, the offense-vs-defense Four Factors matchup (`four_factors_matchup`
+  - note `four_factors_percentile_grid`, which reuses the same `FOUR_FACTORS`
+  table, is UNRELATED and still powers Team Efficiency's Four Factors
+  Tiering sub-tab), the tempo-based score projection (`project_score`), and
+  the flat home-court constant (`HOME_COURT_POINTS`) no longer have a
+  caller and were deleted from `data/transforms.py` rather than left as
+  dead code. `ui/charts.render_mirror_bars`/`render_form_strip` were kept
+  despite losing their only caller here - see that entry's note on why.
 - **Game logs + breakout detection** (`data/loaders.load_player_game_logs`,
   `data/transforms.breakout_flags`/`last_n_form`): per-game box scores via
   `/games/players` (one call per team-season, game context included in the
   same response). Breakout = ≥1.5 population-σ above the player's own season
   mean (suppressed under 4 games / ~zero variance); last-5 vs season deltas
-  rendered as st.metric rows.
+  rendered via `ui.components.render_metric_tiles` (green when last-5 beats
+  the season average, red when it's below - not `st.metric`'s own delta
+  coloring, which only reads a plain leading +/- number and this delta text
+  is a full sentence).
 - **Poll trajectories** (`data/transforms.poll_trajectory` +
   `ui/charts.render_rank_trajectory`): the raw `/rankings` payload the NET &
   Resume tab already cached is the FULL season history — the trajectory
@@ -180,7 +208,7 @@ Pack for historical backfill).
 - **Positional matchup defense** (`data/loaders.load_positional_matchup_data`
   + `data/transforms.position_bucket`/`positional_defense_summary`/
   `positional_defense_trend`, rendered in Matchup Analyzer's TEAM DEFENSE
-  sub-tab): "what have opposing guards/forwards/centers actually done
+  column): "what have opposing guards/forwards/centers actually done
   against this team" WITHOUT a per-matchup or full-D-I API fan-out.
   `load_positional_matchup_data` tries the free ESPN/SportsDataverse
   season file first (zero CBBD-quota cost - see the entry below) and falls back to
@@ -201,18 +229,28 @@ Pack for historical backfill).
   caveat) - `position_bucket()` handles both a simple G/F/C scheme and a
   detailed PG/SG/SF/PF/C scheme defensively, but confirm against a real
   payload before trusting the buckets.
-- **Team defense profile** (`data/transforms.team_defense_profile`, powers
-  Matchup Analyzer's "General Defensive Profile"): eFG%/3PA rate/3P%/ORB%
-  allowed plus this team's own DREB% (the complement of opponent ORB%
-  allowed - no separate rebounds sub-object needed) and TO ratio forced,
-  percentile vs D-I with the correct direction baked in per column. Built
-  entirely from the SAME `/stats/team/season` pull Four Factors already
-  uses (`opponentStats.threePointFieldGoals`/`.fieldGoals`, siblings of the
-  already-verified `.fourFactors`/`.points`) - zero extra API cost.
+- **Team defense profile** (`data/transforms.team_defense_profile_rows`,
+  powers Matchup Analyzer's TEAM DEFENSE column, one team at a time - not
+  the old team-vs-team paired `team_defense_profile`, removed): eFG%/3PA
+  rate/3P%/2P%/FT rate allowed plus this team's own DREB% (the complement
+  of opponent ORB% allowed - no separate rebounds sub-object needed) and TO
+  ratio forced, percentile vs D-I with the correct direction baked in per
+  column, rendered as single-sided bars (`ui.charts.render_relative_bars`,
+  the same component Player Search uses) rather than the old mirrored
+  two-team bars. Built entirely from the SAME `/stats/team/season` pull
+  Four Factors already uses (`opponentStats.threePointFieldGoals`/
+  `.fieldGoals`/`.twoPointFieldGoals`, siblings of the already-verified
+  `.fourFactors`/`.points`) - zero extra API cost. 2P% Allowed and FT Rate
+  Allowed were added on request; FT Rate Allowed was already a computed
+  column (`Def FT Rate`) just not previously surfaced here, 2P% Allowed
+  needed a new `Def 2P%` column in `data/loaders.load_all_team_season_stats`.
 - **Player tendency profile** (`data/transforms.player_profile_values`/
   `player_percentile_rows`, shared by Player Search and Matchup Analyzer's
-  PLAYER TRENDS sub-tab): 3PT/2PT/FT shot-selection rate, rebound split,
-  shooting/efficiency splits, percentile-ranked vs conference or full D-I.
+  PLAYER column): 3PT/2PT/FT shot-selection rate, rebound split, shooting/
+  efficiency splits, percentile-ranked vs conference or full D-I - stat
+  order is USER-SPECIFIED (PPG/APG/RPG/ORB/DRB/FG%/3P%/3PT rate/2PT rate/FT
+  rate/FT%/eFG%/TS%/Net Rating/SPG/BPG/Usage%/MPG), not endpoint/alphabetical
+  order, since dict-iteration order drives both callers' bar order at once.
   Extracted into `data/transforms.py` specifically so Player Search and
   Matchup Analyzer compute this vocabulary identically instead of two
   independent, driftable implementations.

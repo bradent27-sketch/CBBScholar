@@ -106,45 +106,13 @@ FOUR_FACTORS = [
 ]
 
 
-def four_factors_matchup(stats_df, team_a, team_b):
-    """
-    Rows for the Four Factors panel: Team A's offensive factor vs what Team
-    B's defense allows/forces, percentile-ranked against all of D-I with
-    the correct better-direction per side (see FOUR_FACTORS) so both bars
-    read "longer = winning this battle." Returns (rows_a_off_vs_b_def,
-    rows_b_off_vs_a_def) or (None, None) if either team is missing.
-    """
-    a = stats_df[stats_df['Team'] == team_a]
-    b = stats_df[stats_df['Team'] == team_b]
-    if a.empty or b.empty:
-        return None, None
-    a, b = a.iloc[0], b.iloc[0]
-
-    def rows(off_row, def_row):
-        out = []
-        for label, off_col, def_col, off_hib, def_hib, help_text in FOUR_FACTORS:
-            out.append({
-                'label': label,
-                'help': help_text,
-                'off_val': off_row[off_col],
-                'off_pct': pct_rank(stats_df[off_col], off_row[off_col], higher_is_better=off_hib),
-                'def_val': def_row[def_col],
-                'def_pct': pct_rank(stats_df[def_col], def_row[def_col], higher_is_better=def_hib),
-            })
-        return out
-
-    return rows(a, b), rows(b, a)
-
-
 def four_factors_percentile_grid(stats_df, teams=None):
     """
     Team x Four-Factors D-I percentile grid (offense AND defense side of
-    each factor - 8 columns), for a league-wide tiering heatmap - the
-    "whole league at a glance" complement to four_factors_matchup's
-    pairwise (two-team) view above. Reuses FOUR_FACTORS' own column/
-    direction mapping so the heatmap and the matchup engine can't silently
-    drift apart. teams=None keeps every team in stats_df; pass a list to
-    scope to one conference or group.
+    each factor - 8 columns), for a league-wide tiering heatmap. Reuses
+    FOUR_FACTORS' own column/direction mapping so this can't silently drift
+    from the underlying stat definitions. teams=None keeps every team in
+    stats_df; pass a list to scope to one conference or group.
 
     Returns (pct_df, raw_df, cols): both DataFrames share a 'Team' column
     plus the same ordered `cols` list - pct_df's cells are 0-100 D-I
@@ -167,76 +135,8 @@ def four_factors_percentile_grid(stats_df, teams=None):
     return pct, raw, cols
 
 
-def style_profile(stats_df, team_a, team_b):
-    """Scoring-style rows (3PA rate, paint share, fast-break share, pace)
-    for both teams - descriptive contrast, percentiles vs D-I to show HOW
-    each offense generates points, not who is better."""
-    a = stats_df[stats_df['Team'] == team_a]
-    b = stats_df[stats_df['Team'] == team_b]
-    if a.empty or b.empty:
-        return None
-    a, b = a.iloc[0], b.iloc[0]
-    metrics = [
-        ('Pace (poss/40)', 'Pace', "Possessions per 40 minutes — tempo, not quality."),
-        ('3PA Rate', '3PA Rate', "Share of field goal attempts from three."),
-        ('Paint Points %', 'Paint Pts %', "Share of points scored in the paint."),
-        ('Fast Break %', 'Fast Break %', "Share of points from the fast break."),
-    ]
-    out = []
-    for label, col, help_text in metrics:
-        out.append({
-            'label': label,
-            'help': help_text,
-            'left_val': a[col], 'left_pct': pct_rank(stats_df[col], a[col]),
-            'right_val': b[col], 'right_pct': pct_rank(stats_df[col], b[col]),
-        })
-    return out
-
-
 # ---------------------------------------------------------------------------
-# Tempo-based score projection
-# ---------------------------------------------------------------------------
-
-def project_score(eff_df, stats_df, team_a, team_b, hfa_margin=0.0):
-    """
-    Projected final score from adjusted efficiency + tempo. Standard
-    log5-style additive model on the points-per-100-possessions scale:
-
-        A's expected pts/100 = A Off Rating + B Def Rating - league average
-        possessions = mean(pace A, pace B)  (both already per 40 minutes)
-        score = pts/100 x possessions / 100, HFA split across the two sides
-
-    Returns {'score_a', 'score_b', 'possessions', 'total'} or None if any
-    input is missing. Ratings come from /ratings/adjusted (opponent-
-    adjusted), pace from /stats/team/season (raw) - a knowingly mixed pair,
-    labeled an estimate in the UI like every model number in this app.
-    """
-    ea = eff_df[eff_df['Team'] == team_a]
-    eb = eff_df[eff_df['Team'] == team_b]
-    sa = stats_df[stats_df['Team'] == team_a]
-    sb = stats_df[stats_df['Team'] == team_b]
-    if ea.empty or eb.empty or sa.empty or sb.empty:
-        return None
-    ea, eb = ea.iloc[0], eb.iloc[0]
-    pace_a, pace_b = sa.iloc[0]['Pace'], sb.iloc[0]['Pace']
-    if pd.isna(pace_a) or pd.isna(pace_b):
-        return None
-    league_off = pd.to_numeric(eff_df['Off Rating'], errors='coerce').mean()
-    poss = (float(pace_a) + float(pace_b)) / 2
-    pts100_a = float(ea['Off Rating']) + float(eb['Def Rating']) - league_off
-    pts100_b = float(eb['Off Rating']) + float(ea['Def Rating']) - league_off
-    score_a = pts100_a * poss / 100 + hfa_margin / 2
-    score_b = pts100_b * poss / 100 - hfa_margin / 2
-    return {
-        'score_a': score_a,
-        'score_b': score_b,
-        'possessions': poss,
-        'total': score_a + score_b,
-    }
-
-
-# ---------------------------------------------------------------------------
-# Poll trajectory + recent form
+# Poll trajectory
 # ---------------------------------------------------------------------------
 
 def poll_trajectory(rankings_raw, poll_type, teams=None, top_n=10):
@@ -264,28 +164,6 @@ def poll_trajectory(rankings_raw, poll_type, teams=None, top_n=10):
     pivot = sub.pivot_table(index='Week', columns='Team', values='Rank', aggfunc='first').sort_index()
     labels = {w: f"W{int(w)}" for w in pivot.index}
     return pivot, labels
-
-
-def recent_form(games_df, n=5):
-    """Last-n completed games as chip dicts for render_form_strip, plus the
-    Elo change across the window."""
-    if games_df is None or games_df.empty:
-        return [], None
-    tail = games_df.tail(n)
-    chips = [{
-        'result': g['Result'],
-        'margin': g['Margin'],
-        'opponent': g['Opponent'],
-        'venue': g['Home/Away'],
-        'score': f"{g['PF']}-{g['PA']}",
-    } for _, g in tail.iterrows()]
-    elos = pd.to_numeric(games_df['Elo End'], errors='coerce').dropna()
-    elo_delta = None
-    if len(elos) >= 2:
-        window = elos.tail(n)
-        if len(window) >= 2:
-            elo_delta = float(window.iloc[-1] - window.iloc[0])
-    return chips, elo_delta
 
 
 # ---------------------------------------------------------------------------
@@ -385,25 +263,33 @@ def player_profile_values(stats):
         except (TypeError, ValueError):
             return None
 
+    # Order below is DELIBERATE and user-specified (not alphabetical/
+    # endpoint order) - every caller of this function (Player Search's
+    # season stats bars, Matchup Analyzer's Player Trends panel) renders
+    # rows in dict-iteration order, so reordering here reorders both at
+    # once instead of drifting. Volume counting stats first (scoring,
+    # playmaking, rebounding split), then shooting/efficiency, then Net
+    # Rating, then the "other" per-game counting stats, then Usage last.
+    # MPG has no requested slot - kept at the very end rather than dropped.
     return {
         'PPG': per_game(stats.get('points')),
+        'APG': per_game(stats.get('assists')),
         'RPG': per_game(reb.get('total')),
         'ORB/G': per_game(reb.get('offensive')),
         'DRB/G': per_game(reb.get('defensive')),
-        'APG': per_game(stats.get('assists')),
-        'SPG': per_game(stats.get('steals')),
-        'BPG': per_game(stats.get('blocks')),
-        'MPG': per_game(stats.get('minutes')),
         'FG%': fg.get('pct'),
         '3P%': three.get('pct'),
-        'FT%': ft.get('pct'),
         '3PT Rate': rate(tpa, fga),
         '2PT Rate': rate(twa, fga),
         'FT Rate': rate(fta, fga),
+        'FT%': ft.get('pct'),
         'eFG%': stats.get('effectiveFieldGoalPct'),
         'TS%': (ts_pct * 100) if ts_pct is not None else None,
         'Net Rating': stats.get('netRating'),
+        'SPG': per_game(stats.get('steals')),
+        'BPG': per_game(stats.get('blocks')),
         'Usage %': stats.get('usage'),
+        'MPG': per_game(stats.get('minutes')),
     }
 
 
@@ -551,32 +437,46 @@ def positional_defense_trend(matchup_df, position_map, bucket, stat='Points'):
 # cover: 3PA rate allowed and opponent 3P%).
 # ---------------------------------------------------------------------------
 
-def team_defense_profile(stats_df, team_a, team_b):
-    """Mirrored defensive-shape rows for both teams - eFG%/3PA rate/3P%/
-    ORB% allowed plus this team's own DREB% and TO ratio forced - percentile
-    vs D-I with the correct better-direction per column (an ALLOWED rate is
-    good when LOW; DREB% and TO ratio forced are good when HIGH)."""
-    a = stats_df[stats_df['Team'] == team_a]
-    b = stats_df[stats_df['Team'] == team_b]
-    if a.empty or b.empty:
-        return None
-    a, b = a.iloc[0], b.iloc[0]
-    metrics = [
-        ('eFG% Allowed', 'Def eFG%', False, "Effective field goal % allowed to opponents — lower is better defense."),
-        ('3PA Rate Allowed', 'Def 3PA Rate', False, "Share of opponent field goal attempts that are threes — lower means this defense forces/contests more twos relative to threes."),
-        ('3P% Allowed', 'Def 3P%', False, "Opponent three-point percentage against this team — lower is better three-point defense."),
-        ('Off. Reb % Allowed', 'Def ORB%', False, "Opponent offensive rebound rate — lower means this defense boxes out better."),
-        ('Def. Reb %', 'Def DREB%', True, "This team's own defensive rebound rate (complement of Off. Reb % Allowed) — higher is better."),
-        ('TO Ratio Forced', 'Def TO Ratio', True, "Turnovers forced per possession — higher is better defense."),
-    ]
-    out = []
-    for label, col, higher_is_better, help_text in metrics:
+# (label, stats_df column, higher-is-better?, is a percentage?, help text) -
+# powers team_defense_profile_rows below (Matchup Analyzer's TEAM DEFENSE
+# panel).
+_TEAM_DEFENSE_METRICS = [
+    ('eFG% Allowed', 'Def eFG%', False, True, "Effective field goal % allowed to opponents — lower is better defense."),
+    ('3PA Rate Allowed', 'Def 3PA Rate', False, True, "Share of opponent field goal attempts that are threes — lower means this defense forces/contests more twos relative to threes."),
+    ('3P% Allowed', 'Def 3P%', False, True, "Opponent three-point percentage against this team — lower is better three-point defense."),
+    ('2P% Allowed', 'Def 2P%', False, True, "Opponent two-point field goal percentage against this team — lower is better interior/mid-range defense."),
+    ('FT Rate Allowed', 'Def FT Rate', False, True, "Opponent free throw attempts relative to their own field goal attempts — lower means fouling less / sending opponents to the line less often."),
+    ('Off. Reb % Allowed', 'Def ORB%', False, True, "Opponent offensive rebound rate — lower means this defense boxes out better."),
+    ('Def. Reb %', 'Def DREB%', True, True, "This team's own defensive rebound rate (complement of Off. Reb % Allowed) — higher is better."),
+    ('TO Ratio Forced', 'Def TO Ratio', True, False, "Turnovers forced per possession — higher is better defense."),
+]
+
+
+def team_defense_profile_rows(stats_df, team):
+    """
+    Single-team defensive-shape percentile rows, ready for
+    ui.charts.render_relative_bars (the same single-sided bar-plus-value
+    treatment Player Search uses for a player's own tendency profile) -
+    eFG%/3PA rate/3P%/2P%/FT rate/ORB% allowed, plus this team's own DREB%
+    and TO ratio forced, D-I percentile per column with the correct
+    better-direction baked in (an ALLOWED rate/percentage is good when LOW;
+    DREB% and TO ratio forced are good when HIGH). Powers Matchup
+    Analyzer's TEAM DEFENSE panel (one team at a time, not team-vs-team, so
+    a single-sided bar is the right shape here, not a mirrored one).
+    Returns [] if `team` isn't found.
+    """
+    row = stats_df[stats_df['Team'] == team]
+    if row.empty:
+        return []
+    row = row.iloc[0]
+    rows = []
+    for label, col, higher_is_better, is_pct, help_text in _TEAM_DEFENSE_METRICS:
         if col not in stats_df.columns:
             continue
-        out.append({
-            'label': label,
-            'help': help_text,
-            'left_val': a[col], 'left_pct': pct_rank(stats_df[col], a[col], higher_is_better=higher_is_better),
-            'right_val': b[col], 'right_pct': pct_rank(stats_df[col], b[col], higher_is_better=higher_is_better),
-        })
-    return out
+        val = row[col]
+        value_str = f"{val:.1f}{'%' if is_pct else ''}" if pd.notna(val) else '--'
+        dist = pd.to_numeric(stats_df[col], errors='coerce').dropna()
+        pct = pct_rank(dist, val, higher_is_better=higher_is_better)
+        avg_pct = pct_rank(dist, dist.mean(), higher_is_better=higher_is_better) if not dist.empty else None
+        rows.append({'label': label, 'help': help_text, 'value_str': value_str, 'pct': pct, 'avg_pct': avg_pct})
+    return rows

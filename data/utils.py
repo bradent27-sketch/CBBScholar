@@ -6,6 +6,7 @@ apply to any player/team name pool). Porting this now, before it's needed,
 is cheap insurance against re-discovering the same name-formatting bug
 class NFL Scholar's own HANDOFF.md flags as its most-repeated one.
 """
+import difflib
 import re
 
 import pandas as pd
@@ -69,6 +70,41 @@ def match_abbreviated_name(abbrev_name, last_name_index):
         if cand_first.lower().startswith(prefix)
     ]
     return candidates[0] if candidates else None
+
+
+def fuzzy_filter_names(query, candidates, limit=25, min_ratio=0.35):
+    """
+    Ranks `candidates` (display strings, e.g. "Cooper Flagg (F)") by how
+    well they match a user-typed `query` - built for a player-name search
+    box where requiring an exact/prefix match was the complaint (a typo or
+    a mid-name fragment should still surface the right player). A
+    case-insensitive substring hit anywhere in the candidate always ranks
+    above a fuzzy-only match (and earlier/tighter substring hits rank
+    above later/looser ones); candidates with no substring hit still get a
+    chance via `difflib.SequenceMatcher` (stdlib, no new dependency) so a
+    misspelled or transposed name doesn't come back empty, as long as its
+    similarity ratio clears `min_ratio`.
+
+    Empty query returns `candidates` unchanged (no filtering/ranking) -
+    callers should treat that as "nothing typed yet", not "no matches".
+    """
+    if not query or not str(query).strip():
+        return list(candidates)
+    q = str(query).strip().lower()
+    scored = []
+    for c in candidates:
+        cl = str(c).lower()
+        idx = cl.find(q)
+        if idx != -1:
+            score = 2.0 + (1.0 - idx / max(len(cl), 1))
+        else:
+            score = difflib.SequenceMatcher(None, q, cl).ratio()
+            if score < min_ratio:
+                continue
+        scored.append((score, c))
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    ranked = [c for _, c in scored]
+    return ranked[:limit] if limit else ranked
 
 
 def american_odds_to_prob(odds):

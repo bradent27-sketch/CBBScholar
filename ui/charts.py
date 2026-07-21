@@ -381,10 +381,29 @@ def render_efficiency_scatter(df, x_col, y_col, color_map, invert_y=False,
     `invert_y=True` for metrics where lower = better (defensive ratings),
     so 'good' is always up-and-right. `highlight`: iterable of team names
     drawn larger with a name label.
+
+    Thin wrapper around `_build_efficiency_scatter_svg` (the actual, cached
+    markup builder) - Streamlit reruns the whole script on every widget
+    interaction anywhere on the page, which was rebuilding this ~300-400
+    team SVG string (and Team Efficiency's big rankings table right below
+    it) from scratch every single time, not just once per week when the
+    underlying data actually changes - a real, measurable "this tab feels
+    slow to load" contributor. `st.cache_data` keys on the actual
+    (data, params) content, so this only rebuilds when either changes, not
+    on every unrelated rerun.
     """
     data = df[['Team', x_col, y_col]].dropna()
     if data.empty:
         return
+    svg = _build_efficiency_scatter_svg(
+        data, x_col, y_col, color_map, invert_y,
+        tuple(sorted(highlight or [])), x_label, y_label,
+    )
+    st.markdown(svg, unsafe_allow_html=True)
+
+
+@st.cache_data(show_spinner=False)
+def _build_efficiency_scatter_svg(data, x_col, y_col, color_map, invert_y, highlight, x_label, y_label):
     W, H = 860, 420
     ML, MR, MT, MB = 52, 18, 16, 40
     plot_w, plot_h = W - ML - MR, H - MT - MB
@@ -448,7 +467,7 @@ def render_efficiency_scatter(df, x_col, y_col, color_map, invert_y=False,
             f"style='paint-order:stroke; stroke:{C['surface']}; stroke-width:3px;'>{_esc(team)}</text>"
         )
     parts.append("</svg>")
-    st.markdown("".join(parts), unsafe_allow_html=True)
+    return "".join(parts)
 
 
 # ---------------------------------------------------------------------------
