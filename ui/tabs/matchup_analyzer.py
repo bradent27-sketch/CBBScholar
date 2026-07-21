@@ -32,7 +32,7 @@ from ui.components import render_coming_soon
 from ui.charts import render_trend_line, render_relative_bars
 from ui.styling import style_plain_dataframe, df_auto_height
 
-_PLAYER_TREND_STATS = [('Points', ''), ('3PA', ' att'), ('Assists', ''), ('Usage', '%')]
+_PLAYER_TREND_STATS = [('Points', ''), ('Assists', ''), ('Rebounds', ''), ('Minutes', ''), ('3P%', '%')]
 
 _PLAYER_STAT_HELP = {
     'eFG%': "Effective field goal % - field goal % with made threes counted as 1.5 makes.",
@@ -141,6 +141,16 @@ def _render_player_panel(season, teams_df):
         st.info("No per-game data for this player yet this season.")
         return
     mine = mine.sort_values('Date').reset_index(drop=True)
+    # 3P% isn't a column load_player_game_logs returns directly (it has
+    # 3PM/3PA, makes and attempts, not a precomputed percentage) - derived
+    # here per game. `.where(attempts > 0)` (same divide-by-zero guard
+    # data.transforms.player_rate_stats already uses for 3PT/2PT/FT rate)
+    # turns a 0-attempt game into NaN instead of a raw ZeroDivisionError/inf,
+    # which player_trend_series already drops via its own dropna(subset=[col]).
+    if {'3PM', '3PA'}.issubset(mine.columns):
+        attempts = pd.to_numeric(mine['3PA'], errors='coerce')
+        makes = pd.to_numeric(mine['3PM'], errors='coerce')
+        mine['3P%'] = (makes / attempts.where(attempts > 0)) * 100
 
     # Stacked one-per-row, not the 2-per-row grid an earlier team-vs-team
     # version used - this panel is now a half-width column, so a 2-across
@@ -206,6 +216,26 @@ def _render_team_defense_panel(season, teams_df):
         st.info("Team defense profile needs /stats/team/season data, which isn't available right now.")
         return
 
+    # Pace: already pulled by load_all_team_season_stats (t.get('pace') off
+    # /stats/team/season - no new API call needed), just not previously
+    # surfaced on this panel. Shown as a plain st.metric, NOT folded into
+    # the percentile bars below - pace isn't itself "good" or "bad" defense
+    # the way an allowed-rate stat is, so running it through the same
+    # green/red percentile-bar treatment would misleadingly imply a fast
+    # pace is a defensive strength or weakness. It's context for reading
+    # the rate stats instead: a fast-paced team allows more RAW points/
+    # rebounds/assists per game than its per-possession rates alone would
+    # suggest, just because the game has more possessions in it.
+    pace_row = team_stats[team_stats['Team'] == team]
+    pace = pace_row.iloc[0]['Pace'] if not pace_row.empty else None
+    if pace is not None and pd.notna(pace):
+        st.metric(
+            "Pace", f"{float(pace):.1f} poss/40",
+            help="Possessions per 40 minutes — tempo, not quality. Context for the rate stats below: a "
+                 "fast-paced team gives up more RAW points/rebounds/assists per game even with identical "
+                 "per-possession defensive rates, just because there are more possessions to defend.",
+        )
+
     profile_rows = team_defense_profile_rows(team_stats, team)
     if profile_rows:
         st.markdown(f"**{team} — defensive profile (vs D-I)**")
@@ -267,11 +297,22 @@ def _render_team_defense_panel(season, teams_df):
         "Allowed = mean stat line in games against this team. Delta = allowed minus that player's OWN "
         "season average (green = outperforming their normal production against this team; red = held below it)."
     )
-    # Stacked one-per-row (not side-by-side) - same half-width-column
-    # reasoning as the player trend charts on the left.
-    for bucket in summary['Bucket']:
-        dates, values = positional_defense_trend(matchup_df, pos_map, bucket, 'Points')
-        st.markdown(f"_{bucket}s — points allowed, over time_")
+
+    # Position-group picker + all three stats for whichever bucket is
+    # selected, rather than every bucket's Points-only trend stacked at
+    # once (3 buckets x 3 stats = 9 charts was too long a page) - Rebounds/
+    # Assists trend data was already available from load_positional_
+    # matchup_data (positional_defense_trend takes any stat column present
+    # on matchup_df), it just wasn't wired into the UI before. Key
+    # incorporates team/season/games-cap so switching teams can't leave a
+    # stale bucket selection that isn't in the new options list.
+    bucket_options = summary['Bucket'].tolist()
+    selected_bucket = st.selectbox(
+        "Position group", bucket_options, key=f"ma_pos_defense_bucket_{team}_{season}_{recent_games_cap}",
+    )
+    for stat in ('Points', 'Rebounds', 'Assists'):
+        dates, values = positional_defense_trend(matchup_df, pos_map, selected_bucket, stat)
+        st.markdown(f"_{selected_bucket}s — {stat.lower()} allowed, over time_")
         if len(values) >= 2:
             render_trend_line(dates, values, avg=sum(values) / len(values), avg_label='avg', height=150)
         else:

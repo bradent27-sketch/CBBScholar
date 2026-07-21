@@ -8,7 +8,7 @@ functions makes an API call of its own.
 import pandas as pd
 
 
-def player_rate_stats(df, min_games=5):
+def player_rate_stats(df, min_games=5, min_mpg=15.0):
     """
     Given a wide player-stats DataFrame (one row per player, nested
     fieldGoals/threePointFieldGoals/freeThrows/rebounds dicts - the same
@@ -16,15 +16,28 @@ def player_rate_stats(df, min_games=5):
     per-game/percentage columns this app displays (PPG, RPG, ... Net
     Rating) as a new DataFrame - the group-level equivalent of
     ui.tabs.compare's per-player _numeric_stat_map, used to build a
-    comparison distribution for ui.charts.render_relative_bars. Players
-    under `min_games` are dropped from the distribution (not from any
-    single-player display elsewhere) so garbage-time/injury-shortened
-    small samples don't distort the comparison group's spread.
+    comparison distribution for ui.charts.render_relative_bars.
+
+    Players under `min_games` OR averaging under `min_mpg` minutes are
+    dropped from the distribution (not from any single-player display
+    elsewhere). `min_games` alone wasn't enough of a filter: a player who
+    checked into 5 games for two garbage-time minutes each still cleared
+    it, and a comparison group full of those still counts every bench
+    scrub as a full "player" in the average - which is exactly why a
+    real rotation guard averaging a modest 3 RPG could come back reading
+    as "average" against a group whose mean was dragged down by players
+    who barely play. `min_mpg=15` restricts the comparison group to
+    players with a real per-game role (starters plus meaningful bench
+    rotation, not end-of-bench/garbage-time appearances) - requested
+    explicitly: compare against players who "play a lot."
     """
     if df is None or df.empty or 'games' not in df.columns:
         return pd.DataFrame()
     games_raw = pd.to_numeric(df['games'], errors='coerce')
-    work = df[games_raw >= min_games].copy()
+    minutes_raw = pd.to_numeric(df['minutes'], errors='coerce') if 'minutes' in df.columns else pd.Series([None] * len(df), index=df.index)
+    mpg_raw = minutes_raw / games_raw
+    qualifies = (games_raw >= min_games) & (mpg_raw >= min_mpg)
+    work = df[qualifies].copy()
     if work.empty:
         return pd.DataFrame()
     games = pd.to_numeric(work['games'], errors='coerce')
