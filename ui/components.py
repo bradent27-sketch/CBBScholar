@@ -102,7 +102,7 @@ def render_bio_strip(fields):
     cells = []
     for label, value in fields:
         cells.append(
-            f"<div style='flex:1; background:{C['surface_container']}; text-align:center; padding:10px 6px;'>"
+            f"<div class='bio-cell' style='flex:1; background:{C['surface_container']}; text-align:center; padding:10px 6px;'>"
             f"<div style='font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.08em; color:{C['on_surface_variant']};'>{label}</div>"
             f"<div style='font-family:{F['mono']}; font-size:18px; font-weight:600; color:#ffffff; margin-top:2px;'>{value}</div>"
             f"</div>"

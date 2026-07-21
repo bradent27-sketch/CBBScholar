@@ -23,6 +23,22 @@ centers have done against a team, vs their own season averages, with
 trend lines) built WITHOUT a full-D-I API fan-out. See §3 and §5 below for
 the architecture and the gotchas hit building it.
 
+**Follow-up refinement pass:** app-wide hover feedback on every custom SVG
+chart shape (bars/cells/dots/lines) plus bio-strip cells and form chips -
+see the `.hz-bar`/`.hz-cell`/`.hz-dot` classes in `ui/charts.py` and their
+CSS in `ui/styling.py`'s `inject_theme()`. `st.dataframe`'s grid (glide-
+data-grid, canvas-rendered) has NO native row/cell hover highlight and
+CSS/Styler cannot add one - confirmed live, see §5 - so table-based tabs
+(NET & Resume, Conference Standings, game logs, Transfer Portal) don't get
+this treatment; every chart-based stat display does. Also this pass: a
+`max_recent_games` cap (default 20, a UI slider) on the positional matchup
+defense fan-out specifically because of CBBD's 1,000-call/month free tier
+(see §2/DATA_SOURCES.md's "API budget" section for the full arithmetic),
+and three hand-crafted demo scenarios (Duke/Kentucky guards, Kansas/
+Gonzaga forwards, UNC/UConn centers) run through the real transform
+functions to validate the positional defense engine tells the right
+story - all three matched their intended narrative.
+
 **Important caveat on this pass:** this sandbox's network policy blocks
 outbound access to api.collegebasketballdata.com and ESPN's endpoints
 (confirmed: `curl` gets a 403 from the egress proxy on both hosts) - so
@@ -80,6 +96,23 @@ updates, on the condition it stays manual (click-triggered, never
 automatic/scheduled) - see `data.loaders.fetch_net_rankings_manual()` and
 §8. This is the one deliberate exception to this app's "prefer free APIs
 over scraping" default; nowhere else in either app scrapes anything.
+
+**CBBD's free tier is capped at 1,000 API calls/MONTH** (confirmed via
+CBBD's own docs/socials, not this app's own testing - this sandbox can't
+reach the API at all, see §6) - no per-minute throttling, just a hard
+monthly ceiling. **This quota is SHARED with CFB Scholar if both apps use
+the same CFBD/CBBD account** (same mechanism as the already-documented
+shared Odds API allowance in §8) - confirmed: CBBD accounts share one call
+pool with CFBD. A free Student/Academic tier (.edu email) raises this to
+3,000/month; Patreon tiers go up to 75,000/month (Tier 3, ~$10/mo) and add
+GraphQL API access. This is the direct reason
+`load_team_opponent_game_logs`'s positional-defense fan-out defaults to a
+`max_recent_games` cap (20) instead of a whole season - uncapped, refreshing
+a handful of teams late-season could burn a meaningful chunk of the free
+1,000/month by itself. See DATA_SOURCES.md's "API budget" section for the
+full arithmetic and other free mitigation options (CBBD's own free
+"Exporter" web tool for manual CSV snapshots, the paid one-time Starter
+Pack for historical backfill).
 
 ## 3. Key computed systems
 
@@ -263,6 +296,28 @@ cards, full-bleed layout. Same `render_coming_soon()` reuse for setup
   before calling `style_plain_dataframe` - keep it as a real column and use
   `hide_index=True` with a plain sequential index instead**, the pattern
   Conference Standings and the game log table already used correctly.
+- **`st.dataframe`'s grid has no native row/cell hover highlight, and
+  nothing (CSS, pandas Styler) can add one** - confirmed live: hovering a
+  glide-data-grid cell produces zero visual change, before or after adding
+  any CSS `:hover` rule targeting it. This is because the grid is drawn to
+  a `<canvas>` element, not real DOM - a browser can't apply CSS pseudo-
+  classes to pixels inside a canvas. This is DIFFERENT from (but related
+  to) the Styler index-cell bug above: that one was fixable (style real
+  columns, not the index); this one is a hard platform limitation. Every
+  chart-based stat display in this app (SVG bars/dots/cells - see the
+  `.hz-*` classes in ui/charts.py) gets real hover feedback instead, since
+  those are real DOM elements.
+- **A long-running `streamlit run` process does NOT re-import already-
+  imported modules on a rerun** - only the top-level script re-executes;
+  `ui.charts`, `ui.styling`, etc. stay exactly as they were the moment the
+  process started, even many reruns later. Editing charts.py and testing
+  again against an already-running dev server silently tested the OLD
+  code and looked like the change had no effect (a new CSS class wasn't
+  appearing in the rendered HTML at all) until the process was actually
+  killed and restarted. This is a sharper version of the hot-reload
+  gotcha already listed above - worth remembering that even a server
+  started AFTER an edit can be the stale one if it was left running
+  through a LATER edit.
 - **Secrets committed to the wrong file** - `.streamlit/secrets.toml.example`
   (the tracked TEMPLATE file, meant to hold placeholders) had real-looking
   working API keys in it from the initial commit, not placeholder text -

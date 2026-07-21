@@ -92,7 +92,7 @@ def render_mirror_bars(header_left, header_right, rows):
                 tx, anchor = x0 + bar_len + 8, 'start'
             tooltip = f"{r['label']}: {val_str}{pct_label}"
             parts.append(
-                f"<rect x='{x0:.1f}' y='{cy - bar_h / 2:.1f}' width='{bar_len:.1f}' height='{bar_h}' rx='3' "
+                f"<rect class='hz-bar' x='{x0:.1f}' y='{cy - bar_h / 2:.1f}' width='{bar_len:.1f}' height='{bar_h}' rx='3' "
                 f"fill='{color}'><title>{_esc(tooltip)}</title></rect>"
             )
             parts.append(
@@ -121,7 +121,7 @@ def render_form_strip(team_label, chips, elo_delta=None):
         bg = C['positive'] if is_win else C['negative']
         tooltip = f"{ch['result']} {ch['score']} {ch['venue']} {ch['opponent']}"
         chip_html.append(
-            f"<span title='{_esc(tooltip)}' style='display:inline-flex; flex-direction:column; align-items:center; "
+            f"<span class='form-chip' title='{_esc(tooltip)}' style='display:inline-flex; flex-direction:column; align-items:center; "
             f"min-width:34px; padding:4px 6px; border-radius:6px; background:{bg}22; "
             f"border:1px solid {bg}66;'>"
             f"<span style='font-weight:800; font-size:12px; color:{bg};'>{ch['result']}</span>"
@@ -211,7 +211,7 @@ def render_rank_trajectory(pivot, week_labels, color_map, max_rank=26):
         for seg in segs:
             if len(seg) == 1:
                 x, yv = seg[0]
-                parts.append(f"<circle cx='{x:.1f}' cy='{yv:.1f}' r='3' fill='{color}'/>")
+                parts.append(f"<circle class='hz-dot' cx='{x:.1f}' cy='{yv:.1f}' r='3' fill='{color}'/>")
             else:
                 d = " ".join(f"{x:.1f},{yv:.1f}" for x, yv in seg)
                 parts.append(f"<polyline points='{d}' fill='none' stroke='{color}' stroke-width='2.2' stroke-linejoin='round' stroke-linecap='round' opacity='0.9'/>")
@@ -219,7 +219,7 @@ def render_rank_trajectory(pivot, week_labels, color_map, max_rank=26):
             if pd.isna(v):
                 continue
             parts.append(
-                f"<circle cx='{xs[o]:.1f}' cy='{y_for(v):.1f}' r='3.4' fill='{color}' stroke='{C['surface']}' stroke-width='1'>"
+                f"<circle class='hz-dot' cx='{xs[o]:.1f}' cy='{y_for(v):.1f}' r='3.4' fill='{color}' stroke='{C['surface']}' stroke-width='1'>"
                 f"<title>{_esc(team)} — {_esc(week_labels.get(o, o))}: #{int(v)}</title></circle>"
             )
         # End label, nudged to avoid overlaps
@@ -265,7 +265,7 @@ def render_game_log_bars(values, tooltips, breakout, avg=None, avg_label="season
         is_star = bool(breakout[i]) if i < len(breakout) else False
         fill = C['primary'] if is_star else C['secondary']
         parts.append(
-            f"<rect x='{x:.1f}' y='{y:.1f}' width='{bar_w:.1f}' height='{h:.1f}' rx='3' fill='{fill}' "
+            f"<rect class='hz-bar' x='{x:.1f}' y='{y:.1f}' width='{bar_w:.1f}' height='{h:.1f}' rx='3' fill='{fill}' "
             f"opacity='{1.0 if is_star else 0.75}'><title>{_esc(tooltips[i])}</title></rect>"
         )
         if is_star:
@@ -354,7 +354,7 @@ def render_trend_line(dates, values, avg=None, avg_label="season avg", y_suffix=
         else:
             dot_color = color
         parts.append(
-            f"<circle cx='{x:.1f}' cy='{y:.1f}' r='4' fill='{dot_color}' stroke='{C['surface']}' stroke-width='1.2'>"
+            f"<circle class='hz-dot' cx='{x:.1f}' cy='{y:.1f}' r='4' fill='{dot_color}' stroke='{C['surface']}' stroke-width='1.2'>"
             f"<title>{_esc(tooltip)}</title></circle>"
         )
     step = max(1, n // 8)
@@ -429,7 +429,7 @@ def render_efficiency_scatter(df, x_col, y_col, color_map, invert_y=False,
             continue
         color = color_map.get(team) or C['secondary']
         parts.append(
-            f"<circle cx='{px(row[x_col]):.1f}' cy='{py(row[y_col]):.1f}' r='4.2' fill='{color}' "
+            f"<circle class='hz-dot' cx='{px(row[x_col]):.1f}' cy='{py(row[y_col]):.1f}' r='4.2' fill='{color}' "
             f"opacity='0.75' stroke='{C['surface']}' stroke-width='0.8'>"
             f"<title>{_esc(team)} — {x_col}: {row[x_col]:.1f}, {y_col}: {row[y_col]:.1f}</title></circle>"
         )
@@ -440,7 +440,7 @@ def render_efficiency_scatter(df, x_col, y_col, color_map, invert_y=False,
         color = color_map.get(team) or C['primary']
         x, yv = px(row[x_col]), py(row[y_col])
         parts.append(
-            f"<circle cx='{x:.1f}' cy='{yv:.1f}' r='7' fill='{color}' stroke='#ffffff' stroke-width='1.6'>"
+            f"<circle class='hz-dot' cx='{x:.1f}' cy='{yv:.1f}' r='7' fill='{color}' stroke='#ffffff' stroke-width='1.6'>"
             f"<title>{_esc(team)} — {x_col}: {row[x_col]:.1f}, {y_col}: {row[y_col]:.1f}</title></circle>"
         )
         parts.append(
@@ -492,7 +492,7 @@ def render_relative_bars(rows):
             bar_w = max(4.0, track_w * max(0.0, min(100.0, float(pct))) / 100.0)
             color = get_grade_color(pct)
             parts.append(
-                f"<rect x='{x0}' y='{cy - 6:.1f}' width='{bar_w:.1f}' height='12' rx='6' fill='{color}'>"
+                f"<rect class='hz-bar' x='{x0}' y='{cy - 6:.1f}' width='{bar_w:.1f}' height='12' rx='6' fill='{color}'>"
                 f"<title>{_esc(r['label'])}: {_esc(r.get('value_str', ''))}</title></rect>"
             )
         if avg_pct is not None and pd.notna(avg_pct):
@@ -581,7 +581,7 @@ def render_radar(axes, values_a, values_b, name_a, name_b, color_a=None, color_b
         )
         for x, y, label, v in dots:
             parts.append(
-                f"<circle cx='{x:.1f}' cy='{y:.1f}' r='3.6' fill='{color}' stroke='{C['surface']}' stroke-width='1'>"
+                f"<circle class='hz-dot' cx='{x:.1f}' cy='{y:.1f}' r='3.6' fill='{color}' stroke='{C['surface']}' stroke-width='1'>"
                 f"<title>{_esc(name)} — {_esc(label)}: {v:.1f}</title></circle>"
             )
 
@@ -658,7 +658,7 @@ def render_percentile_heatmap(pct_df, raw_df, cols, col_labels=None, sort_by_avg
             if pd.notna(pct):
                 tooltip += f" ({pct:.0f}th pctl)"
             parts.append(
-                f"<rect x='{x + 2:.1f}' y='{y + 3:.1f}' width='{CELL_W - 4:.1f}' height='{ROW_H - 6:.1f}' rx='3' "
+                f"<rect class='hz-cell' x='{x + 2:.1f}' y='{y + 3:.1f}' width='{CELL_W - 4:.1f}' height='{ROW_H - 6:.1f}' rx='3' "
                 f"fill='{color}'><title>{_esc(tooltip)}</title></rect>"
             )
             if show_values and raw_val is not None and pd.notna(raw_val):
@@ -666,7 +666,12 @@ def render_percentile_heatmap(pct_df, raw_df, cols, col_labels=None, sort_by_avg
                 parts.append(
                     f"<text x='{x + CELL_W / 2:.1f}' y='{y + ROW_H / 2 + 4:.1f}' text-anchor='middle' "
                     f"font-size='10.5' font-weight='700' font-family='{_MONO_FONT}' fill='#ffffff' "
-                    f"style='paint-order:stroke; stroke:rgba(0,0,0,0.35); stroke-width:2px;'>"
+                    # pointer-events:none so hovering the printed number
+                    # still resolves to the cell rect underneath it (drawn
+                    # first, so it'd otherwise be occluded by this text and
+                    # never receive the :hover highlight when the mouse is
+                    # directly over the digits).
+                    f"style='paint-order:stroke; stroke:rgba(0,0,0,0.35); stroke-width:2px; pointer-events:none;'>"
                     f"{raw_val:.{decimals}f}<title>{_esc(tooltip)}</title></text>"
                 )
     parts.append("</svg>")
@@ -717,7 +722,7 @@ def render_prop_line_shop(rows):
             f"{_esc(r['book'])}{' ★' if is_best else ''}</text>"
         )
         parts.append(
-            f"<rect x='{label_w}' y='{cy - 7:.1f}' width='{bar_len:.1f}' height='14' rx='3' fill='{color}' "
+            f"<rect class='hz-bar' x='{label_w}' y='{cy - 7:.1f}' width='{bar_len:.1f}' height='14' rx='3' fill='{color}' "
             f"opacity='{1.0 if is_best else 0.55}'><title>{_esc(r['book'])}: {odds_txt}{line_txt}</title></rect>"
         )
         parts.append(

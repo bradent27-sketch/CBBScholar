@@ -654,13 +654,27 @@ def load_player_game_logs(team, season=None):
 
 
 @st.cache_data(ttl=604800, show_spinner=False, persist="disk")
-def load_team_opponent_game_logs(team, season=None):
+def load_team_opponent_game_logs(team, season=None, max_recent_games=20):
     """
-    Every OPPOSING player's box score from every game `team` has actually
-    played this season - the data source behind the Matchup Analyzer's
-    positional defense breakdown ("what have opposing point guards/forwards
-    /centers done against this team"), built WITHOUT a full-D-I fan-out and
-    without any new/unverified endpoint.
+    Every OPPOSING player's box score from `team`'s `max_recent_games` MOST
+    RECENT games this season - the data source behind the Matchup
+    Analyzer's positional defense breakdown ("what have opposing point
+    guards/forwards/centers done against this team"), built WITHOUT a
+    full-D-I fan-out and without any new/unverified endpoint.
+
+    `max_recent_games` (default 20, `None`/0 = the whole season) exists
+    for API-quota reasons, not just performance: CBBD's FREE tier is capped
+    at 1,000 calls/MONTH total (confirmed via CBBD's own docs/socials -
+    see HANDOFF.md), and this function's cost scales with the number of
+    UNIQUE opponents `team` has played (see below) - uncapped, a team 30
+    games into its season costs ~30 calls to refresh, once per team per
+    week. Capping to the most recent N games bounds that (a 20-game cap
+    means this never costs more than ~20 opponent calls regardless of how
+    deep into the season `team` is) and is arguably more analytically
+    useful anyway: how a defense has played the last month matters more to
+    "should I worry about their guards tonight" than a result from
+    November. Early/mid-season, when fewer than `max_recent_games` have
+    been played, this is a no-op - nothing gets trimmed.
 
     The trick: `team`'s own schedule (load_team_games) already lists every
     opponent it has actually played - typically 12-30 teams across a full
@@ -698,7 +712,10 @@ def load_team_opponent_game_logs(team, season=None):
     games = load_team_games(team, season)
     if games.empty:
         return pd.DataFrame()
-    opponents = games['Opponent'].dropna().unique().tolist()
+    # load_team_games already sorts by Date ascending - .tail(N) is the N
+    # MOST RECENT games, not an arbitrary N.
+    scoped_games = games.tail(max_recent_games) if max_recent_games else games
+    opponents = scoped_games['Opponent'].dropna().unique().tolist()
     avg_cols = ['Points', 'Rebounds', 'Assists', 'FGA', '3PA']
     rows = []
     for opp in opponents:

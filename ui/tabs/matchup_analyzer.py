@@ -305,24 +305,31 @@ def _render_team_defense(season, team_a, team_b, team_stats):
     st.markdown("---")
     st.markdown("**Positional Matchup Defense**")
     st.caption(
-        f"Built from every game {team_a} and {team_b} have actually played this season (not a full D-I pull) — "
-        "roughly one API call per opponent already faced, cached ~weekly and shared with any other matchup "
-        "touching the same opponent. See HANDOFF.md for the full architecture, including the position-field "
-        "granularity caveat (this sandbox couldn't verify it live against a real payload)."
+        f"Built from {team_a} and {team_b}'s own recent games (not a full D-I pull) — roughly one API call per "
+        "opponent already faced, cached ~weekly and shared with any other matchup touching the same opponent. "
+        "CBBD's free tier caps out at 1,000 calls/month, so this is capped to each team's most recent games by "
+        "default rather than the full season — see HANDOFF.md for the full architecture, the API-cost math, and "
+        "the position-field granularity caveat (this sandbox couldn't verify it live against a real payload)."
     )
-    trigger_key = f"ma_pos_defense_loaded_{season}"
+    recent_games_cap = st.slider(
+        "Games per team to include (most recent)", min_value=5, max_value=30, value=20, step=5,
+        key="ma_pos_defense_window",
+        help="Lower = fewer API calls and a more CURRENT read on each defense; higher = more complete but costs "
+             "more of CBBD's monthly call quota. Cost is roughly this number of calls per team, once per week.",
+    )
+    trigger_key = f"ma_pos_defense_loaded_{season}_{recent_games_cap}"
     triggered = st.session_state.get(trigger_key, False)
     if not triggered:
         if st.button("Load positional matchup defense", key="ma_load_pos_defense"):
             st.session_state[trigger_key] = True
             triggered = True
         else:
-            st.info("Click above to pull it — bounded by each team's actual opponents played, not all of D-I.")
+            st.info(f"Click above to pull it — up to ~{recent_games_cap} API calls per team, cached ~weekly.")
             return
 
     for team in (team_a, team_b):
         with st.spinner(f"Loading {team}'s opponent game logs..."):
-            matchup_df = load_team_opponent_game_logs(team, season)
+            matchup_df = load_team_opponent_game_logs(team, season, max_recent_games=recent_games_cap)
         st.markdown(f"**{team} — defense by position**")
         if matchup_df.empty:
             st.info(f"No opponent game log data available for {team} yet.")

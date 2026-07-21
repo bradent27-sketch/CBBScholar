@@ -404,6 +404,11 @@ def inject_theme():
             border-color: {C['primary']} !important;
             box-shadow: 0 0 0 2px rgba({_PRIMARY_RGB}, 0.15) !important;
         }}
+        .stSelectbox [role="group"]:hover, .stMultiSelect [role="group"]:hover,
+        .stNumberInput [role="group"]:hover, .stDateInput [role="group"]:hover,
+        div[data-baseweb="select"] > div:hover, .stTextInput input:hover, .stTextArea textarea:hover {{
+            border-color: {C['outline']} !important;
+        }}
 
         div.stSelectbox {{ margin-bottom: -10px !important; }}
 
@@ -438,6 +443,71 @@ def inject_theme():
             border-color: rgba({_PRIMARY_RGB}, 0.55);
             box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 10px 22px -10px rgba({_PRIMARY_RGB}, 0.3) !important;
             transform: translateY(-1px);
+        }}
+
+        /* --- Chart hover affordances (additive) ---------------------------
+           Every custom inline-SVG chart (ui/charts.py) marks its data
+           shapes with one of these classes so hovering ANY bar/cell/dot
+           throughout the app gives a visible response, not just the
+           native <title> tooltip (which has no visual change and a
+           noticeable delay before it appears) - this was asked for
+           explicitly: hover feedback on individual stats, not just
+           headers/buttons. transform-box:fill-box makes scale() pivot
+           around each shape's own center instead of the whole SVG's
+           origin corner, which is what "grow in place" needs.
+
+           NOTE: st.dataframe's grid (Player Search's game log, NET/Polls/
+           Standings tables, Transfer Portal, etc.) is canvas-rendered
+           (glide-data-grid), not real DOM - confirmed live that it has NO
+           native row/cell hover highlight in this Streamlit version, and
+           CSS cannot reach into a canvas to add one. Every OTHER stat
+           display in this app (percentile bars, mirror bars, the Four
+           Factors heatmap, scatter/trend/radar/trajectory charts, stat
+           tiles above) is real DOM and gets real hover feedback below. */
+        svg .hz-bar, svg .hz-cell {{
+            transition: filter 110ms ease-out, stroke-width 110ms ease-out;
+            cursor: pointer;
+        }}
+        svg .hz-bar:hover, svg .hz-cell:hover {{
+            filter: brightness(1.3);
+            stroke: rgba(255, 255, 255, 0.6);
+            stroke-width: 1.5px;
+        }}
+        svg .hz-dot {{
+            transition: filter 110ms ease-out, transform 110ms ease-out;
+            transform-box: fill-box;
+            transform-origin: center;
+            cursor: pointer;
+        }}
+        svg .hz-dot:hover {{
+            filter: brightness(1.35) drop-shadow(0 0 5px rgba({_PRIMARY_RGB}, 0.75));
+            transform: scale(1.45);
+        }}
+        svg .hz-line {{
+            transition: filter 110ms ease-out, stroke-width 110ms ease-out;
+        }}
+        svg:has(.hz-line:hover) .hz-line {{
+            filter: brightness(1.2);
+        }}
+
+        /* Bio strip cells (ui.components.render_bio_strip) and W/L form
+           chips (ui.charts.render_form_strip) - small hover lift so these
+           read as individually-hoverable stats too, matching the tile/
+           chart treatment above. */
+        .bio-cell {{
+            transition: background-color 110ms ease-out;
+        }}
+        .bio-cell:hover {{
+            background-color: {C['surface_container_high']};
+            cursor: default;
+        }}
+        .form-chip {{
+            transition: transform 110ms ease-out, filter 110ms ease-out;
+        }}
+        .form-chip:hover {{
+            transform: translateY(-2px);
+            filter: brightness(1.2);
+            cursor: pointer;
         }}
 
         /* Game log table + pinned season-average row (ui.tabs.player_search)

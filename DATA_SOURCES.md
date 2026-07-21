@@ -90,6 +90,71 @@ is wired as a manual, click-triggered fetch only (24h cache) — never
 called automatically on tab load or on any schedule. See
 `ui/tabs/net_resume.py`.
 
+## API budget: CBBD's 1,000 calls/month free tier
+
+Confirmed via CBBD's own docs/socials (this sandbox can't reach the API
+directly to verify first-hand - see the caveat above): **the free tier is
+capped at 1,000 API calls per MONTH**, no per-minute throttling, just a
+hard monthly ceiling that resets monthly. **This pool is SHARED with CFB
+Scholar if both apps use the same CFBD/CBBD account** (same pattern as the
+already-documented shared Odds API allowance) - check both apps' combined
+usage, not just this one, before assuming there's headroom. A free
+Student/Academic tier (register with a `.edu` email) raises this to
+3,000/month. Patreon tiers go up to 75,000/month (Tier 3, ~$10/mo) and add
+GraphQL API access for more flexible/efficient querying.
+
+**Cost breakdown** (steady-state, i.e. what a normal week of use costs,
+not first-ever-load):
+
+| What | Cost | Notes |
+|---|---|---|
+| Shared baseline (ratings + all-team stats) | ~2 calls/week | Powers Team Efficiency, Four Factors, Team Defense profile, score projection — same 2 calls regardless of how many teams/matchups you look at |
+| Browsing one team (roster/stats/schedule/game log) | ~2-4 calls | Player Search, Compare, Matchup Analyzer Overview — cached 1-6h, so repeat visits same day are often free |
+| Positional Matchup Defense, ONE team, first time this week | up to ~1 + 2×N calls | N = the "games per team" slider (default 20, capped specifically because of this quota) — e.g. cap=20 → up to 41 calls |
+| Positional Matchup Defense, a full two-team matchup, first time | up to ~2×(1+2N) calls, LESS if the teams share opponents | In-conference matchups share most of their schedule, so real cost is usually well below the worst case |
+| Positional Matchup Defense, any REPEAT view this week (same team) | 0 calls | Full cache hit |
+| Player Trends' conference comparison group | ~8-18 calls, once/week, shared across every player looked up | Full D-I opt-in is ~360 calls, same weekly-shared caching |
+
+**The realistic risk**: checking Positional Matchup Defense for ~5 "watch
+list" teams every week, cap=20, non-overlapping schedules, is
+~5 × 41 × ~4 weeks ≈ 820 calls/month on that ONE feature alone — most of
+the free 1,000/month budget, before counting anything else either app
+does. This is exactly why `load_team_opponent_game_logs` defaults to a
+`max_recent_games` cap (a UI slider in Matchup Analyzer's Team Defense
+sub-tab, not hardcoded) instead of pulling a whole season — turn it down
+for a tighter budget, up for more complete history if quota allows.
+
+**Free ways to reduce this further:**
+- **Lower the "games per team" slider** — cost scales directly with it.
+- **CBBD's own free "Exporter" web tool** (collegebasketballdata.com/
+  exporter/games/players) — browse/preview/filter any endpoint and pull a
+  CSV by hand, no code. Doing a weekly manual export of `/games/players`
+  and dropping the CSV somewhere this app reads from would let the
+  positional-defense engine read from a local snapshot instead of hitting
+  the live API at all for that data — the SAME "manual, click-triggered,
+  never automatic" pattern this app already uses for NET rankings (see
+  §2/§8 gotchas in HANDOFF.md). Not built yet — ask if you want this
+  wired in; it's a real option, just a workflow change (a weekly manual
+  export step) rather than a pure code change.
+- **Register for the free Student/Academic tier** if a `.edu` email is
+  available — 3,000/month instead of 1,000, zero cost, zero code change.
+- **Test whether `/games/players` supports an unscoped (no `team` param)
+  season-wide call** — if CBBD returns every team's games in ONE call the
+  way `/stats/team/season` already does, that would replace the whole
+  per-opponent fan-out with a single call. This sandbox could not test it
+  live; worth trying once real network access is available before
+  assuming the current per-opponent design is the best possible one.
+
+**Paid option** (flagging per this app's "ask before adding paid sources"
+rule — NOT enabled, just documented as a real option): CBBD's Patreon Tier
+3 (~$10/mo) raises the ceiling to 75,000 calls/month and unlocks GraphQL,
+which would make the "games per team" cap essentially unnecessary. A
+separate, one-time option is CBBD's **paid "Starter Pack"** (~$39,
+collegefootballdata.gumroad.com/l/cbb-starter-pack) — historical CSVs
+(games back to 2003, stats back to 2005) plus notebooks, useful for
+BACKFILLING history once, not for keeping current-season data fresh
+during the season.
+
 ## Explicitly excluded
 
 - **KenPom.com** — paid subscription; not used.
