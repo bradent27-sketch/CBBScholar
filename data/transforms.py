@@ -452,8 +452,16 @@ def positional_defense_trend(matchup_df, position_map, bucket, stat='Points'):
 
 # (label, stats_df column, higher-is-better?, is a percentage?, help text) -
 # powers team_defense_profile_rows below (Matchup Analyzer's TEAM DEFENSE
-# panel).
+# panel). Pace is listed first and isn't itself "good/bad" defense the way
+# every ALLOWED-rate stat after it is - `higher_is_better=True` here just
+# means the percentile bar tracks the RAW pace value directly (fast team ->
+# long/high-colored bar), not a claim that fast is the "better" tempo -
+# every other stat's direction below is a real defensive-quality claim,
+# this one is purely descriptive context for reading them (a fast team
+# concedes more raw points/rebounds/assists per game than its per-
+# possession rates alone would suggest, just from extra possessions).
 _TEAM_DEFENSE_METRICS = [
+    ('Pace', 'Pace', True, False, "Possessions per 40 minutes — tempo, not quality. Shows whether this team plays fast or slow relative to D-I; a fast pace means more raw possessions (and more raw points/rebounds/assists) to defend per game, even at identical per-possession rates."),
     ('eFG% Allowed', 'Def eFG%', False, True, "Effective field goal % allowed to opponents — lower is better defense."),
     ('3PA Rate Allowed', 'Def 3PA Rate', False, True, "Share of opponent field goal attempts that are threes — lower means this defense forces/contests more twos relative to threes."),
     ('3P% Allowed', 'Def 3P%', False, True, "Opponent three-point percentage against this team — lower is better three-point defense."),
@@ -469,13 +477,18 @@ def team_defense_profile_rows(stats_df, team):
     """
     Single-team defensive-shape percentile rows, ready for
     ui.charts.render_relative_bars (the same single-sided bar-plus-value
-    treatment Player Search uses for a player's own tendency profile) -
-    eFG%/3PA rate/3P%/2P%/FT rate/ORB% allowed, plus this team's own DREB%
-    and TO ratio forced, D-I percentile per column with the correct
-    better-direction baked in (an ALLOWED rate/percentage is good when LOW;
-    DREB% and TO ratio forced are good when HIGH). Powers Matchup
-    Analyzer's TEAM DEFENSE panel (one team at a time, not team-vs-team, so
-    a single-sided bar is the right shape here, not a mirrored one).
+    treatment Player Search uses for a player's own tendency profile) - Pace
+    (context, not a quality claim - see _TEAM_DEFENSE_METRICS) plus eFG%/
+    3PA rate/3P%/2P%/FT rate/ORB% allowed, this team's own DREB%, and TO
+    ratio forced, D-I percentile per column with the correct better-
+    direction baked in (an ALLOWED rate/percentage is good when LOW; DREB%
+    and TO ratio forced are good when HIGH). Powers Matchup Analyzer's TEAM
+    DEFENSE panel (one team at a time, not team-vs-team, so a single-sided
+    bar is the right shape here, not a mirrored one) - Pace renders inline
+    in this same bar list rather than as a separate metric, per explicit
+    request ("a number isn't telling... it can be inline with the other
+    stats" - a bare `st.metric` doesn't show where the value falls in the
+    D-I distribution the way a percentile bar does).
     Returns [] if `team` isn't found.
     """
     row = stats_df[stats_df['Team'] == team]

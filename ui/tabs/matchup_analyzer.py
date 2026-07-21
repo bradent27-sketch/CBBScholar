@@ -216,33 +216,20 @@ def _render_team_defense_panel(season, teams_df):
         st.info("Team defense profile needs /stats/team/season data, which isn't available right now.")
         return
 
-    # Pace: already pulled by load_all_team_season_stats (t.get('pace') off
-    # /stats/team/season - no new API call needed), just not previously
-    # surfaced on this panel. Shown as a plain st.metric, NOT folded into
-    # the percentile bars below - pace isn't itself "good" or "bad" defense
-    # the way an allowed-rate stat is, so running it through the same
-    # green/red percentile-bar treatment would misleadingly imply a fast
-    # pace is a defensive strength or weakness. It's context for reading
-    # the rate stats instead: a fast-paced team allows more RAW points/
-    # rebounds/assists per game than its per-possession rates alone would
-    # suggest, just because the game has more possessions in it.
-    pace_row = team_stats[team_stats['Team'] == team]
-    pace = pace_row.iloc[0]['Pace'] if not pace_row.empty else None
-    if pace is not None and pd.notna(pace):
-        st.metric(
-            "Pace", f"{float(pace):.1f} poss/40",
-            help="Possessions per 40 minutes — tempo, not quality. Context for the rate stats below: a "
-                 "fast-paced team gives up more RAW points/rebounds/assists per game even with identical "
-                 "per-possession defensive rates, just because there are more possessions to defend.",
-        )
-
+    # Pace renders as the FIRST row inside profile_rows below (data.
+    # transforms.team_defense_profile_rows/_TEAM_DEFENSE_METRICS) - a
+    # percentile bar inline with the rest of the defensive stats, not a
+    # separate st.metric, per explicit request: a bare number doesn't show
+    # whether that pace is fast or slow relative to D-I the way a bar does.
     profile_rows = team_defense_profile_rows(team_stats, team)
     if profile_rows:
         st.markdown(f"**{team} — defensive profile (vs D-I)**")
         render_relative_bars(profile_rows)
         st.caption(
-            "Percentile vs all of D-I, correct direction per column baked in — an ALLOWED rate/percentage is "
-            "colored good when it's LOW; this team's own DREB% and TO ratio forced are colored good when HIGH."
+            "Percentile vs all of D-I. Pace is context, not a quality claim (fast/slow isn't itself good or "
+            "bad defense - it just means more/fewer raw possessions to defend per game). Every stat after it "
+            "IS a quality claim with the correct direction baked in — an ALLOWED rate/percentage is colored "
+            "good when it's LOW; this team's own DREB% and TO ratio forced are colored good when HIGH."
         )
     else:
         st.info(f"No defensive profile available for {team} yet.")
