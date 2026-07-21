@@ -559,6 +559,10 @@ def style_plain_dataframe(df, numeric_pct_cols=None, diverging_cols=None, matchu
     pct_arrays = {col: list(vals) for col, vals in numeric_pct_cols.items()}
     matchup_arrays = {col: list(vals) for col, vals in matchup_pct_cols.items()}
 
+    # Team coloring now also applies to an 'Opponent' column (game log
+    # tables), not just a literal 'Team' column, using the same lookup.
+    _TEAM_NAME_COLS = ('Team', 'Opponent')
+
     def style_row(row):
         pos = df.index.get_loc(row.name)
         styles = []
@@ -572,7 +576,7 @@ def style_plain_dataframe(df, numeric_pct_cols=None, diverging_cols=None, matchu
             elif col in pct_arrays and pos < len(pct_arrays[col]):
                 bg = get_grade_color(pct_arrays[col][pos])
                 styles.append(f'background-color:{bg}; color:#ffffff; font-weight:bold;')
-            elif col == 'Team':
+            elif col in _TEAM_NAME_COLS:
                 team_color = team_color_map.get(str(row[col]))
                 if team_color:
                     styles.append(f"background-color:{team_color}; color:#ffffff; font-weight:bold;")

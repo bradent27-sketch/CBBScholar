@@ -333,10 +333,6 @@ def render_efficiency_scatter(df, x_col, y_col, color_map, invert_y=False,
     mx, my = px(xs_.median()), py(ys_.median())
     parts.append(f"<line x1='{mx:.1f}' y1='{MT}' x2='{mx:.1f}' y2='{MT + plot_h}' stroke='{C['outline_variant']}' stroke-width='1' stroke-dasharray='4,4'/>")
     parts.append(f"<line x1='{ML}' y1='{my:.1f}' x2='{ML + plot_w}' y2='{my:.1f}' stroke='{C['outline_variant']}' stroke-width='1' stroke-dasharray='4,4'/>")
-    parts.append(
-        f"<text x='{W - MR - 4}' y='{MT + 14}' text-anchor='end' font-size='10.5' font-weight='700' "
-        f"letter-spacing='0.06em' fill='{C['on_surface_variant']}' opacity='0.8'>ELITE BOTH WAYS ↗</text>"
-    )
     if x_label:
         parts.append(f"<text x='{ML + plot_w / 2}' y='{H - 8}' text-anchor='middle' font-size='11' fill='{C['on_surface_variant']}'>{_esc(x_label)}</text>")
     if y_label:
@@ -580,6 +576,83 @@ def render_percentile_heatmap(pct_df, raw_df, cols, col_labels=None, sort_by_avg
                 f"<rect x='{x + 2:.1f}' y='{y + 3:.1f}' width='{CELL_W - 4:.1f}' height='{ROW_H - 6:.1f}' rx='3' "
                 f"fill='{color}'><title>{_esc(tooltip)}</title></rect>"
             )
+            if raw_val is not None and pd.notna(raw_val):
+                parts.append(
+                    f"<text x='{x + CELL_W / 2:.1f}' y='{y + ROW_H / 2 + 4:.1f}' text-anchor='middle' "
+                    f"font-size='10.5' font-weight='700' font-family='{_MONO_FONT}' fill='#ffffff' "
+                    f"style='pointer-events:none;'>{raw_val:.1f}<title>{_esc(tooltip)}</title></text>"
+                )
+    parts.append("</svg>")
+    st.markdown("".join(parts), unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
+# Simple trend line (per-game value over the season, e.g. points-allowed-
+# vs-expected differential, or a player's rolling form) with a zero/average
+# reference line - the "are they trending up or down lately" at-a-glance
+# chart used by Matchup Analyzer's defense-vs-position and player-lens
+# sections.
+# ---------------------------------------------------------------------------
+
+def render_trend_line(values, tooltips, zero_line=True, positive_color=None, negative_color=None, y_label=''):
+    """
+    `values`: ordered list of numbers (oldest -> newest). `tooltips`:
+    same-length list of hover strings. `zero_line=True` draws a dashed
+    reference at 0 and colors each point/segment green above it, red
+    below (for a differential metric); pass False for a plain single-color
+    line (e.g. a raw stat trend) and a reference at the series' own mean
+    instead.
+    """
+    vals = [v for v in values if v is not None]
+    if len(vals) < 2:
+        return
+    pos_c = positive_color or C['positive']
+    neg_c = negative_color or C['negative']
+    W, H = 860, 200
+    ML, MR, MT, MB = 44, 16, 16, 26
+    plot_w, plot_h = W - ML - MR, H - MT - MB
+    n = len(values)
+    ref = 0.0 if zero_line else (sum(vals) / len(vals))
+    lo, hi = min(vals + [ref]), max(vals + [ref])
+    pad = (hi - lo) * 0.15 or 1
+    lo, hi = lo - pad, hi + pad
+
+    def px(i):
+        return ML + plot_w * i / max(n - 1, 1)
+
+    def py(v):
+        return MT + plot_h * (1 - (v - lo) / (hi - lo))
+
+    parts = [
+        f"<svg viewBox='0 0 {W} {H}' xmlns='http://www.w3.org/2000/svg' "
+        f"style='width:100%; height:auto; font-family:{_BODY_FONT};'>"
+    ]
+    ry = py(ref)
+    parts.append(f"<line x1='{ML}' y1='{ry:.1f}' x2='{W - MR}' y2='{ry:.1f}' stroke='{C['on_surface_variant']}' stroke-width='1' stroke-dasharray='5,5' opacity='0.7'/>")
+    parts.append(f"<text x='{ML - 6}' y='{ry + 4:.1f}' text-anchor='end' font-size='10' font-family='{_MONO_FONT}' fill='{C['on_surface_variant']}'>{ref:.0f}</text>")
+    if y_label:
+        parts.append(
+            f"<text x='14' y='{MT + plot_h / 2}' text-anchor='middle' font-size='10.5' fill='{C['on_surface_variant']}' "
+            f"transform='rotate(-90 14 {MT + plot_h / 2})'>{_esc(y_label)}</text>"
+        )
+    pts_line = " ".join(f"{px(i):.1f},{py(v):.1f}" for i, v in enumerate(values) if v is not None)
+    parts.append(f"<polyline points='{pts_line}' fill='none' stroke='{C['on_surface_variant']}' stroke-width='1.6' opacity='0.5'/>")
+    for i, v in enumerate(values):
+        if v is None:
+            continue
+        color = pos_c if v >= ref else neg_c
+        parts.append(
+            f"<circle cx='{px(i):.1f}' cy='{py(v):.1f}' r='4' fill='{color}' stroke='{C['surface']}' stroke-width='1'>"
+            f"<title>{_esc(tooltips[i] if i < len(tooltips) else '')}</title></circle>"
+        )
+    step = max(1, n // 12)
+    for i in range(n):
+        if i % step and i != n - 1:
+            continue
+        parts.append(
+            f"<text x='{px(i):.1f}' y='{H - 6}' text-anchor='middle' font-size='9.5' "
+            f"font-family='{_MONO_FONT}' fill='{C['on_surface_variant']}'>{i + 1}</text>"
+        )
     parts.append("</svg>")
     st.markdown("".join(parts), unsafe_allow_html=True)
 

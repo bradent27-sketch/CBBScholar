@@ -55,7 +55,7 @@ def render():
             if filter_text:
                 shown = net_df[net_df['Team'].str.contains(filter_text, case=False, na=False)]
             cols = [c for c in _NET_DISPLAY_COLS if c in shown.columns]
-            indexed = shown[cols].set_index('Team')
+            indexed = shown[cols].reset_index(drop=True)
             net_colors = team_color_map()
             st.dataframe(
                 style_plain_dataframe(indexed, team_color_map=net_colors),
@@ -93,8 +93,8 @@ def render():
         return
 
     st.caption(f"Week {week}, {season - 1}-{str(season)[2:]} season")
-    indexed = df.set_index('Team')
-    column_config = build_column_help_config(indexed, pinned_cols=['Rank'])
+    indexed = df.reset_index(drop=True)
+    column_config = build_column_help_config(indexed, pinned_cols=['Rank', 'Team'])
     poll_colors = team_color_map(season)
     st.dataframe(
         style_plain_dataframe(indexed, team_color_map=poll_colors),

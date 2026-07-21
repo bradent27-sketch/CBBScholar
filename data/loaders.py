@@ -253,7 +253,10 @@ def load_team_player_stats(team, season=None):
     One team's full season stats, already WIDE format (one row per player,
     unlike CFBD's long/pivot-needed shape) - verified live against
     /stats/player/season before writing this. Field names below (games,
-    points, fieldGoals.pct, etc.) are exact.
+    points, fieldGoals.pct, etc.) are exact. Kept at the normal 1h TTL (not
+    the weekly percentile-group TTL) since this same loader also backs the
+    single-player stat line shown at the top of Player Search, which should
+    stay fresher than the comparison distribution around it.
     """
     season = season or current_cbb_season()
     data = _cbbd_get("/stats/player/season", params={"team": team, "season": season})
@@ -275,7 +278,17 @@ def get_player_season_stats(team, season, athlete_id):
     return match.iloc[0].to_dict()
 
 
-@st.cache_data(ttl=21600, show_spinner=False)
+# Percentile-comparison pulls (conference/full-D-I fan-outs) are cached a
+# full week, not hours: in-season, week-old league averages are an
+# explicitly acceptable tradeoff for a much faster load (the app is
+# personal-use, updated "every week or two" per the user, not needing
+# live-to-the-minute percentiles) - see the manual "Refresh league data"
+# button in ui.tabs.player_search, which clears these two caches on demand
+# for whenever a fresher pull IS wanted before the week is up.
+_PERCENTILE_GROUP_TTL = 604800  # 7 days
+
+
+@st.cache_data(ttl=_PERCENTILE_GROUP_TTL, show_spinner=False)
 def load_conference_player_season_stats(conference, season=None):
     """
     Every player's season stats for every team in one conference, fanned
@@ -285,7 +298,8 @@ def load_conference_player_season_stats(conference, season=None):
     distribution ui.tabs.player_search uses by default: cheap enough (one
     conference is ~8-18 teams) to run automatically, unlike a full-D-I
     pull. Returns one concatenated wide DataFrame, same shape as
-    load_team_player_stats.
+    load_team_player_stats. Cached a full week (_PERCENTILE_GROUP_TTL) -
+    see that constant's docstring.
     """
     season = season or current_cbb_season()
     teams_df = load_teams(season)
@@ -299,7 +313,7 @@ def load_conference_player_season_stats(conference, season=None):
     return pd.concat(frames, ignore_index=True)
 
 
-@st.cache_data(ttl=21600, show_spinner=False)
+@st.cache_data(ttl=_PERCENTILE_GROUP_TTL, show_spinner=False)
 def load_all_player_season_stats(season=None):
     """
     Every D-I player's season stats in one cached pull, built the same
@@ -307,7 +321,8 @@ def load_all_player_season_stats(season=None):
     team in load_teams() - genuinely expensive (one HTTP call per D-I team,
     360+), so this is opt-in from the UI (a "compare vs all of D-I"
     checkbox), never called automatically on every Player Search visit.
-    Long TTL so the cost is paid once per cache window, not per view.
+    Cached a full week (_PERCENTILE_GROUP_TTL) so the cost is paid once per
+    week, not once per view/session - see that constant's docstring.
     """
     season = season or current_cbb_season()
     teams_df = load_teams(season)
@@ -482,6 +497,9 @@ def load_all_team_season_stats(season=None):
         o_pts = os_.get('points') or {}
         t_3p = ts.get('threePointFieldGoals') or {}
         t_fg = ts.get('fieldGoals') or {}
+        o_3p = os_.get('threePointFieldGoals') or {}
+        o_fg = os_.get('fieldGoals') or {}
+        t_reb = ts.get('rebounds') or {}
         total_pts = (t_pts.get('total') or 0)
         rows.append({
             'Team': t.get('team'),
@@ -500,6 +518,15 @@ def load_all_team_season_stats(season=None):
             'Paint Pts %': (t_pts.get('inPaint') / total_pts * 100) if total_pts else None,
             'Fast Break %': (t_pts.get('fastBreak') / total_pts * 100) if total_pts else None,
             'Opp Paint Pts %': (o_pts.get('inPaint') / o_pts.get('total') * 100) if o_pts.get('total') else None,
+            # Opponent shot-diet/efficiency allowed - "what does this
+            # defense let teams do", the Bart Torvik-style complement to
+            # this team's own Off/Def eFG%/ORB%/FT Rate above.
+            'Opp 3PA Rate': (o_3p.get('attempted') / o_fg.get('attempted') * 100) if o_fg.get('attempted') else None,
+            'Opp 3P%': o_3p.get('pct') * 100 if isinstance(o_3p.get('pct'), (int, float)) and o_3p.get('pct') <= 1 else o_3p.get('pct'),
+            # DREB% allowed = 1 - opponent ORB% (Def ORB% above is already
+            # "opponent offensive rebound % allowed", so its complement is
+            # this team's own defensive rebounding rate against those misses).
+            'Def DREB%': (100 - off_.get('offensiveReboundPct')) if off_.get('offensiveReboundPct') is not None else None,
         })
     return pd.DataFrame(rows)
 
@@ -589,6 +616,144 @@ def load_player_game_logs(team, season=None):
             })
     df = pd.DataFrame(rows)
     return df.sort_values('Date').reset_index(drop=True) if not df.empty else df
+
+
+_POSITION_BUCKET_MAP = {
+    'PG': 'Guards', 'SG': 'Guards', 'G': 'Guards',
+    'SF': 'Wings', 'F': 'Wings',
+    'PF': 'Bigs', 'C': 'Bigs',
+}
+
+
+def _position_bucket(pos):
+    """Roster position string -> one of 'Guards'/'Wings'/'Bigs', or None if
+    unrecognized. Combo positions ('G/F' etc) use the first listed
+    position. A coarse 3-bucket split (not 5 traditional positions) -
+    exact enough to answer 'does this defense struggle with guards' while
+    staying robust to how loosely CBBD's roster position strings are
+    filled in across 360+ teams."""
+    if not pos or not isinstance(pos, str):
+        return None
+    token = pos.split('/')[0].strip().upper()
+    return _POSITION_BUCKET_MAP.get(token)
+
+
+@st.cache_data(ttl=21600, show_spinner=False)
+def load_positional_defense_report(team, season=None):
+    """
+    'Defense vs position' for one team, built entirely from data CBBD
+    already exposes per-team (no second data source needed - see
+    HANDOFF.md/matchup_analyzer.py for why this was worth solving rather
+    than declaring it out of scope). For every completed game on this
+    team's schedule, pulls the OPPONENT's own box score for that exact
+    game (their /games/players pull, already cached) and compares what
+    each opposing player scored/rebounded THAT GAME to their own season
+    per-game average - so "this team allowed guards to score above their
+    average in 4 of the last 5 games" becomes computable, not just "this
+    team allows X points to opposing guards" in the abstract.
+
+    Player -> position bucket uses load_team_roster's position field
+    (Guards/Wings/Bigs, see _position_bucket); a game-log row is matched to
+    its season baseline via roster sourceId -> id (the two-hop join
+    documented on load_team_roster: game logs key on sourceId, season
+    stats key on id, and the two are NOT interchangeable).
+
+    Genuinely expensive (one roster + one game-log + one season-stats pull
+    per opponent faced, ~25-32 distinct teams for a full season) but every
+    sub-call is itself cached, so this is mostly re-assembly on a warm
+    cache after the first hit. 6h TTL, matching the other schedule-wide
+    pulls.
+
+    Returns {} on no data, else:
+      {'games': [{'Date', 'Opponent', 'GameId', 'buckets': {bucket_name:
+         {'pts_allowed', 'pts_expected', 'reb_allowed', 'reb_expected',
+          'n_players'}}}, ...] in date order,
+       'season': {bucket_name: {'games', 'avg_pts_allowed',
+         'avg_pts_expected', 'pts_diff', 'avg_reb_allowed',
+         'avg_reb_expected', 'reb_diff'}}}
+    `pts_diff`/`reb_diff` = allowed minus expected: positive means this
+    team's defense let that position outperform its own normal production.
+    """
+    season = season or current_cbb_season()
+    games = load_team_games(team, season)
+    if games.empty:
+        return {}
+
+    per_game = []
+    bucket_accum = {}  # bucket -> list of (pts_allowed, pts_expected, reb_allowed, reb_expected)
+
+    for _, g in games.iterrows():
+        opp, gid = g['Opponent'], g['GameId']
+        opp_roster = load_team_roster(opp, season)
+        opp_logs = load_player_game_logs(opp, season)
+        if opp_roster.empty or opp_logs.empty:
+            continue
+        this_game = opp_logs[opp_logs['GameId'] == gid]
+        if this_game.empty:
+            continue
+        opp_season = load_team_player_stats(opp, season)
+
+        pos_by_source = dict(zip(opp_roster['sourceId'].astype(str), opp_roster['position']))
+        id_by_source = dict(zip(opp_roster['sourceId'].astype(str), opp_roster['id']))
+        season_avg_by_id = {}
+        if not opp_season.empty and 'athleteId' in opp_season.columns:
+            for _, row in opp_season.iterrows():
+                gms = row.get('games') or 0
+                if not gms:
+                    continue
+                reb_total = (row.get('rebounds') or {}).get('total') or 0
+                season_avg_by_id[str(row.get('athleteId'))] = {
+                    'pts': (row.get('points') or 0) / gms,
+                    'reb': reb_total / gms,
+                }
+
+        buckets = {}
+        for _, p in this_game.iterrows():
+            src = str(p.get('athleteSourceId'))
+            bucket = _position_bucket(pos_by_source.get(src))
+            if bucket is None:
+                continue
+            pid = str(id_by_source.get(src))
+            avg = season_avg_by_id.get(pid)
+            if avg is None:
+                continue
+            pts, reb = float(p.get('Points') or 0), float(p.get('Rebounds') or 0)
+            b = buckets.setdefault(bucket, {'pts_allowed': 0.0, 'pts_expected': 0.0,
+                                             'reb_allowed': 0.0, 'reb_expected': 0.0, 'n_players': 0})
+            b['pts_allowed'] += pts
+            b['pts_expected'] += avg['pts']
+            b['reb_allowed'] += reb
+            b['reb_expected'] += avg['reb']
+            b['n_players'] += 1
+            bucket_accum.setdefault(bucket, []).append(
+                (pts, avg['pts'], reb, avg['reb'])
+            )
+
+        if buckets:
+            per_game.append({'Date': g['Date'], 'Opponent': opp, 'GameId': gid, 'buckets': buckets})
+
+    if not per_game:
+        return {}
+
+    season_summary = {}
+    for bucket, rows in bucket_accum.items():
+        n_games = sum(1 for pg in per_game if bucket in pg['buckets'])
+        if not n_games:
+            continue
+        # Per-game totals (summed across all players in that bucket, that
+        # game) averaged over the games this team actually faced that
+        # position group - not a per-player average.
+        pts_allowed = sum(pg['buckets'][bucket]['pts_allowed'] for pg in per_game if bucket in pg['buckets']) / n_games
+        pts_expected = sum(pg['buckets'][bucket]['pts_expected'] for pg in per_game if bucket in pg['buckets']) / n_games
+        reb_allowed = sum(pg['buckets'][bucket]['reb_allowed'] for pg in per_game if bucket in pg['buckets']) / n_games
+        reb_expected = sum(pg['buckets'][bucket]['reb_expected'] for pg in per_game if bucket in pg['buckets']) / n_games
+        season_summary[bucket] = {
+            'games': n_games,
+            'avg_pts_allowed': pts_allowed, 'avg_pts_expected': pts_expected, 'pts_diff': pts_allowed - pts_expected,
+            'avg_reb_allowed': reb_allowed, 'avg_reb_expected': reb_expected, 'reb_diff': reb_allowed - reb_expected,
+        }
+
+    return {'games': per_game, 'season': season_summary}
 
 
 def _odds_api_key():

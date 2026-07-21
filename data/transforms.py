@@ -38,6 +38,10 @@ def player_rate_stats(df, min_games=5):
         return work[col] if col in work.columns else pd.Series([None] * len(work), index=work.index)
 
     ts = pd.to_numeric(col_or_none('trueShootingPct'), errors='coerce')
+    fga = pd.to_numeric(nested('fieldGoals', 'attempted'), errors='coerce')
+    three_a = pd.to_numeric(nested('threePointFieldGoals', 'attempted'), errors='coerce')
+    fta = pd.to_numeric(nested('freeThrows', 'attempted'), errors='coerce')
+    two_a = fga - three_a
     return pd.DataFrame({
         'PPG': pd.to_numeric(col_or_none('points'), errors='coerce') / games,
         'RPG': pd.to_numeric(nested('rebounds', 'total'), errors='coerce') / games,
@@ -50,6 +54,13 @@ def player_rate_stats(df, min_games=5):
         'FT%': pd.to_numeric(nested('freeThrows', 'pct'), errors='coerce'),
         'eFG%': pd.to_numeric(col_or_none('effectiveFieldGoalPct'), errors='coerce'),
         'TS%': ts * 100 if ts.notna().any() else ts,
+        # Shot-diet rates: share of total FGA that are threes/twos, and FT
+        # attempts relative to FGA - "style of player" signals (3PT rate
+        # doubles as a rough three-point-shooter/volume indicator), computed
+        # from raw attempts so they're independent of makes/efficiency.
+        '3PA Rate': (three_a / fga * 100).where(fga > 0),
+        '2PA Rate': (two_a / fga * 100).where(fga > 0),
+        'FT Rate': (fta / fga * 100).where(fga > 0),
         'Net Rating': pd.to_numeric(col_or_none('netRating'), errors='coerce'),
         'Usage %': pd.to_numeric(col_or_none('usage'), errors='coerce'),
     })
@@ -173,6 +184,43 @@ def style_profile(stats_df, team_a, team_b):
             'help': help_text,
             'left_val': a[col], 'left_pct': pct_rank(stats_df[col], a[col]),
             'right_val': b[col], 'right_pct': pct_rank(stats_df[col], b[col]),
+        })
+    return out
+
+
+# (label, column, higher_is_better, help) - "what does this defense let
+# opponents do", vs D-I. Complements style_profile's OFFENSIVE style read.
+DEFENSE_PROFILE_METRICS = [
+    ('eFG% Allowed', 'Def eFG%', False, "Effective field goal % allowed - the single biggest defensive shooting number."),
+    ('TO Ratio Forced', 'Def TO Ratio', True, "Turnovers forced per defensive possession - higher means more disruptive on the ball."),
+    ('3PA Rate Allowed', 'Opp 3PA Rate', False, "Share of opponent field goal attempts that are threes - lower means the defense forces twos, not open threes."),
+    ('3P% Allowed', 'Opp 3P%', False, "Opponent three-point % - low can mean good closeouts, or luck; check volume (3PA Rate Allowed) alongside it."),
+    ('ORB% Allowed', 'Def ORB%', False, "Opponent offensive rebound % - lower means fewer second-chance looks given up."),
+    ('DREB%', 'Def DREB%', True, "This team's own defensive rebound rate on opponent misses (100 - ORB% allowed)."),
+    ('FT Rate Allowed', 'Def FT Rate', False, "Opponent free throw attempts relative to their field goal attempts - lower means fewer fouls/whistles given up."),
+]
+
+
+def defense_profile(stats_df, team_a, team_b):
+    """Defensive-style rows (what each team's defense allows, vs D-I) for
+    both teams - the defensive complement to style_profile's offensive
+    read, using DEFENSE_PROFILE_METRICS' direction map so 'better' always
+    colors correctly (e.g. TO Ratio Forced: higher = better; everything
+    else here: lower = better)."""
+    a = stats_df[stats_df['Team'] == team_a]
+    b = stats_df[stats_df['Team'] == team_b]
+    if a.empty or b.empty:
+        return None
+    a, b = a.iloc[0], b.iloc[0]
+    out = []
+    for label, col, hib, help_text in DEFENSE_PROFILE_METRICS:
+        if col not in stats_df.columns:
+            continue
+        out.append({
+            'label': label,
+            'help': help_text,
+            'left_val': a[col], 'left_pct': pct_rank(stats_df[col], a[col], higher_is_better=hib),
+            'right_val': b[col], 'right_pct': pct_rank(stats_df[col], b[col], higher_is_better=hib),
         })
     return out
 
