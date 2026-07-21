@@ -82,7 +82,13 @@ def _render_rankings_subtab(df, colors, ranked):
     )
     st.caption("Each dot is a team in its own colors — hover for exact ratings. Dashed lines are the D-I medians, so the top-right quadrant is 'above-median both ways'.")
 
-    indexed = df.set_index('Team')
+    # 'Team' stays a real column, not the index - Streamlit's dataframe
+    # grid doesn't render Styler colors on index/row-header cells at all
+    # (confirmed live), only on data columns, so a `.set_index('Team')`
+    # here silently rendered every row with no team color despite passing
+    # team_color_map - see style_plain_dataframe's docstring. 'Rank' is
+    # still pinned via column_config, no index needed for that.
+    display_df = df.sort_values('Rank').reset_index(drop=True)
     # In-table meters: Net and Off ratings scale higher-is-better. Def
     # Rating is deliberately left numeric (lower = better there - a meter
     # would visually reward the worst defenses).
@@ -91,11 +97,11 @@ def _render_rankings_subtab(df, colors, ranked):
         vals = df[col].dropna()
         if not vals.empty:
             meter_cols[col] = (float(vals.min()), float(vals.max()))
-    column_config = build_column_help_config(indexed, pinned_cols=['Rank'], meter_cols=meter_cols)
+    column_config = build_column_help_config(display_df, pinned_cols=['Rank'], meter_cols=meter_cols)
     st.dataframe(
-        style_plain_dataframe(indexed, team_color_map=colors),
-        width="stretch", height=df_auto_height(len(indexed)),
-        column_config=column_config,
+        style_plain_dataframe(display_df, team_color_map=colors),
+        width="stretch", height=df_auto_height(len(display_df)),
+        column_config=column_config, hide_index=True,
     )
     st.caption(
         "Net Rating: points per 100 possessions better than an average team, adjusted "

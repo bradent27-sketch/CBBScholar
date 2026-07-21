@@ -4,7 +4,7 @@ key) to work right now."""
 import streamlit as st
 
 from config import AVAILABLE_SEASONS_WITH_UPCOMING
-from data.loaders import current_cbb_season, list_conferences, load_conference_standings
+from data.loaders import current_cbb_season, list_conferences, load_conference_standings, team_color_map
 from ui.styling import style_plain_dataframe, df_auto_height, build_column_help_config
 
 
@@ -40,8 +40,15 @@ def render():
     indexed.index = indexed.index + 1
     indexed.index.name = 'Rank'
     column_config = build_column_help_config(indexed)
+    # Live CBBD colors (keyed under both short-name and displayName - see
+    # data.loaders.team_color_map) rather than no map at all: this table's
+    # 'Team' values are ESPN's full "School Mascot" displayName format,
+    # which the displayName keying now matches, extending real color
+    # coverage from the ~70 hand-typed config.TEAM_CONFIG entries to all of
+    # D-I instead of relying on style_plain_dataframe's implicit fallback.
+    standings_colors = team_color_map(season)
     st.dataframe(
-        style_plain_dataframe(indexed),
+        style_plain_dataframe(indexed, team_color_map=standings_colors),
         width="stretch", height=df_auto_height(len(indexed)),
         column_config=column_config,
     )

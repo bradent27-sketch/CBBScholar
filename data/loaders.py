@@ -201,12 +201,30 @@ def load_teams(season=None):
 def team_color_map(season=None):
     """{school_name: hex_color} for style_plain_dataframe's team_color_map
     override - live CBBD colors when a key is configured, falling back to
-    the hand-typed config.TEAM_CONFIG otherwise."""
+    the hand-typed config.TEAM_CONFIG otherwise.
+
+    Keyed under BOTH CBBD's short 'school' name ('Duke') AND its
+    'displayName' ('Duke Blue Devils') where available - other sources in
+    this app format the same team differently (ESPN's Conference Standings
+    uses full "School Mascot" names like CBBD's displayName; ncaa.com's NET
+    page and CBBD's own other endpoints use the short school name), and a
+    single-keying scheme silently misses one or the other (a real bug this
+    fixes: Conference Standings' team coloring was only ever resolving via
+    the small ~70-team hardcoded config.TEAM_CONFIG fallback - which
+    happened to be hand-typed in ESPN's full-name format - not this live
+    360+-team map, because the live map was 'school'-only). Short name wins
+    on a collision (kept first) since more callers already key on it.
+    """
     df = load_teams(season)
     if df.empty:
         from config import TEAM_CONFIG
         return {v['name']: v['color'] for v in TEAM_CONFIG.values()}
-    return dict(zip(df['Team'], df['Color']))
+    out = dict(zip(df['Team'], df['Color']))
+    if 'DisplayName' in df.columns:
+        for disp, color in zip(df['DisplayName'], df['Color']):
+            if disp and disp not in out:
+                out[disp] = color
+    return out
 
 
 @st.cache_data(ttl=3600)
@@ -275,7 +293,7 @@ def get_player_season_stats(team, season, athlete_id):
     return match.iloc[0].to_dict()
 
 
-@st.cache_data(ttl=21600, show_spinner=False)
+@st.cache_data(ttl=604800, show_spinner=False, persist="disk")
 def load_conference_player_season_stats(conference, season=None):
     """
     Every player's season stats for every team in one conference, fanned
@@ -286,6 +304,17 @@ def load_conference_player_season_stats(conference, season=None):
     conference is ~8-18 teams) to run automatically, unlike a full-D-I
     pull. Returns one concatenated wide DataFrame, same shape as
     load_team_player_stats.
+
+    Weekly TTL + disk persistence (not the short per-team TTLs): this is a
+    LEAGUE-WIDE reference distribution used only for percentile context, not
+    a specific team/player's own current stats - the user explicitly asked
+    for "pull league averages weekly, compare current stats against week-old
+    context" instead of re-fetching/recomputing the whole distribution on
+    every tab visit. `persist="disk"` survives an app restart (Streamlit
+    Community Cloud can restart the process on inactivity, which would
+    otherwise silently drop the in-memory cache and eat the full fan-out
+    cost again) - see clear_league_wide_caches() for the manual-refresh path
+    wired to the sidebar, for whenever fresher-than-a-week data is wanted.
     """
     season = season or current_cbb_season()
     teams_df = load_teams(season)
@@ -299,7 +328,7 @@ def load_conference_player_season_stats(conference, season=None):
     return pd.concat(frames, ignore_index=True)
 
 
-@st.cache_data(ttl=21600, show_spinner=False)
+@st.cache_data(ttl=604800, show_spinner=False, persist="disk")
 def load_all_player_season_stats(season=None):
     """
     Every D-I player's season stats in one cached pull, built the same
@@ -307,14 +336,24 @@ def load_all_player_season_stats(season=None):
     team in load_teams() - genuinely expensive (one HTTP call per D-I team,
     360+), so this is opt-in from the UI (a "compare vs all of D-I"
     checkbox), never called automatically on every Player Search visit.
-    Long TTL so the cost is paid once per cache window, not per view.
+
+    Weekly TTL + disk persistence, not the old 6h in-memory-only cache: the
+    fan-out cost was previously being re-paid every 6 hours (and on every
+    app restart, since in-memory cache doesn't survive that) even though
+    this is league-CONTEXT data, not any specific player's own stats - the
+    user explicitly asked to treat this like a weekly snapshot ("compare
+    current stats to week-old averages, not a huge deal") rather than
+    something that needs to feel live. `persist="disk"` means a restarted
+    app reuses last week's pull instead of re-running the full 360-team
+    fan-out on the next visit. See clear_league_wide_caches() for the
+    manual "refresh now" escape hatch (wired to the sidebar).
     """
     season = season or current_cbb_season()
     teams_df = load_teams(season)
     if teams_df.empty:
         return pd.DataFrame()
     all_teams = teams_df['Team'].dropna().tolist()
-    progress = st.progress(0.0, text="Loading Division I player stats (first time this session)...")
+    progress = st.progress(0.0, text="Loading Division I player stats (cached ~weekly - this only runs when the cache is cold)...")
     frames = []
     for i, t in enumerate(all_teams):
         df = load_team_player_stats(t, season)
@@ -327,7 +366,7 @@ def load_all_player_season_stats(season=None):
     return pd.concat(frames, ignore_index=True)
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=604800, persist="disk")
 def load_efficiency_ratings(season=None):
     """
     Adjusted offensive/defensive efficiency and net rating for every D-I
@@ -458,7 +497,7 @@ def load_transfer_portal(season=None):
     return pd.DataFrame(rows)
 
 
-@st.cache_data(ttl=21600)
+@st.cache_data(ttl=604800, persist="disk")
 def load_all_team_season_stats(season=None):
     """
     Every D-I team's full season stat sheet in ONE call via /stats/team/season
@@ -466,7 +505,24 @@ def load_all_team_season_stats(season=None):
     pace at top level, teamStats/opponentStats sub-dicts each containing a
     fourFactors dict, a points dict with inPaint/fastBreak splits, and
     made/attempted/pct shooting splits). This single cached pull powers the
-    Four Factors matchup engine and the tempo-based score projection.
+    Four Factors matchup engine, the tempo-based score projection, and (the
+    Def 3PA Rate/3P%/DREB% columns added below) the Matchup Analyzer's Team
+    Defense profile.
+
+    Weekly TTL + disk persistence like the other full-league pulls (see
+    load_all_player_season_stats) - this is a single API call regardless, so
+    it was never the expensive one, but it's still league-CONTEXT data the
+    user wants treated as a weekly snapshot rather than re-pulled every 6h.
+
+    Def 3PA Rate/Def 3P%/Def DREB% are NEW columns built from
+    opponentStats.threePointFieldGoals and opponentStats.fieldGoals - the
+    same opponentStats sub-object whose .fourFactors and .points siblings
+    are already used above and confirmed live, so this leans on an already-
+    verified parent shape rather than a new unverified endpoint. Def DREB%
+    is computed as the complement of Def ORB% (100 - opponent offensive
+    rebound % allowed) rather than a separate unverified field - defensive
+    and opponent-offensive rebound share are complementary by definition,
+    so no new field is needed to state it as "your own DREB%".
     """
     season = season or current_cbb_season()
     data = _cbbd_get("/stats/team/season", params={"season": season})
@@ -482,7 +538,10 @@ def load_all_team_season_stats(season=None):
         o_pts = os_.get('points') or {}
         t_3p = ts.get('threePointFieldGoals') or {}
         t_fg = ts.get('fieldGoals') or {}
+        o_3p = os_.get('threePointFieldGoals') or {}
+        o_fg = os_.get('fieldGoals') or {}
         total_pts = (t_pts.get('total') or 0)
+        def_orb_pct = off_.get('offensiveReboundPct')
         rows.append({
             'Team': t.get('team'),
             'Conference': t.get('conference'),
@@ -500,6 +559,9 @@ def load_all_team_season_stats(season=None):
             'Paint Pts %': (t_pts.get('inPaint') / total_pts * 100) if total_pts else None,
             'Fast Break %': (t_pts.get('fastBreak') / total_pts * 100) if total_pts else None,
             'Opp Paint Pts %': (o_pts.get('inPaint') / o_pts.get('total') * 100) if o_pts.get('total') else None,
+            'Def 3PA Rate': (o_3p.get('attempted') / o_fg.get('attempted') * 100) if o_fg.get('attempted') else None,
+            'Def 3P%': o_3p.get('pct'),
+            'Def DREB%': (100 - def_orb_pct) if def_orb_pct is not None else None,
         })
     return pd.DataFrame(rows)
 
@@ -589,6 +651,96 @@ def load_player_game_logs(team, season=None):
             })
     df = pd.DataFrame(rows)
     return df.sort_values('Date').reset_index(drop=True) if not df.empty else df
+
+
+@st.cache_data(ttl=604800, show_spinner=False, persist="disk")
+def load_team_opponent_game_logs(team, season=None):
+    """
+    Every OPPOSING player's box score from every game `team` has actually
+    played this season - the data source behind the Matchup Analyzer's
+    positional defense breakdown ("what have opposing point guards/forwards
+    /centers done against this team"), built WITHOUT a full-D-I fan-out and
+    without any new/unverified endpoint.
+
+    The trick: `team`'s own schedule (load_team_games) already lists every
+    opponent it has actually played - typically 12-30 teams across a full
+    season, far fewer than all 360+ D-I teams. For each of THOSE opponents
+    (and only those), load_player_game_logs(opponent, season) - the exact
+    same per-team /games/players call this app already uses for Player
+    Search's game log, already verified live - returns that opponent's own
+    full-season game-by-game box scores. Filtering that to
+    Opponent == `team` gives every one of that opponent's players' stat
+    lines specifically in the game(s) against `team`. Concatenating across
+    every actually-played opponent gives the full "who did `team` face, and
+    what did they do" dataset.
+
+    This also solves the "season average to compare against" problem for
+    free: load_player_game_logs(opponent, season) is that player's FULL
+    season log, not just the game vs `team` - so each opposing player's own
+    season average is computable from the SAME already-fetched frame, no
+    extra /stats/player/season call needed.
+
+    Cost: ~1 API call per opponent `team` has actually played (bounded by
+    games played, not by D-I's full 360+ teams) - and each of those calls is
+    independently cached per-opponent, so it's shared/reused by every OTHER
+    matchup that also involves that same opponent (heavy overlap in-
+    conference), not paid fresh per matchup. Weekly TTL + disk persistence
+    like the other league-context pulls above.
+
+    Returns columns: Opponent Team (who `team` played), Player,
+    PositionSourceId (join key for position - see data.transforms.
+    position_bucket and callers that join load_team_roster), Date,
+    Points/Rebounds/Assists/FGA/3PA (the game vs `team`), and
+    Season Avg Points/Rebounds/Assists/FGA/3PA (that player's own full-
+    season average, all games, from the same cached frame).
+    """
+    season = season or current_cbb_season()
+    games = load_team_games(team, season)
+    if games.empty:
+        return pd.DataFrame()
+    opponents = games['Opponent'].dropna().unique().tolist()
+    avg_cols = ['Points', 'Rebounds', 'Assists', 'FGA', '3PA']
+    rows = []
+    for opp in opponents:
+        log = load_player_game_logs(opp, season)
+        if log.empty:
+            continue
+        vs_team = log[log['Opponent'] == team]
+        if vs_team.empty:
+            continue
+        season_avgs = log.groupby('athleteSourceId')[avg_cols].mean()
+        for _, r in vs_team.iterrows():
+            sid = r.get('athleteSourceId')
+            avg = season_avgs.loc[sid] if sid in season_avgs.index else None
+            row = {
+                'Opponent Team': opp,
+                'Player': r.get('name'),
+                'athleteSourceId': sid,
+                'Date': r.get('Date'),
+            }
+            for c in avg_cols:
+                row[c] = r.get(c)
+                row[f'Season Avg {c}'] = avg[c] if avg is not None else None
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def clear_league_wide_caches():
+    """
+    Manual "refresh league-wide data now" escape hatch for every long
+    (weekly), disk-persisted cache above - wired to a sidebar button (see
+    ui.components.render_setup_status_sidebar) rather than any automatic
+    schedule, matching this app's existing manual-refresh precedent
+    (fetch_net_rankings_manual). `st.cache_data`'s .clear() drops every
+    cached call of that function regardless of arguments (every team/
+    season/conference combo at once) - correct here since "refresh" should
+    mean everything, not one team at a time.
+    """
+    load_all_player_season_stats.clear()
+    load_conference_player_season_stats.clear()
+    load_all_team_season_stats.clear()
+    load_efficiency_ratings.clear()
+    load_team_opponent_game_logs.clear()
 
 
 def _odds_api_key():

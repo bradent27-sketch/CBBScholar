@@ -1,5 +1,7 @@
-"""Team/Player Compare tab: head-to-head player comparison, live via
-CollegeBasketballData.com. Reuses Player Search's team-first loaders."""
+"""Player Compare tab: head-to-head player comparison, live via
+CollegeBasketballData.com. Reuses Player Search's team-first loaders.
+(Named "Player Compare", not "Team/Player Compare" - it only ever compared
+two players, never two teams, so the old label overpromised.)"""
 import streamlit as st
 
 from config import AVAILABLE_SEASONS
@@ -51,7 +53,7 @@ def _render_player_column(col, team, row, season, colors):
 
 
 def render():
-    st.markdown("<div class='custom-section-header'>TEAM / PLAYER COMPARE</div>", unsafe_allow_html=True)
+    st.markdown("<div class='custom-section-header'>PLAYER COMPARE</div>", unsafe_allow_html=True)
 
     default_season = current_cbb_season()
     seasons = AVAILABLE_SEASONS if default_season in AVAILABLE_SEASONS else [default_season] + AVAILABLE_SEASONS

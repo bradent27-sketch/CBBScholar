@@ -3,6 +3,17 @@
 What each tab needs, what's free, and what to go set up. Checklist first,
 detail below.
 
+**Verification caveat on the Matchup Analyzer refinement pass:** this
+app's whole discipline here is "verified live before the parser was
+written" - the build environment for that pass could not reach
+api.collegebasketballdata.com or ESPN at all (network policy blocked it,
+confirmed via a direct 403). New fields added there lean on already-
+verified sibling fields rather than a cold guess, and the app was smoke-
+tested end-to-end against synthetic data instead of the real API - see
+HANDOFF.md §6 for the full explanation. Treat anything from that pass as
+unverified against the real API until it's actually run with real network
+access.
+
 **Correction vs. the original plan:** Barttorvik/T-Rank (barttorvik.com)
 was originally scoped as a no-signup free source for advanced efficiency
 metrics. Live-testing it while building this app found its `&csv=1` export
@@ -39,9 +50,9 @@ efficiency ratings, rankings — without the bot-wall problem.
 | Bracketology | CollegeBasketballData.com API `/ratings/adjusted` (simplified seed-line projection) | **Live**, explicitly not a committee simulation |
 | Transfer Portal | CollegeBasketballData.com API `/recruiting/players`, `/recruiting/portal` | **Live** |
 | Fantasy & Pools | CollegeBasketballData.com API stats + local scoring config | **Live** — season totals only |
-| Matchup Analyzer | CollegeBasketballData.com API net ratings | **Live** — simple projection, not a simulation |
+| Matchup Analyzer | CollegeBasketballData.com API — `/ratings/adjusted`, `/stats/team/season`, `/games`, `/games/players`, `/teams/roster` | **Live** — simple projection, not a simulation. Team Defense's positional breakdown is built from `/games` + `/games/players` scoped to each team's actual opponents (not a full-D-I pull) — see HANDOFF.md §3 |
 | Live Odds | The Odds API `basketball_ncaab` | **Live** (shows "no games" in the off-season — correct behavior) |
-| Team/Player Compare | CollegeBasketballData.com API | **Live** |
+| Player Compare | CollegeBasketballData.com API | **Live** |
 
 ## Correction: recruiting rankings gap (resolved)
 

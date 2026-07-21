@@ -8,6 +8,7 @@ primary color instead, so the accent is driven entirely by config.py.
 """
 import base64
 import os
+import re
 
 import pandas as pd
 import streamlit as st
@@ -439,6 +440,30 @@ def inject_theme():
             transform: translateY(-1px);
         }}
 
+        /* Game log table + pinned season-average row (ui.tabs.player_search)
+           - two separate st.dataframe widgets scoped inside one
+           st.container(key="ps_game_log_wrap") so they read as ONE table
+           with a highlighted footer row, not two stacked disconnected
+           cards (each st.dataframe otherwise draws its own full border +
+           shadow + margin, which is what read as "broken"/split before). */
+        .st-key-ps_game_log_wrap div[data-testid="stVerticalBlock"] {{
+            gap: 0 !important;
+        }}
+        .st-key-ps_game_log_wrap div[data-testid="stElementContainer"]:has(div[data-testid="stDataFrame"]) {{
+            margin: 0 !important;
+        }}
+        .st-key-ps_game_log_wrap div[data-testid="stElementContainer"]:has(div[data-testid="stDataFrame"]):first-of-type div[data-testid="stDataFrame"] {{
+            border-bottom-left-radius: 0 !important;
+            border-bottom-right-radius: 0 !important;
+            border-bottom: none !important;
+        }}
+        .st-key-ps_game_log_wrap div[data-testid="stElementContainer"]:has(div[data-testid="stDataFrame"]):last-of-type div[data-testid="stDataFrame"] {{
+            border-top-left-radius: 0 !important;
+            border-top-right-radius: 0 !important;
+            border-top: 2px solid {C['primary']} !important;
+            background-color: rgba({_PRIMARY_RGB}, 0.10) !important;
+        }}
+
         /* Dataframe toolbar icons (sort/search/download/fullscreen overlays)
            default to a light-mode gray - retint to the dark theme + accent
            hover so they don't read as a foreign widget. Selector confirmed
@@ -540,7 +565,8 @@ def get_diverging_color(val, max_abs):
     return _blend_hex(C['surface_container_high'], C['positive'] if frac > 0 else C['negative'], abs(frac))
 
 
-def style_plain_dataframe(df, numeric_pct_cols=None, diverging_cols=None, matchup_pct_cols=None, team_color_map=None):
+def style_plain_dataframe(df, numeric_pct_cols=None, diverging_cols=None, matchup_pct_cols=None,
+                           team_color_map=None, opponent_col=None, opponent_color_map=None, win_loss_col=None):
     """Sortable Styler for st.dataframe. Ported as-is from NFL Scholar - see
     that module's docstring for why this is a Styler + st.dataframe (not
     raw HTML): the grid draws its own header from .streamlit/config.toml,
@@ -550,14 +576,53 @@ def style_plain_dataframe(df, numeric_pct_cols=None, diverging_cols=None, matchu
     caller's own 'Team' column values are keyed. Overrides the static
     config.TEAM_CONFIG lookup below - callers with live team colors (e.g.
     data.loaders.team_color_map(), keyed by full school name) should pass
-    theirs in rather than relying on the abbreviation-keyed static dict."""
+    theirs in rather than relying on the abbreviation-keyed static dict.
+    Both the 'Team' column and any `opponent_col` below try an EXACT key
+    match first, then fall back to a normalized (punctuation/case/common-
+    suffix-insensitive) match via _normalize_team_name - different sources
+    format the same school's name differently (ncaa.com scrape vs CBBD vs
+    ESPN), and an exact-only lookup silently renders no color on a mismatch
+    rather than erroring, which is easy to miss.
+
+    IMPORTANT: 'Team' must be an actual COLUMN of `df`, not the DataFrame's
+    index (i.e. don't call this on a `df.set_index('Team')` result if you
+    want it colored) - confirmed live (not just by reading the code) that
+    Streamlit's dataframe grid does not render ANY pandas-Styler styling
+    applied to the index/row-header cells, via either `.apply(axis=1)` or
+    `.apply_index(axis=0)` - only real data-column cells pick up Styler
+    colors. Use `hide_index=True` on the st.dataframe(...) call plus a
+    plain sequential/Rank index instead, the same pattern Conference
+    Standings and the game log table already use successfully.
+
+    opponent_col/opponent_color_map: optional - tints just that one column
+    (not the whole row) with THAT row's opponent team color at reduced
+    opacity, a lighter "colored chip" treatment for tables like the game
+    log where 'Team' isn't the row subject but 'Opponent' still benefits
+    from an at-a-glance color cue. Defaults opponent_color_map to
+    team_color_map when a column is given but no separate map is.
+
+    win_loss_col: optional column name whose 'W'/'L' text gets tinted with
+    THIS app's existing positive/negative colors (the same green/red
+    ui.charts.render_form_strip already uses for W/L chips elsewhere) -
+    kept as its own dedicated param rather than routed through
+    numeric_pct_cols' percentile scale, since win/loss has an established
+    color meaning in this app that a generic percentile gradient would
+    contradict.
+    """
     numeric_pct_cols = numeric_pct_cols or {}
     diverging_cols = diverging_cols or {}
     matchup_pct_cols = matchup_pct_cols or {}
     team_color_map = team_color_map if team_color_map is not None else {v['name']: v['color'] for v in TEAM_CONFIG.values()}
     team_color_map = {**team_color_map, **{k: v['color'] for k, v in TEAM_CONFIG.items()}}
+    opponent_color_map = opponent_color_map if opponent_color_map is not None else (team_color_map if opponent_col else {})
     pct_arrays = {col: list(vals) for col, vals in numeric_pct_cols.items()}
     matchup_arrays = {col: list(vals) for col, vals in matchup_pct_cols.items()}
+    norm_team_map = _expand_with_aliases({_normalize_team_name(k): v for k, v in team_color_map.items()})
+    norm_opp_map = _expand_with_aliases({_normalize_team_name(k): v for k, v in opponent_color_map.items()})
+
+    def _lookup(name, exact_map, norm_map):
+        color = exact_map.get(str(name))
+        return color or norm_map.get(_normalize_team_name(name))
 
     def style_row(row):
         pos = df.index.get_loc(row.name)
@@ -573,9 +638,23 @@ def style_plain_dataframe(df, numeric_pct_cols=None, diverging_cols=None, matchu
                 bg = get_grade_color(pct_arrays[col][pos])
                 styles.append(f'background-color:{bg}; color:#ffffff; font-weight:bold;')
             elif col == 'Team':
-                team_color = team_color_map.get(str(row[col]))
+                team_color = _lookup(row[col], team_color_map, norm_team_map)
                 if team_color:
                     styles.append(f"background-color:{team_color}; color:#ffffff; font-weight:bold;")
+                else:
+                    styles.append(f"background-color:{C['surface_container']}; color:{C['on_surface']};")
+            elif opponent_col and col == opponent_col:
+                opp_color = _lookup(row[col], opponent_color_map, norm_opp_map)
+                if opp_color:
+                    styles.append(f"background-color:{opp_color}66; color:#ffffff; font-weight:600;")
+                else:
+                    styles.append(f"background-color:{C['surface_container']}; color:{C['on_surface']};")
+            elif win_loss_col and col == win_loss_col:
+                v = str(row[col]).strip().upper()
+                if v == 'W':
+                    styles.append(f"background-color:{C['positive']}2e; color:{C['positive']}; font-weight:800;")
+                elif v == 'L':
+                    styles.append(f"background-color:{C['negative']}2e; color:{C['negative']}; font-weight:800;")
                 else:
                     styles.append(f"background-color:{C['surface_container']}; color:{C['on_surface']};")
             else:
@@ -596,6 +675,69 @@ def style_plain_dataframe(df, numeric_pct_cols=None, diverging_cols=None, matchu
         styler = styler.format(fmt, na_rep='--')
 
     return styler
+
+
+def _normalize_team_name(name):
+    """
+    Loose match key for team names that get formatted differently across
+    this app's data sources for the exact same school - punctuation,
+    case, a trailing 'University'/'College', possessive apostrophes. An
+    exact-string dict lookup silently returns no color (not an error) on
+    any of these mismatches, which is why a team-colored table can end up
+    mostly uncolored even though the code path passes a real color map -
+    this loose key is the fallback `style_plain_dataframe` tries when the
+    exact key misses. Does NOT resolve true word-different aliases (see
+    _TEAM_NAME_ALIASES below for those - normalizing punctuation alone
+    can't turn 'NC State' into 'North Carolina State').
+    """
+    if not name:
+        return ''
+    s = re.sub(r"[^a-z0-9\s]", "", str(name).lower())
+    for noise in (' university', ' univ', ' college'):
+        s = s.replace(noise, '')
+    return re.sub(r"\s+", " ", s).strip()
+
+
+# Common short-name/full-name aliases seen across ncaa.com, CBBD, and ESPN
+# for the same school - NOT exhaustive (this sandbox's network policy
+# blocked live-checking every source's exact naming - see HANDOFF.md), just
+# the well-known ones. Keyed/valued as normalized (_normalize_team_name)
+# strings both directions get registered under each other's color. Extend
+# this list if a real run still shows a team missing its color.
+_TEAM_NAME_ALIASES = [
+    ('uconn', 'connecticut'),
+    ('ole miss', 'mississippi'),
+    ('pitt', 'pittsburgh'),
+    ('nc state', 'north carolina state'),
+    ('usc', 'southern california'),
+    ('smu', 'southern methodist'),
+    ('lsu', 'louisiana state'),
+    ('byu', 'brigham young'),
+    ('vcu', 'virginia commonwealth'),
+    ('unlv', 'nevada las vegas'),
+    ('utep', 'texas el paso'),
+    ('uab', 'alabama birmingham'),
+    ('uic', 'illinois chicago'),
+    ('umass', 'massachusetts'),
+    ('ucf', 'central florida'),
+    ('fiu', 'florida international'),
+    ('miami', 'miami fl'),
+    ('st johns', 'st johns ny'),
+    ("saint marys", "saint marys ca"),
+]
+
+
+def _expand_with_aliases(norm_map):
+    """Adds each _TEAM_NAME_ALIASES pair's other spelling to `norm_map`
+    (pointing at the same color) whenever exactly one side is already
+    present - never overwrites a real direct hit with a guessed one."""
+    expanded = dict(norm_map)
+    for a, b in _TEAM_NAME_ALIASES:
+        if a in norm_map and b not in expanded:
+            expanded[b] = norm_map[a]
+        if b in norm_map and a not in expanded:
+            expanded[a] = norm_map[b]
+    return expanded
 
 
 def df_auto_height(n_rows, row_px=35, header_px=38, padding_px=3):

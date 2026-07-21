@@ -55,11 +55,17 @@ def render():
             if filter_text:
                 shown = net_df[net_df['Team'].str.contains(filter_text, case=False, na=False)]
             cols = [c for c in _NET_DISPLAY_COLS if c in shown.columns]
-            indexed = shown[cols].set_index('Team')
+            # 'Team' stays a real COLUMN here (not the index) - Streamlit's
+            # dataframe grid doesn't render Styler colors on index/row-
+            # header cells at all (confirmed live), only on data columns,
+            # so a `.set_index('Team')` here would silently render every
+            # row with no team color - see style_plain_dataframe's
+            # docstring. hide_index=True + a plain sequential index instead.
+            display_df = shown[cols].reset_index(drop=True)
             net_colors = team_color_map()
             st.dataframe(
-                style_plain_dataframe(indexed, team_color_map=net_colors),
-                width="stretch", height=df_auto_height(min(len(indexed), 30)),
+                style_plain_dataframe(display_df, team_color_map=net_colors),
+                width="stretch", height=df_auto_height(min(len(display_df), 30)), hide_index=True,
             )
             st.caption(f"{len(shown)} of {len(net_df)} teams shown. Source: ncaa.com, fetched on your request, cached 24h.")
     else:
@@ -93,13 +99,15 @@ def render():
         return
 
     st.caption(f"Week {week}, {season - 1}-{str(season)[2:]} season")
-    indexed = df.set_index('Team')
-    column_config = build_column_help_config(indexed, pinned_cols=['Rank'])
+    # 'Team' stays a real column - see the NET table's comment above on why
+    # `.set_index('Team')` would silently defeat the team coloring below.
+    display_df = df.reset_index(drop=True)
+    column_config = build_column_help_config(display_df, pinned_cols=['Rank'])
     poll_colors = team_color_map(season)
     st.dataframe(
-        style_plain_dataframe(indexed, team_color_map=poll_colors),
-        width="stretch", height=df_auto_height(len(indexed)),
-        column_config=column_config,
+        style_plain_dataframe(display_df, team_color_map=poll_colors),
+        width="stretch", height=df_auto_height(len(display_df)),
+        column_config=column_config, hide_index=True,
     )
     st.caption("Source: CollegeBasketballData.com.")
 

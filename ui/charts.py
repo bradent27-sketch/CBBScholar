@@ -289,6 +289,88 @@ def render_game_log_bars(values, tooltips, breakout, avg=None, avg_label="season
 
 
 # ---------------------------------------------------------------------------
+# Trend line (single series over chronological game order, vs a flat
+# reference average) - "is this trending up or down" at a glance. Shared by
+# the Matchup Analyzer's positional-defense-over-time chart (data.transforms
+# .positional_defense_trend) and Player Trends' last-N-games chart (data.
+# transforms.player_trend_series).
+# ---------------------------------------------------------------------------
+
+def render_trend_line(dates, values, avg=None, avg_label="season avg", y_suffix='', color=None, height=170):
+    """
+    Per-point trend line, oldest-to-newest, with an optional flat dashed
+    reference line (season/baseline average) so "trending up" or "trending
+    down" reads as a shape, not a column of numbers you have to scan.
+    Points above the reference render green, below render red (no
+    reference line: neutral accent color throughout). Hover any point for
+    the exact date/value/delta-from-reference.
+    """
+    if not values:
+        return
+    W, MB, MT, ML, MR = 860, 26, 16, 8, 8
+    H = height
+    plot_w = W - ML - MR
+    plot_h = H - MT - MB
+    n = len(values)
+    color = color or C['primary']
+    lo_candidates = [v for v in values if v is not None]
+    if avg is not None:
+        lo_candidates.append(avg)
+    vmin, vmax = min(lo_candidates), max(lo_candidates)
+    pad = (vmax - vmin) * 0.2 or 1
+    vmin, vmax = vmin - pad, vmax + pad
+
+    def px(i):
+        return ML + (plot_w * i / (n - 1)) if n > 1 else ML + plot_w / 2
+
+    def py(v):
+        return MT + plot_h * (1 - (v - vmin) / (vmax - vmin))
+
+    parts = [
+        f"<svg viewBox='0 0 {W} {H}' xmlns='http://www.w3.org/2000/svg' "
+        f"style='width:100%; height:auto; font-family:{_BODY_FONT};'>"
+    ]
+    if avg is not None:
+        ay = py(avg)
+        parts.append(
+            f"<line x1='{ML}' y1='{ay:.1f}' x2='{ML + plot_w}' y2='{ay:.1f}' stroke='{C['on_surface_variant']}' "
+            f"stroke-width='1.2' stroke-dasharray='5,5' opacity='0.8'/>"
+        )
+        parts.append(
+            f"<text x='{ML + plot_w}' y='{ay - 5:.1f}' text-anchor='end' font-size='10' font-family='{_MONO_FONT}' "
+            f"fill='{C['on_surface_variant']}'>{_esc(avg_label)} {avg:.1f}{y_suffix}</text>"
+        )
+    pts = [(px(i), py(v)) for i, v in enumerate(values)]
+    if n > 1:
+        d = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
+        parts.append(f"<polyline points='{d}' fill='none' stroke='{color}' stroke-width='2.4' stroke-linejoin='round' stroke-linecap='round' opacity='0.85'/>")
+    for i, (x, y) in enumerate(pts):
+        v = values[i]
+        dt = dates[i] if i < len(dates) else ''
+        delta_txt = f" ({v - avg:+.1f} vs {avg_label})" if avg is not None else ""
+        tooltip = f"{dt}: {v:.1f}{y_suffix}{delta_txt}"
+        if avg is not None:
+            dot_color = C['positive'] if v >= avg else C['negative']
+        else:
+            dot_color = color
+        parts.append(
+            f"<circle cx='{x:.1f}' cy='{y:.1f}' r='4' fill='{dot_color}' stroke='{C['surface']}' stroke-width='1.2'>"
+            f"<title>{_esc(tooltip)}</title></circle>"
+        )
+    step = max(1, n // 8)
+    for i, dt in enumerate(dates):
+        if i % step and i != n - 1:
+            continue
+        label = str(dt)[5:] if len(str(dt)) > 5 else str(dt)
+        parts.append(
+            f"<text x='{px(i):.1f}' y='{H - 6}' text-anchor='middle' font-size='9.5' font-family='{_MONO_FONT}' "
+            f"fill='{C['on_surface_variant']}'>{_esc(label)}</text>"
+        )
+    parts.append("</svg>")
+    st.markdown("".join(parts), unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
 # Efficiency landscape scatter (offense vs defense, quadrant-annotated)
 # ---------------------------------------------------------------------------
 
@@ -333,10 +415,6 @@ def render_efficiency_scatter(df, x_col, y_col, color_map, invert_y=False,
     mx, my = px(xs_.median()), py(ys_.median())
     parts.append(f"<line x1='{mx:.1f}' y1='{MT}' x2='{mx:.1f}' y2='{MT + plot_h}' stroke='{C['outline_variant']}' stroke-width='1' stroke-dasharray='4,4'/>")
     parts.append(f"<line x1='{ML}' y1='{my:.1f}' x2='{ML + plot_w}' y2='{my:.1f}' stroke='{C['outline_variant']}' stroke-width='1' stroke-dasharray='4,4'/>")
-    parts.append(
-        f"<text x='{W - MR - 4}' y='{MT + 14}' text-anchor='end' font-size='10.5' font-weight='700' "
-        f"letter-spacing='0.06em' fill='{C['on_surface_variant']}' opacity='0.8'>ELITE BOTH WAYS ↗</text>"
-    )
     if x_label:
         parts.append(f"<text x='{ML + plot_w / 2}' y='{H - 8}' text-anchor='middle' font-size='11' fill='{C['on_surface_variant']}'>{_esc(x_label)}</text>")
     if y_label:
@@ -520,7 +598,7 @@ def render_radar(axes, values_a, values_b, name_a, name_b, color_a=None, color_b
 # Percentile heatmap (team x stat grid, D-I percentile-colored)
 # ---------------------------------------------------------------------------
 
-def render_percentile_heatmap(pct_df, raw_df, cols, col_labels=None, sort_by_avg=True):
+def render_percentile_heatmap(pct_df, raw_df, cols, col_labels=None, sort_by_avg=True, show_values=True):
     """
     Team x stat-column percentile grid - each cell colored by D-I percentile
     (get_grade_color's diverging scale) for a "whole league at a glance"
@@ -529,7 +607,10 @@ def render_percentile_heatmap(pct_df, raw_df, cols, col_labels=None, sort_by_avg
     pct_df drives cell color, raw_df drives the tooltip's raw value.
     `col_labels`: optional {col: shorter_display_label} override.
     `sort_by_avg`: rank rows by mean percentile (best profile first) rather
-    than whatever order the input arrived in.
+    than whatever order the input arrived in. `show_values=True` prints the
+    actual stat number inside each cell (not just color) - the color alone
+    tells you good/bad but not the number behind it, which was hard to
+    reconstruct without hovering every cell one at a time.
     """
     if pct_df is None or pct_df.empty or not cols:
         return
@@ -580,6 +661,14 @@ def render_percentile_heatmap(pct_df, raw_df, cols, col_labels=None, sort_by_avg
                 f"<rect x='{x + 2:.1f}' y='{y + 3:.1f}' width='{CELL_W - 4:.1f}' height='{ROW_H - 6:.1f}' rx='3' "
                 f"fill='{color}'><title>{_esc(tooltip)}</title></rect>"
             )
+            if show_values and raw_val is not None and pd.notna(raw_val):
+                decimals = 2 if 'TO' in col else 1
+                parts.append(
+                    f"<text x='{x + CELL_W / 2:.1f}' y='{y + ROW_H / 2 + 4:.1f}' text-anchor='middle' "
+                    f"font-size='10.5' font-weight='700' font-family='{_MONO_FONT}' fill='#ffffff' "
+                    f"style='paint-order:stroke; stroke:rgba(0,0,0,0.35); stroke-width:2px;'>"
+                    f"{raw_val:.{decimals}f}<title>{_esc(tooltip)}</title></text>"
+                )
     parts.append("</svg>")
     st.markdown("".join(parts), unsafe_allow_html=True)
 
