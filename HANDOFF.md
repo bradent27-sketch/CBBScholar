@@ -45,7 +45,7 @@ zero-CBBD-quota-cost PREFERRED source for the positional matchup defense
 feature, with the existing CBBD path (`load_team_opponent_game_logs`) kept
 as the automatic fallback whenever the free source is missing, unreachable,
 or too stale to trust — see the new "ESPN/SportsDataverse fallback" entry
-in §2/§3 below and DATA_SOURCES.md. Also fixed two real bugs found while
+in §3 below and DATA_SOURCES.md. Also fixed two real bugs found while
 building that: (1) `@st.cache_data(ttl=604800, persist="disk")` — the
 pattern every "weekly cache" claim in this doc was based on — turns out to
 SILENTLY IGNORE the `ttl` entirely once `persist="disk"` is set (confirmed
@@ -183,7 +183,7 @@ Pack for historical backfill).
   sub-tab): "what have opposing guards/forwards/centers actually done
   against this team" WITHOUT a per-matchup or full-D-I API fan-out.
   `load_positional_matchup_data` tries the free ESPN/SportsDataverse
-  season file first (zero CBBD-quota cost - see §2) and falls back to
+  season file first (zero CBBD-quota cost - see the entry below) and falls back to
   `load_team_opponent_game_logs`'s CBBD-based approach below whenever that
   free source isn't usable. The CBBD fallback's trick: a team's own
   schedule (`load_team_games`) already lists every
@@ -482,7 +482,7 @@ charts currently plot Points allowed only (Rebounds/Assists have the
 summary-table delta but not their own trend line) - straightforward to
 add, just scoped down to keep this pass's UI from getting overloaded with
 charts; the data (`positional_defense_trend` accepts any `stat` column
-already in `load_team_opponent_game_logs`' output) already supports it.
+already in `load_positional_matchup_data`'s output) already supports it.
 A THIRD data tier for positional matchup defense - live per-game ESPN
 calls (`site.api.espn.com`'s scoreboard/summary endpoints, the same
 public endpoints already used elsewhere in this app, rather than
