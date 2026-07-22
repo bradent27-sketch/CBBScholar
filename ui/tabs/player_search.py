@@ -57,6 +57,18 @@ Minutes) - these were getting counted as "games played"
 deflated the season average of any player who missed real time (confirmed
 against a real player: PPG showing ~44% below his actual number, matching
 a games-count inflated by his missed games almost exactly).
+
+**Real bug, live-confirmed after deploy**: a real current Duke player
+(Cameron Boozer) was missing entirely from the team-filtered player
+dropdown despite having real season stats. Root cause: load_espn_roster's
+URL has no season parameter at all - it always reflects TODAY's live
+roster, not `season`'s - so a player who left the program (draft,
+transfer, graduation) since `season` drops off this list completely, even
+for a season they demonstrably played. Fixed by unioning the live roster
+with this season's own box-file players for the selected team (see the
+roster_rows/box_only/combined_rows logic below) - a departed player now
+shows up via the box file even when the live roster endpoint no longer
+lists them.
 """
 import pandas as pd
 import streamlit as st
@@ -183,18 +195,42 @@ def render():
         espn_row = espn_teams[espn_teams['Team'] == team].iloc[0]
         with st.spinner("Loading roster..."):
             roster_df = load_espn_roster(espn_row['EspnId'], season)
-        if roster_df.empty:
-            st.info(f"No roster data found for {team} in {season}.")
+        # ESPN's roster endpoint has no season parameter at all (see
+        # load_espn_roster's docstring) - it always reflects TODAY's
+        # actual roster, not `season`'s. A player who left the program
+        # since then (drafted, transferred, graduated) drops off this
+        # list entirely, even for a season they demonstrably played (real
+        # box-score rows exist for them in box_df) - a real, reported bug
+        # (a real player was missing from his own team's dropdown despite
+        # having played that season). Union the live roster with this
+        # season's own box-file players for this team so a departed
+        # player still shows up - same box_df already loaded above for
+        # stats, no extra fetch. Extra (box-only) rows are bare
+        # pd.Series with just name/position set - deliberately NOT merged
+        # into one wide DataFrame (which would force pandas to coerce
+        # missing numeric fields like height/weight to NaN, and this
+        # file's `bio.get(...) or '--'`-style checks below treat NaN as
+        # truthy, silently rendering "nan" instead of falling back) - the
+        # same safe pattern All Teams mode's own fallback already uses.
+        roster_rows = [roster_df.iloc[i] for i in range(len(roster_df))]
+        box_team_players = box_df[box_df['Team'] == team][['name', 'Position']].drop_duplicates(subset=['name'])
+        box_only = box_team_players[
+            box_team_players['name'].apply(lambda n: match_player_name(n, roster_df['name']) is None)
+        ] if roster_rows else box_team_players
+        extra_rows = [pd.Series({'name': r['name'], 'position': r['Position']}) for _, r in box_only.iterrows()]
+        combined_rows = roster_rows + extra_rows
+        if not combined_rows:
+            st.info(f"No roster or season data found for {team} in {season}.")
             return
-        labels = [f"{r['name']} ({r['position'] or '?'})" for _, r in roster_df.iterrows()]
+        labels = [f"{r['name']} ({r.get('position') or '?'})" for r in combined_rows]
         query = st.text_input(
             "Filter roster (optional)", key="ps_player_query_team",
             placeholder="Start typing to narrow the roster below…",
         )
         matched_labels = fuzzy_filter_names(query, labels, limit=len(labels)) if query else labels
         sel_label = st.selectbox("Select player", matched_labels, key="ps_player_select")
-        bio = roster_df.iloc[labels.index(sel_label)]
-        source_id = bio['sourceId']
+        bio = combined_rows[labels.index(sel_label)]
+        source_id = bio.get('sourceId')
         player_name = bio['name']
 
     render_team_banner(team, subtitle=f"{bio.get('position') or '?'} #{bio.get('jersey') or '?'}", team_color=colors.get(team))

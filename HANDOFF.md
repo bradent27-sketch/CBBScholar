@@ -11,9 +11,82 @@ CollegeBasketballData.com (free key, configured), ESPN's public endpoints
 subsystem exists for this app at all — there's no PFF product for college
 basketball.
 
+**Four polish items (this doc's most recent update): confirmed D-I caching
+is already shared, fixed a missing-player bug in Player Search, aligned
+Matchup Analyzer's two columns into synchronized rows, and reordered
+tabs.**
+
+1. **"Compare vs all D-I" caching parity** - checked: Player Search and
+   Matchup Analyzer's PLAYER panel already call the exact same
+   `data.loaders.load_espn_di_player_stats(season)` (added last pass) for
+   this checkbox - no discrepancy found, no code change needed here.
+
+2. **Real bug: a real, current player (Cameron Boozer) was missing
+   entirely from Player Search's team-filtered Duke dropdown**, despite
+   having real season stats (findable fine via All Teams mode - the same
+   "team-filtered vs. All Teams" split symptom pattern as the earlier
+   roster/box-file id bug, but a different root cause this time).
+   `load_espn_roster`'s URL has NO season parameter at all - it always
+   reflects TODAY's live roster, never `season`'s - so a player who left
+   the program since (draft, transfer, graduation) drops off the
+   team-filtered picker completely, even for a season they demonstrably
+   played. **Fixed**: the team-filtered player list now unions the live
+   roster with this season's own box-file players for that team (same
+   `box_df` already loaded for stats, no extra fetch) - a departed
+   player's box-file row keeps them visible even after the live roster
+   no longer lists them. Extra (box-only) entries are bare `pd.Series`
+   with just name/position set, deliberately NOT merged into one wide
+   DataFrame - concatenating would force pandas to coerce missing numeric
+   fields (height/weight) to NaN, and this file's `bio.get(...) or
+   '--'`-style checks treat NaN as truthy (a real Python gotcha - `bool(
+   float('nan'))` is `True`), which would have silently rendered literal
+   "nan" text instead of falling back - the same safe all-keys-absent
+   pattern All Teams mode's own fallback bio already used, applied here
+   too.
+
+3. **Matchup Analyzer restructured into three synchronized row-pairs**
+   instead of two independently-stacked columns, per explicit request to
+   visually align PLAYER against TEAM DEFENSE despite them being separate
+   Streamlit columns: Row 0 (pickers, kept short on both sides), Row 1
+   (tendency profile beside defensive profile), Row 2 (last-10-games
+   trend beside positional matchup defense). `_render_player_panel`/
+   `_render_team_defense_panel` split into `_pick_player`/
+   `_pick_defense_team` (Row 0) plus `_render_tendency_profile`/
+   `_render_player_trend` (PLAYER's Row 1/Row 2) and
+   `_render_defensive_profile`/`_render_positional_defense` (TEAM
+   DEFENSE's Row 1/Row 2) - `_pick_player` returns a context dict (or
+   `None`, after showing its own message) consumed by the two PLAYER-side
+   row functions. Each row's two sides render independently - a
+   PLAYER-side failure (no roster, no stats) doesn't block TEAM DEFENSE,
+   and vice versa, exactly as before this refactor - verified via
+   AppTest with an empty-roster PLAYER scenario confirming TEAM DEFENSE's
+   profile still renders. Two columns within the SAME `st.columns()` call
+   are guaranteed to start at the same height, so Row 1 and Row 2 each
+   start together on both sides - genuinely "aligned," not just visually
+   close - though a row can still end at different heights per side (e.g.
+   PLAYER's longer stat-bar list vs. TEAM DEFENSE's shorter one), leaving
+   whitespace under the shorter side before the next row starts - "some
+   what matched up," which is what was asked for, not pixel-perfect
+   synchronization (not achievable across independent Streamlit columns
+   without fragile height-hardcoding).
+
+4. **Tabs reordered** to Player Search, Team Efficiency, Rankings, Matchup
+   Analyzer, Live Odds, Player Compare, Transfer Portal (`config.py`'s
+   `TAB_LABELS` and `app.py`'s `_tab_modules`, kept in lockstep - both
+   lists are zipped together positionally, so they must stay in the same
+   order).
+
+Verified via `streamlit.testing.v1.AppTest`: a synthetic "player left the
+program" scenario (in the box file, absent from a mocked live roster)
+confirming the player now appears in the team-filtered dropdown with real
+stats and no stray "nan" text; an empty-PLAYER-roster scenario confirming
+TEAM DEFENSE's row still renders; and the reordered tab label list. Still
+not verified against live CBBD/ESPN - same standing sandbox caveat as
+everything else in this pipeline.
+
 **UI copy cleanup + Matchup Analyzer conference-mismatch bug + D-I
-comparison caching + a positional-defense source indicator (this doc's
-most recent update).** Three requested changes from real usage:
+comparison caching + a positional-defense source indicator.** Three
+requested changes from real usage:
 
 1. **Cut most of the small explanatory `st.caption()` text app-wide** -
    "how to read this chart"/"what does this feature do" prose under

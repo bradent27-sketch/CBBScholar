@@ -8,6 +8,19 @@ one team's defensive shape vs D-I, plus the positional matchup defense
 breakdown - what opposing Guards/Forwards/Centers have actually done against
 that team) on the right.
 
+Laid out as three synchronized row-pairs, not two independently-stacked
+columns, per explicit request to visually align the two sides despite them
+being separate Streamlit columns: Row 0 (team/player pickers, kept short on
+both sides), Row 1 (tendency profile beside defensive profile), Row 2
+(last-10-games trend beside positional matchup defense). Each row's two
+sides render independently - a PLAYER-side failure (no roster, no stats)
+doesn't block TEAM DEFENSE rendering, and vice versa - see _pick_player/
+_pick_defense_team's None return and render()'s `if player_ctx`/
+`if defense_team` guards. Two side-by-side st.columns() in the SAME row
+call are guaranteed to start at the same height; a later row can still
+start lower on the shorter side if the row above it was taller there -
+"somewhat matched up," not pixel-perfect, which is what was asked for.
+
 PLAYER prefers ESPN's own live endpoints + the ESPN-native SportsDataverse
 season box file (data.loaders.get_player_season_profile - the SAME
 architecture Player Search uses) over CollegeBasketballData.com, falling back
@@ -87,20 +100,52 @@ def render():
         )
         return
 
+    # Row 0: pickers only (kept short on both sides so Row 1 below starts
+    # at roughly the same height in both columns).
     col_player, col_defense = st.columns(2)
     with col_player:
         st.markdown("<div class='custom-section-header'>PLAYER</div>", unsafe_allow_html=True)
-        _render_player_panel(season, teams_df)
+        player_ctx = _pick_player(season, teams_df)
     with col_defense:
         st.markdown("<div class='custom-section-header'>TEAM DEFENSE</div>", unsafe_allow_html=True)
-        _render_team_defense_panel(season, teams_df)
+        defense_team = _pick_defense_team(teams_df)
+
+    # Row 1: tendency profile beside defensive profile.
+    col_a, col_b = st.columns(2)
+    with col_a:
+        if player_ctx:
+            _render_tendency_profile(season, player_ctx)
+    with col_b:
+        if defense_team:
+            _render_defensive_profile(defense_team, season)
+
+    # Row 2: last-10-games trend beside positional matchup defense.
+    col_c, col_d = st.columns(2)
+    with col_c:
+        if player_ctx:
+            _render_player_trend(season, player_ctx)
+    with col_d:
+        if defense_team:
+            _render_positional_defense(defense_team, season)
 
 
-def _render_player_panel(season, teams_df):
+def _pick_player(season, teams_df):
+    """Team + player selectors, roster load, and ESPN/CBBD stats-profile
+    resolution (data.loaders.get_player_season_profile) - the shared setup
+    both _render_tendency_profile and _render_player_trend need. Split out
+    from a single monolithic panel specifically so PLAYER and TEAM DEFENSE
+    can be interleaved into synchronized row-pairs (see render()) instead
+    of each column independently stacking picker+profile+trend end to end.
+
+    Returns a context dict, or None (after showing its own st.info message)
+    if no team/roster/stats data is available - a None here doesn't stop
+    TEAM DEFENSE's own rows from rendering; each row checks its own side
+    independently.
+    """
     team_names = sorted(teams_df['Team'].dropna().unique().tolist())
     if not team_names:
         st.info("No team data available.")
-        return
+        return None
     default_team = 'Duke' if 'Duke' in team_names else team_names[0]
     team_choice = st.selectbox("Team", team_names, index=team_names.index(default_team), key="ma_player_team")
 
@@ -108,7 +153,7 @@ def _render_player_panel(season, teams_df):
         roster_df = load_team_roster(team_choice, season)
     if roster_df.empty:
         st.info(f"No roster data for {team_choice}.")
-        return
+        return None
     labels = [f"{r['name']} ({r['position'] or '?'})" for _, r in roster_df.iterrows()]
     sel_label = st.selectbox("Player", labels, key="ma_player_select")
     sel_row = roster_df.iloc[labels.index(sel_label)]
@@ -119,10 +164,30 @@ def _render_player_panel(season, teams_df):
         )
     if not stats:
         st.info("No season stats for this player yet.")
-        return
+        return None
 
     conf_series = teams_df.loc[teams_df['Team'] == team_choice, 'Conference']
     conf = conf_series.iloc[0] if not conf_series.empty else None
+
+    return {
+        'team_choice': team_choice, 'sel_row': sel_row, 'stats': stats,
+        'include_net_rating': include_net_rating, 'source': source,
+        'box_df': box_df, 'athlete_source_id': athlete_source_id, 'conf': conf,
+    }
+
+
+def _pick_defense_team(teams_df):
+    team_names = sorted(teams_df['Team'].dropna().unique().tolist())
+    if not team_names:
+        st.info("No team data available.")
+        return None
+    default_team = 'Duke' if 'Duke' in team_names else team_names[0]
+    return st.selectbox("Team", team_names, index=team_names.index(default_team), key="ma_def_team")
+
+
+def _render_tendency_profile(season, ctx):
+    sel_row, stats = ctx['sel_row'], ctx['stats']
+    include_net_rating, source, box_df, conf = ctx['include_net_rating'], ctx['source'], ctx['box_df'], ctx['conf']
 
     compare_all = st.checkbox(
         "Compare against all of Division I instead of just this conference"
@@ -178,6 +243,11 @@ def _render_player_panel(season, teams_df):
         st.caption("No comparison group available.")
     st.caption("Source: free ESPN/SportsDataverse box file." if source == 'espn' else "Source: CollegeBasketballData.com.")
 
+
+def _render_player_trend(season, ctx):
+    team_choice, sel_row, stats, source, box_df, athlete_source_id = (
+        ctx['team_choice'], ctx['sel_row'], ctx['stats'], ctx['source'], ctx['box_df'], ctx['athlete_source_id']
+    )
     st.markdown(f"**{sel_row['name']} — last 10 games vs season average**")
     if source == 'espn':
         # Same box_df, no second download - this is the per-game rows
@@ -212,9 +282,6 @@ def _render_player_panel(season, teams_df):
         makes = pd.to_numeric(mine['3PM'], errors='coerce')
         mine['3P%'] = (makes / attempts.where(attempts > 0)) * 100
 
-    # Stacked one-per-row, not the 2-per-row grid an earlier team-vs-team
-    # version used - this panel is now a half-width column, so a 2-across
-    # grid would cramp each chart to a quarter of the page's width.
     for stat, suffix in _PLAYER_TREND_STATS:
         if stat not in mine.columns:
             continue
@@ -259,14 +326,7 @@ def _position_map_for_matchup(matchup_df, season):
     return pos_map
 
 
-def _render_team_defense_panel(season, teams_df):
-    team_names = sorted(teams_df['Team'].dropna().unique().tolist())
-    if not team_names:
-        st.info("No team data available.")
-        return
-    default_team = 'Duke' if 'Duke' in team_names else team_names[0]
-    team = st.selectbox("Team", team_names, index=team_names.index(default_team), key="ma_def_team")
-
+def _render_defensive_profile(team, season):
     team_stats = load_all_team_season_stats(season)
     if team_stats.empty:
         st.info("Team defense profile needs /stats/team/season data, which isn't available right now.")
@@ -284,7 +344,8 @@ def _render_team_defense_panel(season, teams_df):
     else:
         st.info(f"No defensive profile available for {team} yet.")
 
-    st.markdown("---")
+
+def _render_positional_defense(team, season):
     st.markdown(f"**{team} — positional matchup defense**")
     recent_games_cap = st.slider(
         "Games to include (most recent)", min_value=5, max_value=30, value=20, step=5,
