@@ -23,7 +23,7 @@ import requests
 import pandas as pd
 import streamlit as st
 
-from data.utils import resolve_team_name
+from data.utils import resolve_team_name, match_player_name
 # One deliberate exception to this file's "raw ingestion only" layering
 # (see this module's docstring and HANDOFF.md's Architecture section,
 # which frames data/transforms.py as pure compute over already-loaded
@@ -1160,6 +1160,23 @@ def _resolve_espn_box_team_names(raw_box, canonical_names):
     they resolve against (CBBD's `load_teams()` vs ESPN's own
     `load_espn_teams()`). Returns columns identical to `raw_box` minus
     TeamRaw/OpponentRaw, plus real Team/Opponent columns, sorted by Date.
+
+    Also drops DNP rows (0 or missing Minutes - injury, coach's decision,
+    suspension, etc.). The raw box file carries a full row (0 points, 0
+    rebounds, everything zeroed) for a player who was AVAILABLE for a game
+    but didn't actually play, not just for players who played. Left in,
+    anything that counts rows as "games" (data.transforms.
+    espn_player_season_stats_for_teams' `games = len(g)`, in particular)
+    counts a DNP as a game played, inflating the denominator and dragging
+    every per-game average down - confirmed against a real discrepancy (a
+    player who missed real season time to injury showed a season PPG here
+    roughly 44% below his actual number, matching almost exactly what a
+    games-count inflated by his missed games would produce). Every stat
+    SUM is unaffected either way (a DNP row contributes zero regardless),
+    so this only fixes counts/averages/game logs, never point totals -
+    and it's a strict improvement for positional matchup defense too (an
+    opposing player who didn't play is not evidence of anything against a
+    team's defense).
     """
     if raw_box is None or raw_box.empty:
         return pd.DataFrame()
@@ -1170,6 +1187,7 @@ def _resolve_espn_box_team_names(raw_box, canonical_names):
     out['Opponent'] = out['OpponentRaw'].map(name_map) if name_map else None
     out = out.drop(columns=['TeamRaw', 'OpponentRaw'])
     out = out.dropna(subset=['Team', 'Opponent', 'Date'])
+    out = out[pd.to_numeric(out['Minutes'], errors='coerce') > 0]
     return out.sort_values('Date').reset_index(drop=True) if not out.empty else out
 
 
@@ -1184,17 +1202,10 @@ def _load_espn_season_player_box_cached(season, _bucket):
     Player Search's CBBD-free pipeline, so the file isn't fetched twice).
 
     Returns columns: GameId, Date, Team, Opponent, Home/Away,
-    athleteSourceId, name, Position, Minutes, Points, Rebounds, OREB, DREB,
-    Assists, Steals, Blocks, Turnovers, FGM, FGA, 3PM, 3PA, FTM, FTA.
-    OREB/DREB/FTM/FTA were added (originally CBBD-name-resolved rows didn't
-    carry them - positional matchup defense never needed them) so
-    `get_player_season_profile`'s CBBD-resolved season-stat profile (Matchup
-    Analyzer's PLAYER panel, Player Compare) gets the same fidelity Player
-    Search's ESPN-native twin already has (FT%/FT-rate/ORB-DRB split/full
-    Usage%), instead of silently degrading to the FTA-free approximation
-    every time just because this finisher happened to drop them - existing
-    callers (positional matchup defense) are unaffected, they just don't
-    select the new columns. Raises on failure - see
+    athleteSourceId, name, Position, Minutes, Points, Rebounds, Assists,
+    Steals, Blocks, Turnovers, FGM, FGA, 3PM, 3PA (unchanged from before
+    this function was refactored - positional matchup defense's contract
+    with this function is untouched). Raises on failure - see
     `_fetch_espn_season_box_raw_cached`'s docstring for why; caught by the
     public wrapper below, not here (so a real failure doesn't get cached).
     """
@@ -1205,8 +1216,7 @@ def _load_espn_season_player_box_cached(season, _bucket):
     if out.empty:
         return out
     keep_cols = ['GameId', 'Date', 'Team', 'Opponent', 'Home/Away', 'athleteSourceId', 'name', 'Position',
-                 'Minutes', 'Points', 'Rebounds', 'OREB', 'DREB', 'Assists', 'Steals', 'Blocks', 'Turnovers',
-                 'FGM', 'FGA', '3PM', '3PA', 'FTM', 'FTA']
+                 'Minutes', 'Points', 'Rebounds', 'Assists', 'Steals', 'Blocks', 'Turnovers', 'FGM', 'FGA', '3PM', '3PA']
     return out[keep_cols]
 
 
@@ -1365,73 +1375,107 @@ def _is_espn_data_fresh_enough(team, season, team_games_espn, max_lag_days=10):
         return False
 
 
-def get_player_season_profile(team, season, athlete_source_id, cbbd_athlete_id):
+def get_player_season_profile(team, season, player_name, cbbd_athlete_id):
     """
-    One player's season-stats profile, preferring the free ESPN/
-    SportsDataverse season box file over CBBD's /stats/player/season - the
-    same "ESPN first, CBBD fallback whenever the free file is missing,
-    unreachable, or lagging `team`'s actual CBBD-confirmed schedule"
-    pattern load_positional_matchup_data already established for
-    positional defense (see its docstring and _is_espn_data_fresh_enough),
-    applied here to season totals instead of per-game positional data.
-    Shared by Matchup Analyzer's PLAYER panel and Player Compare - both
-    stayed CBBD-only when Player Search's CBBD-free pipeline was first
-    built (HANDOFF.md's explicit "Player Search ONLY" scope note from that
-    pass); this is that follow-up, separately requested later specifically
-    to get more of the app onto the twice-weekly, quota-free refresh cycle.
+    One player's season-stats profile, preferring ESPN's own live
+    endpoints plus the ESPN-native SportsDataverse season box file - the
+    SAME architecture Player Search already uses successfully
+    (load_espn_teams/load_espn_roster/load_espn_season_player_box_native)
+    - over CollegeBasketballData.com. Shared by Matchup Analyzer's PLAYER
+    panel and Player Compare; both stayed CBBD-only when Player Search's
+    CBBD-free pipeline was first built (HANDOFF.md's "Player Search ONLY"
+    scope note), then got a first pass at this that used a DIFFERENT,
+    CBBD-resolved box-file variant with a date-freshness heuristic - see
+    HANDOFF.md for why that fell back to CBBD almost constantly in
+    practice (the box file's raw ESPN-sourced team names resolve far more
+    reliably against ESPN's OWN team list than against CBBD's
+    independently-formatted one) and was replaced with this version.
+
+    `team`/`player_name` are whatever the caller's existing team-first UI
+    already resolved (both tabs still pick a team + player from CBBD's
+    /teams/roster for the picker itself, unchanged - only the STATS
+    source changes here). `team` gets bridged to ESPN's own canonical
+    spelling via resolve_team_name (the same team-name aliasing this app
+    already relies on everywhere else); `player_name` gets matched against
+    ESPN's roster and box-file names via data.utils.match_player_name, NOT
+    an id - ESPN's roster endpoint's athlete id and the box file's athlete
+    id turned out to be different id namespaces despite the original
+    assumption they were the same (confirmed: this exact id join matched
+    nothing for any Player Search player - see HANDOFF.md). Name matching
+    sidesteps that bad assumption entirely.
 
     CBBD is only actually CALLED (get_player_season_stats, the one real
     API cost this function can incur) when the ESPN path can't be used -
-    this is the real quota saving, not just a source preference: a fresh-
-    enough ESPN file makes ZERO CBBD calls for this player's own stats.
+    this is the real quota saving, not just a source preference.
 
-    Returns (stats_dict, include_net_rating, source, box_df):
+    Returns (stats_dict, include_net_rating, source, box_df, athlete_source_id):
     - stats_dict is already in the CBBD dict shape data.transforms.
       player_percentile_rows/player_profile_values (and Compare's own
-      _numeric_stat_map) expect regardless of which source produced it -
-      callers don't need source-specific branching for the shape itself.
+      _numeric_stat_map) expect regardless of which source produced it.
+      When source == 'espn', stats_dict['Team'] is the box file's OWN
+      (ESPN-spelled) team name - use THAT, not the caller's original
+      `team`, for any further box_df filtering (see below).
     - include_net_rating: False when source == 'espn' (box scores alone
-      can't produce Net Rating - same reasoning as Player Search's own
-      pipeline), True for 'cbbd'. Pass straight through to
-      player_percentile_rows/player_profile_values.
+      can't produce Net Rating), True for 'cbbd'.
     - source: 'espn' or 'cbbd' - a caller that also needs a MATCHING
       comparison-group DataFrame should build it from the same place:
-      espn_player_season_stats_for_teams(box_df, teams=...) for 'espn',
-      the existing load_conference_player_season_stats/
-      load_all_player_season_stats(season) for 'cbbd' (unchanged, not
-      touched by this function) - mixing an ESPN-sourced player row
-      against a CBBD-sourced group would compare two slightly different
-      stat definitions.
-    - box_df: the already-downloaded CBBD-name-resolved ESPN season file
-      (see load_espn_season_player_box - the SAME twice-weekly-cached
-      download positional matchup defense already triggers for this team,
-      not a second one) when source == 'espn', so callers can build a
-      group DataFrame or a per-game trend without re-fetching anything.
+      espn_player_season_stats_for_teams(box_df, teams=...) for 'espn'
+      (using ESPN-spelled team names, e.g. from load_espn_teams), the
+      existing load_conference_player_season_stats/
+      load_all_player_season_stats(season) for 'cbbd' (unchanged) -
+      mixing sources would compare two slightly different stat
+      definitions.
+    - box_df: the already-downloaded ESPN-native season file (see
+      load_espn_season_player_box_native - the SAME twice-weekly-cached
+      download Player Search already triggers) when source == 'espn', for
+      a group DataFrame or per-game trend without re-fetching anything.
       None when source == 'cbbd'.
+    - athlete_source_id: this player's OWN id from the box file (NOT
+      whatever id the caller had) when source == 'espn' - use THIS, not
+      the caller's id, for any further box_df row lookups (game log,
+      trend), since it's guaranteed self-consistent with box_df. None for
+      'cbbd'.
 
-    Falls back to CBBD (stats may be {} if the player has no CBBD stats
-    yet either, exactly as before this function existed) whenever: the
-    ESPN file is empty/unreachable, `team` has no rows in it, its coverage
-    of `team` isn't fresh enough, or `athlete_source_id` isn't found among
-    `team`'s ESPN rows (e.g. a walk-on ESPN hasn't picked up yet). Every
-    one of these is a pure fallback to the ALREADY-PROVEN CBBD path used
-    before this change - can only ever help (twice-weekly refresh instead
-    of weekly, zero CBBD-quota cost) or be a silent no-op, never regress
-    either tab's reliability.
+    Falls back to CBBD (get_player_season_stats(team, season,
+    cbbd_athlete_id), unchanged from before this function existed)
+    whenever: `team` doesn't resolve to an ESPN team, that team's ESPN
+    roster is empty/unreachable, `player_name` doesn't match anyone on
+    it, the ESPN season box file is empty/unreachable, or `player_name`
+    doesn't match anyone in this team's box-file rows either (e.g. very
+    early season, before the file has this player's first game). Every
+    one of these is a pure fallback to the ALREADY-PROVEN CBBD path - can
+    only ever help or be a silent no-op, never regress either tab's
+    reliability.
     """
     season = season or current_cbb_season()
-    box_df = load_espn_season_player_box(season)
-    if not box_df.empty and 'Team' in box_df.columns:
-        team_rows = box_df[box_df['Team'] == team]
-        if not team_rows.empty and _is_espn_data_fresh_enough(team, season, team_rows):
-            team_stats = espn_player_season_stats_for_teams(box_df, team)
-            match = (
-                team_stats[team_stats['athleteSourceId'].astype(str) == str(athlete_source_id)]
-                if not team_stats.empty else team_stats
-            )
-            if not match.empty:
-                return match.iloc[0].to_dict(), False, 'espn', box_df
-    return get_player_season_stats(team, season, cbbd_athlete_id), True, 'cbbd', None
+    fallback = (get_player_season_stats(team, season, cbbd_athlete_id), True, 'cbbd', None, None)
+
+    espn_teams = load_espn_teams(season)
+    if espn_teams.empty:
+        return fallback
+    espn_team = resolve_team_name(team, espn_teams['Team'].dropna().tolist())
+    if not espn_team:
+        return fallback
+    espn_team_row = espn_teams[espn_teams['Team'] == espn_team]
+    if espn_team_row.empty:
+        return fallback
+    roster_df = load_espn_roster(espn_team_row.iloc[0]['EspnId'], season)
+    if roster_df.empty:
+        return fallback
+    if match_player_name(player_name, roster_df['name']) is None:
+        return fallback
+
+    box_df = load_espn_season_player_box_native(season)
+    if box_df.empty or 'Team' not in box_df.columns:
+        return fallback
+    team_stats = espn_player_season_stats_for_teams(box_df, espn_team)
+    if team_stats.empty:
+        return fallback
+    stats_idx = match_player_name(player_name, team_stats['name'])
+    if stats_idx is None:
+        return fallback
+    row = team_stats.iloc[stats_idx].to_dict()
+    return row, False, 'espn', box_df, row['athleteSourceId']
 
 
 def clear_league_wide_caches():

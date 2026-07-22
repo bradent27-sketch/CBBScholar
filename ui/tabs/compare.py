@@ -3,15 +3,17 @@ Search's team-first loaders. (Named "Player Compare", not "Team/Player
 Compare" - it only ever compared two players, never two teams, so the old
 label overpromised.)
 
-Season stats now prefer the free ESPN/SportsDataverse season box file over
-CollegeBasketballData.com, via data.loaders.get_player_season_profile - the
-same "ESPN first, CBBD fallback whenever the free file is missing,
-unreachable, or too stale for that team" pattern Matchup Analyzer's PLAYER
-panel and Team Defense positional breakdown already use. This tab wasn't
-included when Player Search's CBBD-free pipeline was first built (see
-HANDOFF.md's "Player Search ONLY" scope note from that pass) - this is that
-follow-up. Both players' profiles are resolved ONCE in render() and threaded
-into every section below (column tiles, delta table, radar) instead of each
+Season stats prefer ESPN's own live endpoints + the ESPN-native
+SportsDataverse season box file over CollegeBasketballData.com, via
+data.loaders.get_player_season_profile - the SAME architecture Player
+Search uses (name-matched, not id-matched - see that function's docstring
+for why an id-based join between ESPN's roster endpoint and the box file
+doesn't work), falling back to CBBD only when ESPN's own roster/box-file
+lookups genuinely come up empty for that player. This tab wasn't included
+when Player Search's CBBD-free pipeline was first built (see HANDOFF.md's
+"Player Search ONLY" scope note from that pass) - this is that follow-up.
+Both players' profiles are resolved ONCE in render() and threaded into
+every section below (column tiles, delta table, radar) instead of each
 section independently re-fetching, which the CBBD-only version used to do."""
 import streamlit as st
 
@@ -89,8 +91,8 @@ def render():
         return
 
     with st.spinner("Loading season stats..."):
-        stats_a, _net_a, source_a, _box_a = get_player_season_profile(team_a, season, row_a.get('sourceId'), row_a['id'])
-        stats_b, _net_b, source_b, _box_b = get_player_season_profile(team_b, season, row_b.get('sourceId'), row_b['id'])
+        stats_a, _net_a, source_a, _box_a, _sid_a = get_player_season_profile(team_a, season, row_a['name'], row_a['id'])
+        stats_b, _net_b, source_b, _box_b, _sid_b = get_player_season_profile(team_b, season, row_b['name'], row_b['id'])
 
     colors = team_color_map(season)
     st.markdown(f"<div class='custom-section-header'>{row_a['name']} vs {row_b['name']}</div>", unsafe_allow_html=True)
@@ -108,7 +110,7 @@ def render():
     else:
         st.caption(
             "Season stats: the free ESPN/SportsDataverse box file for one player, CollegeBasketballData.com for "
-            "the other — the free source isn't fresh enough for both teams yet."
+            "the other — couldn't match the other player against ESPN's own roster/box-score data yet."
         )
 
 

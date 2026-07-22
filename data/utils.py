@@ -36,6 +36,38 @@ def clean_name_for_merge(name_series):
     return cleaned
 
 
+def match_player_name(name, candidates):
+    """
+    Finds `name`'s position within `candidates` (any name-like list/
+    Series) via clean_name_exact first, falling back to
+    clean_name_for_merge (handles two sources being inconsistent about
+    Jr./Sr./II/III) if that fails. Returns a positional index (`.iloc`-
+    ready, regardless of `candidates`' own index), or None if neither key
+    matches anything.
+
+    Built specifically to join two ESPN-sourced player lists (ESPN's live
+    roster endpoint vs. SportsDataverse's published box-score file) that
+    turned out NOT to share a common id despite that being the original
+    assumption - `load_espn_roster`'s 'sourceId' and the box file's
+    'athleteSourceId' are different id namespaces in practice, even though
+    both ultimately trace back to ESPN (confirmed by this exact join
+    silently matching nothing for every player - see HANDOFF.md). Name
+    matching sidesteps the bad id assumption entirely, the same fix this
+    app's CBBD roster/game-log id-namespace gotcha already established as
+    the right instinct for this class of problem.
+    """
+    cand_series = pd.Series(list(candidates))
+    key = clean_name_exact(pd.Series([name])).iloc[0]
+    exact_keys = clean_name_exact(cand_series)
+    hit = exact_keys[exact_keys == key]
+    if not hit.empty:
+        return int(hit.index[0])
+    key2 = clean_name_for_merge(pd.Series([name])).iloc[0]
+    loose_keys = clean_name_for_merge(cand_series)
+    hit2 = loose_keys[loose_keys == key2]
+    return int(hit2.index[0]) if not hit2.empty else None
+
+
 _NAME_SUFFIXES = {'jr', 'jr.', 'sr', 'sr.', 'ii', 'iii', 'iv', 'v'}
 
 

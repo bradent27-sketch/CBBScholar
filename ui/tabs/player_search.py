@@ -37,6 +37,26 @@ a real payload once deployed before fully trusting Usage%/FT%/ORB-DRB
 specifically; everything degrades to '--'/empty rather than a wrong number
 if a guessed field name turns out to not exist (see the has_ft/has_reb_split
 checks in espn_player_season_stats_for_teams).
+
+**Real bug, live-confirmed after deploy**: load_espn_roster's 'sourceId'
+(ESPN roster endpoint's own athlete id) and the box file's
+'athleteSourceId' turned out to be DIFFERENT id namespaces, despite the
+original assumption they were the same - every id-based join between them
+matched nothing, for every player. This produced two distinct symptoms:
+team-filtered mode showed "No game data found" for every player on every
+team/season (the roster-picked player's id never matched anything in the
+box file's stats), while All Teams mode's stats worked fine (it reads
+name/id straight from the box file, bypassing the broken join entirely)
+but bio fields (height/weight/hometown) came back blank (the reverse
+lookup into the roster, by the same broken id, also matched nothing).
+Fixed by joining on NAME instead (data.utils.match_player_name) in both
+directions - see the bio_idx/stats_idx lookups below. Also fixed:
+data.loaders._resolve_espn_box_team_names now drops DNP rows (0/missing
+Minutes) - these were getting counted as "games played"
+(espn_player_season_stats_for_teams' `games = len(g)`), which silently
+deflated the season average of any player who missed real time (confirmed
+against a real player: PPG showing ~44% below his actual number, matching
+a games-count inflated by his missed games almost exactly).
 """
 import pandas as pd
 import streamlit as st
@@ -46,7 +66,7 @@ from data.loaders import (
     current_cbb_season, load_espn_teams, load_espn_roster, load_espn_season_player_box_native,
 )
 from data.transforms import last_n_form, player_percentile_rows, espn_player_season_stats_for_teams, espn_player_result_map
-from data.utils import fuzzy_filter_names
+from data.utils import fuzzy_filter_names, match_player_name
 from ui.components import render_coming_soon, render_team_banner, render_bio_strip, render_metric_tiles
 from ui.charts import render_relative_bars
 from ui.styling import render_sticky_footer_table
@@ -150,8 +170,13 @@ def render():
         espn_row = espn_teams[espn_teams['Team'] == team].iloc[0]
         with st.spinner("Loading bio..."):
             roster_df = load_espn_roster(espn_row['EspnId'], season)
-        bio_match = roster_df[roster_df['sourceId'].astype(str) == str(source_id)] if not roster_df.empty else roster_df
-        bio = bio_match.iloc[0] if not bio_match.empty else pd.Series({'position': sel_candidate['Position']})
+        # Matched by NAME, not id - ESPN's roster endpoint's own athlete id
+        # and the box file's athleteSourceId are different id namespaces in
+        # practice (confirmed: this join matched nothing for any player),
+        # despite the original assumption they were the same. See
+        # data.utils.match_player_name's docstring and HANDOFF.md.
+        bio_idx = match_player_name(player_name, roster_df['name']) if not roster_df.empty else None
+        bio = roster_df.iloc[bio_idx] if bio_idx is not None else pd.Series({'position': sel_candidate['Position']})
     else:
         team = team_choice
         espn_row = espn_teams[espn_teams['Team'] == team].iloc[0]
@@ -183,11 +208,17 @@ def render():
     st.markdown(f"<div class='custom-section-header'>{season - 1}-{str(season)[2:]} SEASON STATS</div>", unsafe_allow_html=True)
 
     team_stats_df = espn_player_season_stats_for_teams(box_df, team)
-    player_row = team_stats_df[team_stats_df['athleteSourceId'].astype(str) == str(source_id)] if not team_stats_df.empty else team_stats_df
-    if player_row.empty:
+    # Matched by NAME, not id - same reason as the bio lookup above (team-
+    # filtered mode's `source_id` came from ESPN's roster endpoint, a
+    # different id namespace from the box file's athleteSourceId in
+    # practice). All-Teams mode's `source_id` already comes from box_df
+    # itself, so this is a no-op re-derivation there, not a behavior change.
+    stats_idx = match_player_name(player_name, team_stats_df['name']) if not team_stats_df.empty else None
+    if stats_idx is None:
         st.info(f"No {season} game data found for this player yet.")
         return
-    stats = player_row.iloc[0].to_dict()
+    stats = team_stats_df.iloc[stats_idx].to_dict()
+    source_id = stats['athleteSourceId']
     games = stats.get('games') or 0
 
     player_conf = espn_row.get('Conference')

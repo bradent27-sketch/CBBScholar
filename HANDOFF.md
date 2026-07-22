@@ -11,7 +11,111 @@ CollegeBasketballData.com (free key, configured), ESPN's public endpoints
 subsystem exists for this app at all — there's no PFF product for college
 basketball.
 
-**Data-import automation pass (this doc's most recent update): the zip
+**Real bugs, live-confirmed after deploy (this doc's most recent update):
+the ESPN roster/box-file id mismatch, and DNP rows inflating games
+played.** The previous pass's ESPN-native pipeline extension shipped
+without live verification (standard caveat for this sandbox). Once
+actually run against real data, three real, connected bugs surfaced:
+
+1. **`load_espn_roster`'s 'sourceId' (ESPN's own roster endpoint's
+   athlete id) and the SportsDataverse box file's 'athleteSourceId' are
+   DIFFERENT id namespaces** - despite `load_espn_roster`'s own docstring
+   assuming they were the same. Every id-based join between them matched
+   NOTHING, for every player. Two distinct, confusing symptoms from the
+   same root cause: Player Search's team-filtered mode showed "No game
+   data found" for every player on every team/season (the roster-picked
+   player's id never matched anything in the box file's stats); All Teams
+   mode's STATS worked fine (it reads name/id straight from the box file,
+   bypassing the broken join for that direction) but bio fields (height/
+   weight/hometown) came back blank (the REVERSE lookup into the roster,
+   by the same broken id, also matched nothing - fell back to a stub
+   `pd.Series({'position': ...})` with nothing else set). **Fixed**: join
+   by NAME instead of id, in both directions - new `data.utils.
+   match_player_name` (clean_name_exact first, clean_name_for_merge
+   fallback for Jr./Sr./II/III inconsistencies - both helpers already
+   existed in data/utils.py, ported from NFL Scholar, unused until now).
+   `ui/tabs/player_search.py`'s `bio_idx`/`stats_idx` lookups use it; the
+   box file's OWN `athleteSourceId` (found via the name match) is then
+   used for all further box_df lookups (game log) instead of the
+   unreliable roster id, so it stays self-consistent going forward.
+
+2. **Matchup Analyzer's PLAYER panel fell back to CBBD almost constantly**
+   (caption: "Source: CollegeBasketballData.com (the free box file isn't
+   fresh enough for this team...)") - not because the data was actually
+   stale, but because the PREVIOUS version of `get_player_season_profile`
+   resolved the box file against CBBD's OWN team list
+   (`load_espn_season_player_box`, the CBBD-name-resolved twin
+   positional matchup defense uses) instead of ESPN's. Since the box
+   file's raw team names are themselves ESPN-sourced, they resolve far
+   more reliably against ESPN's own team list (`load_espn_teams`) than
+   against CBBD's independently-formatted one - opponents that failed to
+   resolve against CBBD's list got silently dropped, making a team's
+   LATEST game in that CBBD-resolved file look artificially old and
+   tripping the 10-day "not fresh enough" fallback for nearly every team.
+   Player Search never had this problem because it always resolved
+   against ESPN's own list via `load_espn_season_player_box_native`.
+   **Fixed**: `get_player_season_profile` was rewritten to use the SAME
+   ESPN-native architecture as Player Search (`load_espn_teams` +
+   `load_espn_roster` + `load_espn_season_player_box_native`, `team`
+   bridged to ESPN's spelling via `resolve_team_name`, `player_name`
+   matched via the new `match_player_name` - same id-mismatch fix as
+   bug 1 above, since this function ALSO joins ESPN's roster against the
+   box file) - falling back to CBBD only when ESPN's own team/roster/
+   box-file lookups genuinely come up empty for that player, not a date-
+   freshness guess. The team/player PICKER itself (Matchup Analyzer and
+   Compare both still pick from CBBD's `/teams/roster`) is UNCHANGED -
+   only the stats-lookup source changed. Function signature changed from
+   `(team, season, athlete_source_id, cbbd_athlete_id)` to `(team,
+   season, player_name, cbbd_athlete_id)` accordingly - both callers
+   (`ui/tabs/matchup_analyzer.py`, `ui/tabs/compare.py`) updated. Also
+   now returns a 5th value, `athlete_source_id` (the box file's OWN id
+   for this player when source=='espn') - callers use THIS, not the
+   caller's original id, for any further box_df lookups (Matchup
+   Analyzer's trend section), same self-consistency fix as bug 1.
+   Positional matchup defense's OWN CBBD-resolved fallback
+   (`load_positional_matchup_data`/`_is_espn_data_fresh_enough`) is
+   UNCHANGED and still a legitimate use of that pattern there - it needs
+   to line up with Team Defense's CBBD-sourced opponent list, a genuinely
+   different requirement from PLAYER's season-profile lookup.
+
+3. **DNP rows (0 or missing Minutes) were counting as "games played"**,
+   deflating every affected player's season averages - live-confirmed
+   against a real discrepancy (Abdi Bashir: 13.2 real PPG vs. 7.4 shown,
+   a ~44% gap consistent with several missed games from injury getting
+   counted as games). The raw box file carries a full row (0 points, 0
+   everything) for a player who was AVAILABLE for a game but didn't
+   actually play, not just for players who played -
+   `espn_player_season_stats_for_teams`'s `games = len(g)` counted every
+   row equally. Every stat SUM was unaffected either way (a DNP row
+   contributes zero regardless), only the denominator. **Fixed** at the
+   single shared choke point both box-file variants flow through -
+   `data.loaders._resolve_espn_box_team_names` now drops rows with
+   Minutes <= 0 or missing, so `games = len(g)` becomes correct
+   automatically everywhere downstream (season totals, game logs, trend
+   charts, positional matchup defense) without needing per-consumer
+   patches. (The earlier addition of OREB/DREB/FTM/FTA columns to the
+   CBBD-resolved box-file finisher, made to serve the now-replaced
+   CBBD-resolved version of `get_player_season_profile`, was reverted -
+   no longer needed since that function uses the ESPN-native twin now,
+   which already carried those columns.)
+
+**Verification**: this sandbox still can't reach live CBBD/ESPN/GitHub-
+release endpoints (same standing caveat), so this was verified via (a)
+direct unit tests of `match_player_name` and the DNP filter against
+synthetic data replicating the exact reported symptoms (including a
+suffix-inconsistent name and a deliberately-mismatched-id scenario), (b)
+a synthetic-payload test of the rewritten `get_player_season_profile`
+covering the ESPN-native success path and both CBBD-fallback paths, and
+(c) `streamlit.testing.v1.AppTest` runs of all three affected tabs
+end-to-end against a monkeypatched data layer, explicitly asserting the
+bugs' exact symptoms are gone (no "No game data found" in team-filtered
+Player Search, real height/weight in All Teams mode's bio strip, Matchup
+Analyzer's PLAYER panel resolving to "Source: free ESPN..." rather than
+the CBBD fallback caption). **Before trusting this**: run for real once
+the season starts and spot-check a player you know across all three tabs,
+same discipline every previous pass in this doc has applied.
+
+**Data-import automation pass: the zip
 file question, twice-weekly refresh, and extending the free box-score
 pipeline past Player Search.** User downloaded a local hoopR bulk-data zip
 (2003-current) intending to seed this app with historical data, and asked

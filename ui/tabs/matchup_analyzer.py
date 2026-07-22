@@ -6,15 +6,25 @@ rather than a team-vs-team score projection. Two independent columns: PLAYER
 trend, the same vocabulary Player Search uses) on the left, TEAM DEFENSE (any
 one team's defensive shape vs D-I, plus the positional matchup defense
 breakdown - what opposing Guards/Forwards/Centers have actually done against
-that team) on the right. Both columns now prefer the free ESPN/SportsDataverse
-season box file over CollegeBasketballData.com (season stats/game log for
-PLAYER via data.loaders.get_player_season_profile, positional defense for TEAM
-DEFENSE via load_positional_matchup_data) and fall back to CBBD automatically
-whenever that free source is missing, unreachable, or too stale for the
-selected team - the roster/player picker itself stays on CBBD's /teams/roster
-either way (cheap, not the quota-heavy part). PLAYER wasn't included when
-Player Search's CBBD-free pipeline was first built (see HANDOFF.md's
-"Player Search ONLY" scope note from that pass) - this is that follow-up.
+that team) on the right.
+
+PLAYER prefers ESPN's own live endpoints + the ESPN-native SportsDataverse
+season box file (data.loaders.get_player_season_profile - the SAME
+architecture Player Search uses) over CollegeBasketballData.com, falling back
+to CBBD only when ESPN's own team/roster/box-file lookups genuinely come up
+empty for that player - NOT a date-freshness guess. An earlier version of
+this used a DIFFERENT, CBBD-name-resolved box-file variant with a freshness
+heuristic and fell back to CBBD almost constantly in practice (the box
+file's ESPN-sourced team names resolve far more reliably against ESPN's own
+team list than CBBD's independently-formatted one) - see HANDOFF.md. The
+team/player PICKER itself still uses CBBD's /teams/roster either way (cheap,
+not the quota-heavy part, and TEAM DEFENSE still needs a CBBD key for its
+defensive-profile numbers regardless). TEAM DEFENSE's positional matchup
+breakdown is separate and unchanged - it prefers a DIFFERENT free ESPN file
+(load_positional_matchup_data, CBBD-name-resolved on purpose since it must
+line up with Team Defense's CBBD-sourced opponent list) with CBBD fallback
+on staleness, still a legitimate use of that pattern there.
+
 Deliberately not team-vs-team anymore: no venue/win-probability/projected-
 score/Four-Factors-matchup/style-profile/recent-form content, all of which
 lived here in an earlier "Team A vs Team B" version of this tab - removed
@@ -30,7 +40,7 @@ from config import AVAILABLE_SEASONS
 from data.loaders import (
     current_cbb_season, load_all_team_season_stats, load_team_roster, load_positional_matchup_data,
     get_player_season_profile, load_player_game_logs, load_conference_player_season_stats,
-    load_all_player_season_stats, load_teams,
+    load_all_player_season_stats, load_teams, load_espn_teams,
 )
 from data.transforms import (
     position_bucket, positional_defense_summary, positional_defense_trend,
@@ -108,8 +118,8 @@ def _render_player_panel(season, teams_df):
     sel_row = roster_df.iloc[labels.index(sel_label)]
 
     with st.spinner("Loading stats..."):
-        stats, include_net_rating, source, box_df = get_player_season_profile(
-            team_choice, season, sel_row.get('sourceId'), sel_row['id'],
+        stats, include_net_rating, source, box_df, athlete_source_id = get_player_season_profile(
+            team_choice, season, sel_row['name'], sel_row['id'],
         )
     if not stats:
         st.info("No season stats for this player yet.")
@@ -128,9 +138,15 @@ def _render_player_panel(season, teams_df):
         # box_df is the SAME already-downloaded file get_player_season_profile
         # used for `stats` above - a D-I-wide (or conference) group costs
         # nothing extra here, unlike the CBBD branch below (see
-        # espn_player_season_stats_for_teams' docstring).
-        conf_teams = teams_df.loc[teams_df['Conference'] == conf, 'Team'].tolist() if conf else None
-        group_df = espn_player_season_stats_for_teams(box_df, teams=None if compare_all else conf_teams)
+        # espn_player_season_stats_for_teams' docstring). Scoped against
+        # ESPN's OWN team list (not teams_df, which is CBBD-sourced) since
+        # box_df's 'Team' column uses ESPN's spelling - stats['Team'] IS
+        # that spelling for the selected player's own team already.
+        espn_conf_teams = None
+        if conf and not compare_all:
+            espn_teams_season = load_espn_teams(season)
+            espn_conf_teams = espn_teams_season.loc[espn_teams_season['Conference'] == conf, 'Team'].tolist()
+        group_df = espn_player_season_stats_for_teams(box_df, teams=espn_conf_teams)
         group_label = "D-I" if (compare_all or not conf) else conf
     elif compare_all:
         with st.spinner("Loading Division I player stats..."):
@@ -154,7 +170,7 @@ def _render_player_panel(season, teams_df):
     st.caption(
         "Source: free ESPN/SportsDataverse box file (refreshes twice weekly, zero CBBD-quota cost)."
         if source == 'espn' else
-        "Source: CollegeBasketballData.com (the free box file isn't fresh enough for this team yet — see HANDOFF.md)."
+        "Source: CollegeBasketballData.com (couldn't match this player against ESPN's own roster/box-score data yet — see HANDOFF.md)."
     )
 
     st.markdown(f"**{sel_row['name']} — last 10 games vs season average**")
@@ -163,9 +179,12 @@ def _render_player_panel(season, teams_df):
         # get_player_season_profile's season totals were themselves summed
         # from, so season stats and this trend can never disagree about
         # which games happened, unlike sourcing them from two different
-        # endpoints the way the CBBD branch below does.
+        # endpoints the way the CBBD branch below does. stats['Team']/
+        # athlete_source_id are the box file's OWN values (see
+        # get_player_season_profile's docstring) - self-consistent with
+        # box_df, unlike sel_row's CBBD-sourced id.
         mine = box_df[
-            (box_df['Team'] == team_choice) & (box_df['athleteSourceId'].astype(str) == str(sel_row.get('sourceId')))
+            (box_df['Team'] == stats['Team']) & (box_df['athleteSourceId'].astype(str) == str(athlete_source_id))
         ].copy()
     else:
         with st.spinner("Loading game log..."):
