@@ -204,13 +204,28 @@ def load_espn_teams(season=None):
     Full D-I team list (name, ESPN id, conference, colors) - built from the
     SAME standings payload Conference Standings already fetches
     (_fetch_standings_raw), NOT a separate/unverified /teams endpoint.
-    ESPN's team object shape is consistent across their API (id/
-    displayName/color/alternateColor show up on every embedded team dict,
-    not just in the standings response this app already trusts is live/
-    working) - reusing that payload avoids guessing at a brand new endpoint
-    for something this app already has a working call for. This is the
+    ESPN's team object shape is consistent across their API (id/location/
+    color/alternateColor show up on every embedded team dict, not just in
+    the standings response this app already trusts is live/working) -
+    reusing that payload avoids guessing at a brand new endpoint for
+    something this app already has a working call for. This is the
     canonical team reference for Player Search's CBBD-free pipeline -
     mirrors the role load_teams() plays for the CBBD-based path elsewhere.
+
+    'Team' uses ESPN's `location` field (short school name, e.g. "Duke"),
+    NOT `displayName` ("Duke Blue Devils") - confirmed via a real
+    downloaded SportsDataverse box-score file that its own team_location/
+    opponent_team_location columns are ALSO short-name format, and
+    data.utils.normalize_team_name has no mechanism to bridge "Duke" to
+    "Duke Blue Devils" (it strips punctuation/case and " university"-style
+    suffixes, not mascot names) - this was a REAL bug, confirmed live: it
+    made data.loaders._resolve_espn_box_team_names fail to resolve ANY row
+    against a displayName-keyed canonical list, silently returning an
+    empty DataFrame for a real, successfully-downloaded box file (see
+    HANDOFF.md for the full diagnosis). `DisplayName` is kept as a second
+    column (nicer for on-screen labels later) but must never be the join
+    key against the box file. Falls back to `displayName` for `Team` only
+    if `location` is somehow missing, better than dropping the team.
 
     id/color/alternateColor fields on the standings' embedded team object
     are NOT independently live-verified in this sandbox (only displayName/
@@ -218,8 +233,8 @@ def load_espn_teams(season=None):
     reasoned extension of an already-confirmed object, not a cold guess at
     a new shape, same standard this file holds every other addition to.
 
-    Returns columns: Team, EspnId, Conference, Color, AltColor. Empty
-    DataFrame if the standings payload is empty/unreachable.
+    Returns columns: Team, DisplayName, EspnId, Conference, Color,
+    AltColor. Empty DataFrame if the standings payload is empty/unreachable.
     """
     season = season or current_cbb_season()
     data = _fetch_standings_raw(season)
@@ -233,11 +248,12 @@ def load_espn_teams(season=None):
             team = e.get('team') or {}
             color = team.get('color')
             alt = team.get('alternateColor')
-            name = team.get('displayName') or team.get('location')
+            name = team.get('location') or team.get('displayName')
             if not name:
                 continue
             rows.append({
                 'Team': name,
+                'DisplayName': team.get('displayName') or name,
                 'EspnId': team.get('id'),
                 'Conference': conf_name,
                 'Color': f"#{color}" if color else None,
@@ -1060,19 +1076,30 @@ def _fetch_espn_season_box_raw_cached(season, _bucket):
     reasoning as everywhere else in this module) - NOT independently live-
     verified, same caveat as the rest of this file (see module docstring).
 
-    Empty DataFrame on any failure (network, parse, or an empty file).
+    RAISES on any failure (network, HTTP status, parse, or an unexpectedly
+    empty file) instead of swallowing it into an empty DataFrame - letting
+    the exception propagate out of this st.cache_data-decorated function
+    means Streamlit does NOT cache the failure (only successful returns get
+    memoized), so a transient failure (a network blip, the CDN briefly
+    erroring) gets retried on the NEXT call instead of being locked in as a
+    false "no data" for the rest of the twice-weekly cache window. Hit this
+    exact gap for real once already (see HANDOFF.md) - every caller below
+    catches this at the public-wrapper level (NOT `@st.cache_data`-
+    decorated) and degrades to an empty DataFrame for the UI, so external
+    behavior is unchanged - only the CACHING of a failure is fixed.
+
     Twice-weekly refresh + disk persistence via `_twice_weekly_bucket()`
     (bumped from `_week_bucket()` on request - a plain file re-download
     costs nothing extra, no CBBD-style quota is at stake).
     """
-    try:
-        resp = requests.get(ESPN_SEASON_PLAYER_BOX_URL.format(season=season), timeout=45)
-        resp.raise_for_status()
-        raw = pd.read_parquet(io.BytesIO(resp.content))
-    except Exception:
-        return pd.DataFrame()
+    resp = requests.get(
+        ESPN_SEASON_PLAYER_BOX_URL.format(season=season), timeout=45,
+        headers={"User-Agent": "Mozilla/5.0 (compatible; CBBScholar/1.0)"},
+    )
+    resp.raise_for_status()
+    raw = pd.read_parquet(io.BytesIO(resp.content))
     if raw is None or raw.empty:
-        return pd.DataFrame()
+        raise ValueError(f"SportsDataverse season box file for {season} parsed to an empty DataFrame")
 
     def col(name):
         return raw[name] if name in raw.columns else pd.Series([None] * len(raw), index=raw.index)
@@ -1151,11 +1178,11 @@ def _load_espn_season_player_box_cached(season, _bucket):
     athleteSourceId, name, Position, Minutes, Points, Rebounds, Assists,
     Steals, Blocks, Turnovers, FGM, FGA, 3PM, 3PA (unchanged from before
     this function was refactored - positional matchup defense's contract
-    with this function is untouched). Empty DataFrame on any failure.
+    with this function is untouched). Raises on failure - see
+    `_fetch_espn_season_box_raw_cached`'s docstring for why; caught by the
+    public wrapper below, not here (so a real failure doesn't get cached).
     """
     raw_box = _fetch_espn_season_box_raw_cached(season, _bucket)
-    if raw_box.empty:
-        return pd.DataFrame()
     teams_df = load_teams(season)
     canonical = teams_df['Team'].dropna().tolist() if not teams_df.empty else []
     out = _resolve_espn_box_team_names(raw_box, canonical)
@@ -1171,10 +1198,17 @@ def load_espn_season_player_box(season=None):
     Public wrapper - resolves `season` and threads `_twice_weekly_bucket()`
     through to `_load_espn_season_player_box_cached` (see its docstring for
     the full field-level breakdown and freshness caveats). Powers
-    positional matchup defense.
+    positional matchup defense. Catches any exception the cached chain
+    raises (network/parse failure - see `_fetch_espn_season_box_raw_cached`)
+    and degrades to an empty DataFrame here, OUTSIDE any `@st.cache_data`
+    boundary, so a transient failure isn't memoized as "no data" for the
+    rest of the cache window.
     """
     season = season or current_cbb_season()
-    return _load_espn_season_player_box_cached(season, _twice_weekly_bucket())
+    try:
+        return _load_espn_season_player_box_cached(season, _twice_weekly_bucket())
+    except Exception:
+        return pd.DataFrame()
 
 
 @st.cache_data(show_spinner=False, persist="disk")
@@ -1192,13 +1226,17 @@ def _load_espn_season_player_box_native_cached(season, _bucket):
 
     Returns columns: GameId, Date, Team, Opponent, Home/Away,
     athleteSourceId, name, Position, Minutes, Points, Rebounds, OREB, DREB,
-    Assists, Steals, Blocks, Turnovers, FGM, FGA, 3PM, 3PA, FTM, FTA. Empty
-    DataFrame on any failure.
+    Assists, Steals, Blocks, Turnovers, FGM, FGA, 3PM, 3PA, FTM, FTA.
+    Raises on failure - see `_fetch_espn_season_box_raw_cached`'s docstring
+    for why; caught by the public wrapper below, not here.
     """
     raw_box = _fetch_espn_season_box_raw_cached(season, _bucket)
-    if raw_box.empty:
-        return pd.DataFrame()
-    teams_df = load_espn_teams()
+    # `season` passed through here - this was a real bug: calling
+    # load_espn_teams() with no argument silently used current_cbb_season()
+    # regardless of which season was actually being requested, giving the
+    # wrong team/conference list (and wrong resolution) for any historical
+    # season lookup.
+    teams_df = load_espn_teams(season)
     canonical = teams_df['Team'].dropna().tolist() if not teams_df.empty else []
     return _resolve_espn_box_team_names(raw_box, canonical)
 
@@ -1212,10 +1250,18 @@ def load_espn_season_player_box_native(season=None):
     same per-game data summed - see data.transforms.
     espn_player_season_stats_for_teams), unlike the CBBD path, which needs
     two separate endpoints (/stats/player/season and /games/players) for
-    the same two things.
+    the same two things. Catches any exception the cached chain raises
+    (network/parse failure, OR the season genuinely not being published -
+    see ESPN_SEASON_PLAYER_BOX_URL's module docstring) and degrades to an
+    empty DataFrame here, OUTSIDE any `@st.cache_data` boundary, so a
+    transient failure isn't memoized as "no data" for the rest of the
+    cache window.
     """
     season = season or current_cbb_season()
-    return _load_espn_season_player_box_native_cached(season, _twice_weekly_bucket())
+    try:
+        return _load_espn_season_player_box_native_cached(season, _twice_weekly_bucket())
+    except Exception:
+        return pd.DataFrame()
 
 
 def load_positional_matchup_data(team, season=None, max_recent_games=20):

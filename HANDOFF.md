@@ -11,7 +11,102 @@ CollegeBasketballData.com (free key, configured), ESPN's public endpoints
 subsystem exists for this app at all — there's no PFF product for college
 basketball.
 
-**Player Search CBBD-free pipeline (this doc's most recent update):** on
+**Real bug fix - Player Search returned "no data" for every season (this
+doc's most recent update):** the CBBD-free pipeline shipped last pass
+failed completely in real use. Root-caused with ACTUAL live verification
+this time (not the usual "reasoned but unverified" caveat) - this dev
+sandbox's egress proxy explicitly denies `site.api.espn.com` and GitHub
+release-asset hosts (confirmed via the proxy's own status endpoint:
+`"kind": "connect_rejected", "detail": "gateway answered 403 to CONNECT
+(policy denial or upstream failure)"`), but `WebFetch` routes through a
+different path that reached `api.github.com` and even downloaded real
+release-asset binaries (saved to disk, then parsed here with real
+pandas/pyarrow) - genuine, not synthetic, verification.
+
+**Two real bugs found and fixed, both in `data/loaders.py`:**
+1. **`load_espn_teams()` used ESPN's `displayName` field ("Duke Blue
+   Devils") as the canonical 'Team' name, but the SportsDataverse box file's
+   own `team_location` column (confirmed via a real downloaded
+   `player_box_2026.parquet` - 196,876 rows, genuinely current 2025-26
+   season data, real player names like Cameron Boozer) uses the SHORT
+   school name ("Duke") - and `data.utils.normalize_team_name` has no
+   mechanism to bridge the two (it strips punctuation/case/"University"-
+   style suffixes, not mascot names). Every single row failed to resolve
+   against the canonical list, `_resolve_espn_box_team_names` dropped
+   every row via its `.dropna(subset=['Team','Opponent','Date'])`, and the
+   whole pipeline silently returned an empty DataFrame - for EVERY season,
+   because the bug was in the team-name JOIN, not in the season's data
+   availability, which is what the empty result misleadingly suggested.
+   Fixed: `load_espn_teams()` now uses `location` first, `displayName`
+   only as a fallback (and keeps `DisplayName` as a separate column for
+   nicer on-screen labels later). Reproduced and confirmed fixed with a
+   standalone `resolve_team_name()` test before touching the real pipeline,
+   then re-verified end to end against the real downloaded file (see
+   below).
+2. **`_load_espn_season_player_box_native_cached` called `load_espn_teams()`
+   with no `season` argument**, silently using `current_cbb_season()`
+   regardless of which season was actually being requested - wrong
+   team/conference list for any historical-season lookup. Fixed to pass
+   `season` through.
+
+**Also fixed while in there - a real caching-robustness gap**: every
+`@st.cache_data(persist="disk")` loader in this file that swallows
+exceptions into `return pd.DataFrame()` has always had this latent risk,
+but the ESPN-native box pipeline is where it got fixed first: a single
+transient failure (a network blip, the CDN briefly erroring) was getting
+memoized by Streamlit's cache JUST as durably as a real success, for the
+entire twice-weekly window, with no automatic retry until someone clicked
+"Refresh league-wide data." Fixed by having `_fetch_espn_season_box_raw_cached`
+RAISE on failure instead of returning empty - Streamlit does not cache an
+exception, only a successful return - with the exception caught at the
+public-wrapper level (`load_espn_season_player_box`/`_native`, NOT
+`@st.cache_data`-decorated), so external behavior (empty DataFrame on
+failure) is unchanged but a transient failure now retries on the next call
+instead of being locked in. Worth applying the same pattern to this file's
+OTHER `except Exception: return pd.DataFrame()` cached loaders if this
+class of bug shows up again elsewhere - not done this pass (scope
+discipline), but now a known, named risk instead of a surprise.
+
+**What real verification actually confirmed** (downloaded and parsed with
+real pandas/pyarrow, not assumed): `player_box_2026.parquet` genuinely
+exists and is current (game dates through 2026-04-06, real players, real
+box lines); the exact same column schema this app's code already assumed
+(`field_goals_made`, `three_point_field_goals_attempted`,
+`free_throws_made/attempted`, `offensive_rebounds`/`defensive_rebounds`,
+`athlete_id`, `athlete_position_name`, `team_location`,
+`opponent_team_location`, etc. - EVERY one of them, including the ones
+this app's own prior passes explicitly flagged as unverified guesses);
+running the real (fixed) `data.loaders`/`data.transforms` pipeline against
+the real file produces correct results end to end - real Duke roster
+(Cameron Boozer, Isaiah Evans, Caleb Foster, Cayden Boozer...), sane
+Usage%/eFG% ranges, a correct 35-3 W/L record derived purely from summed
+box-score points (no separate schedule endpoint), and every spot-checked
+team (UConn, North Carolina, Kentucky, Kansas, Gonzaga, Houston) resolving
+and aggregating correctly. **Still NOT verified**: the exact response
+shape of `_fetch_standings_raw`'s live ESPN standings call specifically
+for `id`/`color`/`alternateColor` on the embedded team object (site.api.
+espn.com itself stayed unreachable through every path tried, including
+WebFetch) - `load_espn_teams()`'s EspnId/Color/AltColor columns are still
+the same "sibling of an already-confirmed field" reasoning as before, not
+independently confirmed. Also unverified: whether Streamlit Community
+Cloud's own outbound network path to GitHub behaves identically to what
+WebFetch showed here - the file's existence and schema are proven, but
+the exact HTTP path a deployed Streamlit app takes to fetch it was not
+independently re-tested post-fix.
+
+**On research method**: large, array-heavy GitHub API JSON responses
+(e.g. listing all 100+ release assets) came back INCONSISTENT and
+sometimes flatly wrong across repeated identical `WebFetch` calls -
+almost certainly the intermediate summarization model truncating/
+mis-reading a large payload, not the underlying data changing. Trust a
+`WebFetch` list-enumeration result to actually be complete; don't trust it
+to be COMPLETE for large arrays. Confirmed-reliable pattern instead:
+query one specific known resource at a time (a single release tag, a
+single asset's direct download URL) - small, bounded responses came back
+correct and consistent every time. Prefer that pattern over "list
+everything and scan it" for any future GitHub API research in this app.
+
+**Player Search CBBD-free pipeline:** on
 request (reduce reliance on CBBD's 1,000-call/month free tier for the
 tab that gets used most), Player Search was rebuilt to source EVERYTHING
 from ESPN's public endpoints + a free SportsDataverse season box-score
