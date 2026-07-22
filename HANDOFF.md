@@ -994,6 +994,15 @@ file's freshness can be checked for real.
   not a huge deal"). Don't tighten these back to a short TTL without
   asking first; the sidebar's manual refresh button is the intended way to
   get fresher data on demand.
+- **Every completed round of upgrades gets pushed to `main`**, not just
+  parked on a feature branch — explicitly requested standing instruction,
+  not a one-time approval. Develop on the feature branch as usual, verify
+  the changes (tests/AppTest run, this doc updated), then fast-forward
+  `main` to it and push, same pattern as every pass in this doc's history.
+  Still confirm the risky-git-operation basics (fetch first, prefer
+  fast-forward, don't clobber unrelated commits) - this removes the need
+  to separately ASK before the main-push step each time, not the need to
+  do that step carefully.
 
 ## 9. Repo & running on another machine
 
