@@ -50,9 +50,9 @@ efficiency ratings, rankings — without the bot-wall problem.
 | Bracketology | CollegeBasketballData.com API `/ratings/adjusted` (simplified seed-line projection) | **Live**, explicitly not a committee simulation |
 | Transfer Portal | CollegeBasketballData.com API `/recruiting/players`, `/recruiting/portal` | **Live** |
 | Fantasy & Pools | CollegeBasketballData.com API stats + local scoring config | **Live** — season totals only |
-| Matchup Analyzer | CollegeBasketballData.com API — `/stats/player/season`, `/stats/team/season`, `/games/players`, `/teams/roster` — PLUS a free ESPN/SportsDataverse season file, preferred first, for the positional defense breakdown | **Live** — a two-column player-vs-team-defense prep tool (not a team-vs-team projection anymore; `/ratings/adjusted` is no longer used here). The positional defense breakdown tries the free ESPN/SportsDataverse file first (zero CBBD-quota cost) and falls back to `/games` + `/games/players` scoped to the selected team's actual opponents (not a full-D-I pull) whenever that free source is stale/unavailable — see "ESPN/SportsDataverse fallback" below and HANDOFF.md §2/§3 |
+| Matchup Analyzer | A free ESPN/SportsDataverse season file, preferred first for BOTH columns, falling back to CollegeBasketballData.com API — `/stats/player/season`, `/stats/team/season`, `/games/players` — plus `/teams/roster` for the player picker either way (cheap, not the quota-heavy part) | **Live** — a two-column player-vs-team-defense prep tool (not a team-vs-team projection anymore; `/ratings/adjusted` is no longer used here). Both the PLAYER panel (season stats + last-10-games trend, via `data.loaders.get_player_season_profile`) and TEAM DEFENSE's positional breakdown try the free ESPN/SportsDataverse file first (zero CBBD-quota cost) and fall back to CBBD scoped to the selected team's actual opponents (not a full-D-I pull) whenever that free source is stale/unavailable — see "ESPN/SportsDataverse fallback" below and HANDOFF.md §2/§3 |
 | Live Odds | The Odds API `basketball_ncaab` | **Live** (shows "no games" in the off-season — correct behavior) |
-| Player Compare | CollegeBasketballData.com API | **Live** |
+| Player Compare | A free ESPN/SportsDataverse season file, preferred first, falling back to CollegeBasketballData.com API — `/teams/roster` for the player picker either way | **Live** — both players' season-stat profiles resolve independently via `data.loaders.get_player_season_profile`, so one player can come from the free file while the other falls back to CBBD if only one team's ESPN coverage is stale |
 
 ## Correction: recruiting rankings gap (resolved)
 
@@ -90,17 +90,24 @@ is wired as a manual, click-triggered fetch only (24h cache) — never
 called automatically on tab load or on any schedule. See
 `ui/tabs/net_resume.py`.
 
-## ESPN/SportsDataverse fallback for positional matchup defense
+## ESPN/SportsDataverse fallback for positional matchup defense, PLAYER season profiles, and Player Compare
 
-`data.loaders.load_positional_matchup_data` (the data source behind
-Matchup Analyzer's Team Defense positional breakdown) now tries a free,
-keyless alternative FIRST before falling back to the CBBD approach
+`data.loaders.load_positional_matchup_data` (Matchup Analyzer's Team
+Defense positional breakdown) and `data.loaders.get_player_season_profile`
+(Matchup Analyzer's PLAYER panel and Player Compare, added later) both try
+a free, keyless alternative FIRST before falling back to the CBBD approach
 described above: **SportsDataverse's published season file**
-(`sportsdataverse/sportsdataverse-data` on GitHub Releases — the Python
-sibling of the R `hoopR` package, same maintainers as `cfbfastR`). It
-publishes one parquet file per season with every D-I team's game-by-game
-player box scores already in it — ESPN-sourced, no API key, no CBBD-style
-monthly quota, one file download instead of a per-opponent fan-out.
+(`sportsdataverse/sportsdataverse-data` on GitHub Releases — this really is
+the actual published output of `sportsdataverse/hoopR-mbb-data`'s own R
+pipeline, confirmed live: that repo has no releases of its own, it's the
+processing code, not a data host). It publishes one parquet file per season
+with every D-I team's game-by-game player box scores already in it —
+ESPN-sourced, no API key, no CBBD-style monthly quota, one file download
+instead of a per-opponent fan-out or a per-player endpoint call. If you
+have a full historical hoopR/SportsDataverse export sitting locally (e.g.
+downloaded directly from the `hoopR` R package or GitHub), you don't need
+it for this app — it already fetches this same data per-season, live, on
+demand; a local bulk file has no wiring in this app to plug into.
 
 **Why CBBD stays as the fallback, not the other way around:** this file's
 freshness depends entirely on SportsDataverse's OWN scrape/publish
@@ -154,7 +161,7 @@ file download, cached weekly, covers every team/matchup at once):
 | What | Cost | Notes |
 |---|---|---|
 | Shared baseline (ratings + all-team stats) | ~2 calls/week | Powers Team Efficiency, Four Factors, Team Defense profile, score projection — same 2 calls regardless of how many teams/matchups you look at |
-| Browsing one team (roster/stats/schedule/game log) | ~2-4 calls | Player Search, Compare, Matchup Analyzer Overview — cached 1-6h, so repeat visits same day are often free |
+| Browsing one team (roster/stats/schedule/game log) | ~2-4 calls, often 0 | Compare and Matchup Analyzer's PLAYER panel now prefer the free ESPN/SportsDataverse file (`data.loaders.get_player_season_profile`) — CBBD is only actually called when that free source is stale/unavailable for the selected team. Player Search stays fully CBBD-free as before. The roster picker itself (`/teams/roster`) is still CBBD either way — cheap, ~1 call, not the quota-heavy part |
 | Positional Matchup Defense, ONE team, first time this week | up to ~1 + 2×N calls | N = the "games per team" slider (default 20, capped specifically because of this quota) — e.g. cap=20 → up to 41 calls |
 | Positional Matchup Defense, a full two-team matchup, first time | up to ~2×(1+2N) calls, LESS if the teams share opponents | In-conference matchups share most of their schedule, so real cost is usually well below the worst case |
 | Positional Matchup Defense, any REPEAT view this week (same team) | 0 calls | Full cache hit |

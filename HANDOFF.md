@@ -11,8 +11,101 @@ CollegeBasketballData.com (free key, configured), ESPN's public endpoints
 subsystem exists for this app at all — there's no PFF product for college
 basketball.
 
-**Real bug fix - Player Search returned "no data" for every season (this
-doc's most recent update):** the CBBD-free pipeline shipped last pass
+**Data-import automation pass (this doc's most recent update): the zip
+file question, twice-weekly refresh, and extending the free box-score
+pipeline past Player Search.** User downloaded a local hoopR bulk-data zip
+(2003-current) intending to seed this app with historical data, and asked
+how to get it in plus whether the app can auto-refresh twice a week once
+the season starts. Two findings, not a code problem: (1) the zip is
+unnecessary and was never uploaded - confirmed live via WebFetch that
+`sportsdataverse/hoopR-mbb-data` (the repo the user's data actually came
+from) has ZERO releases of its own - it's the R/Python processing
+pipeline, not a data host. The parquet files it produces get published to
+`sportsdataverse/sportsdataverse-data`'s GitHub Releases instead, which is
+the exact URL already wired into this file (`ESPN_SEASON_PLAYER_BOX_URL`).
+This app already pulls per-season files on demand over HTTPS; no bulk
+download/upload was ever needed. (2) The twice-weekly auto-refresh the
+user pictured already existed (`_twice_weekly_bucket()`) but only powered
+Player Search and positional matchup defense - everywhere else was still
+CBBD-only, refreshed weekly, and quota-metered. Nuance explained to the
+user: this refresh is lazy-on-next-visit (Streamlit has no background
+cron), not a literal push while the app sits closed - normally
+indistinguishable from "automatic" for personal use, but not literally
+continuous.
+
+Season range trimmed to 2023-2027 (`config.py`'s `AVAILABLE_SEASONS`/
+`AVAILABLE_SEASONS_WITH_UPCOMING`, previously 2020-2027) per explicit
+request - personal use only needs recent seasons visible/selectable
+app-wide. Both data sources still support any season back to ~2003 if
+this window is ever widened again - a UI-visibility trim only, not a
+data-source limitation.
+
+**Extended the free ESPN/SportsDataverse pipeline to Matchup Analyzer's
+PLAYER panel and Player Compare** (`data.loaders.get_player_season_profile`,
+new) - both tabs were explicitly scoped OUT when Player Search's CBBD-free
+pipeline was first built (see this doc's "Player Search ONLY" note from
+that pass); this is the requested follow-up. The new function mirrors
+`load_positional_matchup_data`'s already-proven "ESPN first, CBBD fallback
+whenever the free file is missing, unreachable, or lagging this team's
+actual schedule by more than 10 days" pattern (`_is_espn_data_fresh_enough`,
+reused unchanged) - CBBD is only actually CALLED when the free path can't
+be used, which is the real quota saving, not just a preference order.
+Returns a CBBD-shaped stats dict either way (via
+`espn_player_season_stats_for_teams`, reused unchanged from Player Search)
+so `player_percentile_rows`/`player_profile_values`/Compare's own
+`_numeric_stat_map` need zero source-specific branching beyond the
+`include_net_rating` flag this function also returns (False for ESPN, same
+reasoning as Player Search: box scores alone can't produce Net Rating).
+Matchup Analyzer's PLAYER panel also pulls its "last 10 games" trend from
+the SAME already-downloaded box file when ESPN is used (no second CBBD
+`/games/players` call, and season totals + game log can never disagree
+about which games happened, unlike sourcing them from two different
+endpoints); Compare's three sections (stat tiles, delta table, radar) now
+resolve both players' profiles ONCE in `render()` and thread the result
+down as a parameter instead of each section independently re-fetching,
+which the CBBD-only version did.
+
+One real, deliberate exception to this file's established "`data/loaders.py`
+is raw ingestion only, never imports `data/transforms.py`" layering (see
+§1 Architecture): `get_player_season_profile` needs
+`espn_player_season_stats_for_teams` to shape ESPN rows into the CBBD dict
+shape, and reusing it beats a second, independently-driftable copy of that
+Usage%/eFG%/TS% computation living in loaders.py instead - documented
+inline at the import site.
+
+Also extended `_load_espn_season_player_box_cached` (the CBBD-name-resolved
+twin positional matchup defense already used) to keep OREB/DREB/FTM/FTA -
+it previously dropped them (positional defense never needed them), which
+would have silently degraded `get_player_season_profile`'s ESPN branch to
+the FTA-free Usage% approximation and no FT%/rebound-split every single
+time, purely because of which finisher function got reused, not real data
+unavailability. Existing callers are unaffected (they don't select the new
+columns).
+
+**Not independently live-verified** - same standing sandbox caveat as
+every ESPN/SportsDataverse touchpoint in this app (this build
+environment's egress proxy still returns 403/"not enabled for this
+session" on both api.collegebasketballdata.com and GitHub release-asset
+downloads, confirmed again this pass). What WAS done: confirmed via
+WebFetch that `sportsdataverse/hoopR-mbb-data` has no releases of its own
+(so `sportsdataverse-data` really is the correct, current URL, not a
+guess); a synthetic-payload unit test of `get_player_season_profile`
+covering all three branches (ESPN-fresh, CBBD-fallback-on-staleness,
+CBBD-fallback-on-empty-file) confirmed the resolver's own logic; and a
+`streamlit.testing.v1.AppTest` run of both changed tabs end-to-end
+(season/team/player selectbox interactions, the D-I comparison checkbox)
+against a monkeypatched data layer confirmed zero exceptions in the actual
+UI wiring - including the case where one Compare player resolves to ESPN
+and the other falls back to CBBD (a real, un-mocked CBBD call in that run
+correctly degraded to an empty result rather than crashing, since this
+sandbox can't reach CBBD live either). **Before trusting this**: run
+`streamlit run app.py` for real (real network, real cbbd_api_key) once the
+2026-27 season is underway, open Matchup Analyzer's PLAYER panel and
+Player Compare for a team with recent games, and confirm the new "Source:"
+caption says ESPN (not a permanent CBBD fallback) and the numbers look
+right.
+
+**Real bug fix - Player Search returned "no data" for every season:** the CBBD-free pipeline shipped last pass
 failed completely in real use. Root-caused with ACTUAL live verification
 this time (not the usual "reasoned but unverified" caveat) - this dev
 sandbox's egress proxy explicitly denies `site.api.espn.com` and GitHub

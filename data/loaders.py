@@ -24,6 +24,15 @@ import pandas as pd
 import streamlit as st
 
 from data.utils import resolve_team_name
+# One deliberate exception to this file's "raw ingestion only" layering
+# (see this module's docstring and HANDOFF.md's Architecture section,
+# which frames data/transforms.py as pure compute over already-loaded
+# data.loaders output, never the reverse): get_player_season_profile below
+# reuses espn_player_season_stats_for_teams so the ESPN-sourced path
+# computes Usage%/eFG%/TS% exactly the way Player Search already does,
+# rather than a second, independently-driftable copy of that logic living
+# here instead - see get_player_season_profile's docstring.
+from data.transforms import espn_player_season_stats_for_teams
 
 NCAA_NET_RANKINGS_URL = "https://www.ncaa.com/rankings/basketball-men/d1/ncaa-mens-basketball-net-rankings"
 
@@ -1175,10 +1184,17 @@ def _load_espn_season_player_box_cached(season, _bucket):
     Player Search's CBBD-free pipeline, so the file isn't fetched twice).
 
     Returns columns: GameId, Date, Team, Opponent, Home/Away,
-    athleteSourceId, name, Position, Minutes, Points, Rebounds, Assists,
-    Steals, Blocks, Turnovers, FGM, FGA, 3PM, 3PA (unchanged from before
-    this function was refactored - positional matchup defense's contract
-    with this function is untouched). Raises on failure - see
+    athleteSourceId, name, Position, Minutes, Points, Rebounds, OREB, DREB,
+    Assists, Steals, Blocks, Turnovers, FGM, FGA, 3PM, 3PA, FTM, FTA.
+    OREB/DREB/FTM/FTA were added (originally CBBD-name-resolved rows didn't
+    carry them - positional matchup defense never needed them) so
+    `get_player_season_profile`'s CBBD-resolved season-stat profile (Matchup
+    Analyzer's PLAYER panel, Player Compare) gets the same fidelity Player
+    Search's ESPN-native twin already has (FT%/FT-rate/ORB-DRB split/full
+    Usage%), instead of silently degrading to the FTA-free approximation
+    every time just because this finisher happened to drop them - existing
+    callers (positional matchup defense) are unaffected, they just don't
+    select the new columns. Raises on failure - see
     `_fetch_espn_season_box_raw_cached`'s docstring for why; caught by the
     public wrapper below, not here (so a real failure doesn't get cached).
     """
@@ -1189,7 +1205,8 @@ def _load_espn_season_player_box_cached(season, _bucket):
     if out.empty:
         return out
     keep_cols = ['GameId', 'Date', 'Team', 'Opponent', 'Home/Away', 'athleteSourceId', 'name', 'Position',
-                 'Minutes', 'Points', 'Rebounds', 'Assists', 'Steals', 'Blocks', 'Turnovers', 'FGM', 'FGA', '3PM', '3PA']
+                 'Minutes', 'Points', 'Rebounds', 'OREB', 'DREB', 'Assists', 'Steals', 'Blocks', 'Turnovers',
+                 'FGM', 'FGA', '3PM', '3PA', 'FTM', 'FTA']
     return out[keep_cols]
 
 
@@ -1346,6 +1363,75 @@ def _is_espn_data_fresh_enough(team, season, team_games_espn, max_lag_days=10):
         return (cbbd_latest - espn_latest).days <= max_lag_days
     except Exception:
         return False
+
+
+def get_player_season_profile(team, season, athlete_source_id, cbbd_athlete_id):
+    """
+    One player's season-stats profile, preferring the free ESPN/
+    SportsDataverse season box file over CBBD's /stats/player/season - the
+    same "ESPN first, CBBD fallback whenever the free file is missing,
+    unreachable, or lagging `team`'s actual CBBD-confirmed schedule"
+    pattern load_positional_matchup_data already established for
+    positional defense (see its docstring and _is_espn_data_fresh_enough),
+    applied here to season totals instead of per-game positional data.
+    Shared by Matchup Analyzer's PLAYER panel and Player Compare - both
+    stayed CBBD-only when Player Search's CBBD-free pipeline was first
+    built (HANDOFF.md's explicit "Player Search ONLY" scope note from that
+    pass); this is that follow-up, separately requested later specifically
+    to get more of the app onto the twice-weekly, quota-free refresh cycle.
+
+    CBBD is only actually CALLED (get_player_season_stats, the one real
+    API cost this function can incur) when the ESPN path can't be used -
+    this is the real quota saving, not just a source preference: a fresh-
+    enough ESPN file makes ZERO CBBD calls for this player's own stats.
+
+    Returns (stats_dict, include_net_rating, source, box_df):
+    - stats_dict is already in the CBBD dict shape data.transforms.
+      player_percentile_rows/player_profile_values (and Compare's own
+      _numeric_stat_map) expect regardless of which source produced it -
+      callers don't need source-specific branching for the shape itself.
+    - include_net_rating: False when source == 'espn' (box scores alone
+      can't produce Net Rating - same reasoning as Player Search's own
+      pipeline), True for 'cbbd'. Pass straight through to
+      player_percentile_rows/player_profile_values.
+    - source: 'espn' or 'cbbd' - a caller that also needs a MATCHING
+      comparison-group DataFrame should build it from the same place:
+      espn_player_season_stats_for_teams(box_df, teams=...) for 'espn',
+      the existing load_conference_player_season_stats/
+      load_all_player_season_stats(season) for 'cbbd' (unchanged, not
+      touched by this function) - mixing an ESPN-sourced player row
+      against a CBBD-sourced group would compare two slightly different
+      stat definitions.
+    - box_df: the already-downloaded CBBD-name-resolved ESPN season file
+      (see load_espn_season_player_box - the SAME twice-weekly-cached
+      download positional matchup defense already triggers for this team,
+      not a second one) when source == 'espn', so callers can build a
+      group DataFrame or a per-game trend without re-fetching anything.
+      None when source == 'cbbd'.
+
+    Falls back to CBBD (stats may be {} if the player has no CBBD stats
+    yet either, exactly as before this function existed) whenever: the
+    ESPN file is empty/unreachable, `team` has no rows in it, its coverage
+    of `team` isn't fresh enough, or `athlete_source_id` isn't found among
+    `team`'s ESPN rows (e.g. a walk-on ESPN hasn't picked up yet). Every
+    one of these is a pure fallback to the ALREADY-PROVEN CBBD path used
+    before this change - can only ever help (twice-weekly refresh instead
+    of weekly, zero CBBD-quota cost) or be a silent no-op, never regress
+    either tab's reliability.
+    """
+    season = season or current_cbb_season()
+    box_df = load_espn_season_player_box(season)
+    if not box_df.empty and 'Team' in box_df.columns:
+        team_rows = box_df[box_df['Team'] == team]
+        if not team_rows.empty and _is_espn_data_fresh_enough(team, season, team_rows):
+            team_stats = espn_player_season_stats_for_teams(box_df, team)
+            match = (
+                team_stats[team_stats['athleteSourceId'].astype(str) == str(athlete_source_id)]
+                if not team_stats.empty else team_stats
+            )
+            if not match.empty:
+                return match.iloc[0].to_dict(), False, 'espn', box_df
+    return get_player_season_stats(team, season, cbbd_athlete_id), True, 'cbbd', None
 
 
 def clear_league_wide_caches():

@@ -104,9 +104,14 @@ TEAM_CONFIG = {
 MASTER_TEAMS_LIST = sorted(list(TEAM_CONFIG.keys()))
 CONFERENCES = sorted(set(t['conference'] for t in TEAM_CONFIG.values()))
 
-# Season depth - matches NFL Scholar/CFB Scholar's own history window.
-AVAILABLE_SEASONS_WITH_UPCOMING = [2027, 2026, 2025, 2024, 2023, 2022, 2021, 2020]
-AVAILABLE_SEASONS = [2026, 2025, 2024, 2023, 2022, 2021, 2020]
+# Season depth - trimmed to 2023+ on request (personal use only needs
+# recent seasons usable/visible; older seasons dropped from every season
+# dropdown app-wide rather than left in as dead weight). Both this app's
+# CBBD calls and the free ESPN/SportsDataverse season-box pipeline
+# (data/loaders.py) support any season back to ~2003 if this window is
+# ever widened again - this is a UI-visibility limit, not a data-source one.
+AVAILABLE_SEASONS_WITH_UPCOMING = [2027, 2026, 2025, 2024, 2023]
+AVAILABLE_SEASONS = [2026, 2025, 2024, 2023]
 
 # NCAAB player-prop market keys The Odds API documents. Unavailable markets
 # are silently omitted rather than erroring the request (confirmed live in

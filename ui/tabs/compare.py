@@ -1,12 +1,23 @@
-"""Player Compare tab: head-to-head player comparison, live via
-CollegeBasketballData.com. Reuses Player Search's team-first loaders.
-(Named "Player Compare", not "Team/Player Compare" - it only ever compared
-two players, never two teams, so the old label overpromised.)"""
+"""Player Compare tab: head-to-head player comparison. Reuses Player
+Search's team-first loaders. (Named "Player Compare", not "Team/Player
+Compare" - it only ever compared two players, never two teams, so the old
+label overpromised.)
+
+Season stats now prefer the free ESPN/SportsDataverse season box file over
+CollegeBasketballData.com, via data.loaders.get_player_season_profile - the
+same "ESPN first, CBBD fallback whenever the free file is missing,
+unreachable, or too stale for that team" pattern Matchup Analyzer's PLAYER
+panel and Team Defense positional breakdown already use. This tab wasn't
+included when Player Search's CBBD-free pipeline was first built (see
+HANDOFF.md's "Player Search ONLY" scope note from that pass) - this is that
+follow-up. Both players' profiles are resolved ONCE in render() and threaded
+into every section below (column tiles, delta table, radar) instead of each
+section independently re-fetching, which the CBBD-only version used to do."""
 import streamlit as st
 
 from config import AVAILABLE_SEASONS
 from data.loaders import (
-    current_cbb_season, load_teams, load_team_roster, get_player_season_stats, team_color_map,
+    current_cbb_season, load_teams, load_team_roster, get_player_season_profile, team_color_map,
 )
 from ui.components import render_coming_soon, render_team_banner, render_bio_strip, render_stat_tiles
 from ui.charts import render_radar
@@ -26,8 +37,7 @@ def _player_picker(col, label_prefix, season, teams_list, key_prefix, default_te
         return team, roster_df.iloc[labels.index(sel_label)]
 
 
-def _render_player_column(col, team, row, season, colors):
-    stats = get_player_season_stats(team, season, row['id'])
+def _render_player_column(col, team, row, colors, stats):
     with col:
         render_team_banner(team, subtitle=f"{row['position'] or '?'} #{row['jersey'] or '?'}", team_color=colors.get(team))
         render_bio_strip([
@@ -78,15 +88,28 @@ def render():
     if row_a is None or row_b is None:
         return
 
+    with st.spinner("Loading season stats..."):
+        stats_a, _net_a, source_a, _box_a = get_player_season_profile(team_a, season, row_a.get('sourceId'), row_a['id'])
+        stats_b, _net_b, source_b, _box_b = get_player_season_profile(team_b, season, row_b.get('sourceId'), row_b['id'])
+
     colors = team_color_map(season)
     st.markdown(f"<div class='custom-section-header'>{row_a['name']} vs {row_b['name']}</div>", unsafe_allow_html=True)
     col_a2, col_b2 = st.columns(2)
-    _render_player_column(col_a2, team_a, row_a, season, colors)
-    _render_player_column(col_b2, team_b, row_b, season, colors)
+    _render_player_column(col_a2, team_a, row_a, colors, stats_a)
+    _render_player_column(col_b2, team_b, row_b, colors, stats_b)
 
-    _render_delta_table(team_a, row_a, team_b, row_b, season)
-    _render_radar_section(team_a, row_a, team_b, row_b, season, colors)
-    st.caption("Season stats via CollegeBasketballData.com.")
+    _render_delta_table(row_a, row_b, stats_a, stats_b)
+    _render_radar_section(team_a, team_b, row_a, row_b, colors, stats_a, stats_b)
+    sources = {source_a, source_b}
+    if sources == {'espn'}:
+        st.caption("Season stats: free ESPN/SportsDataverse box file (refreshes twice weekly, zero CBBD-quota cost).")
+    elif sources == {'cbbd'}:
+        st.caption("Season stats via CollegeBasketballData.com.")
+    else:
+        st.caption(
+            "Season stats: the free ESPN/SportsDataverse box file for one player, CollegeBasketballData.com for "
+            "the other — the free source isn't fresh enough for both teams yet."
+        )
 
 
 def _numeric_stat_map(stats):
@@ -131,12 +154,16 @@ def _numeric_stat_map(stats):
     return out
 
 
-def _render_delta_table(team_a, row_a, team_b, row_b, season):
+def _render_delta_table(row_a, row_b, stats_a, stats_b):
     """The head-to-head delta table (formerly parked): every stat both
     players share, with a diverging-color relative-edge column (green =
-    Player A leads)."""
-    stats_a = _numeric_stat_map(get_player_season_stats(team_a, season, row_a['id']))
-    stats_b = _numeric_stat_map(get_player_season_stats(team_b, season, row_b['id']))
+    Player A leads). `stats_a`/`stats_b` are the raw profile dicts
+    render() already resolved via get_player_season_profile - if one
+    source is 'espn' (no Net Rating key) and the other 'cbbd', that stat
+    simply won't be in `common` below, same as any other stat one side is
+    missing."""
+    stats_a = _numeric_stat_map(stats_a)
+    stats_b = _numeric_stat_map(stats_b)
     common = [k for k in stats_a if k in stats_b]
     if not common:
         return
@@ -169,13 +196,14 @@ def _render_delta_table(team_a, row_a, team_b, row_b, season):
 _RADAR_AXES = ['PPG', 'RPG', 'APG', 'FG%', '3P%', 'Usage %']
 
 
-def _render_radar_section(team_a, row_a, team_b, row_b, season, colors):
+def _render_radar_section(team_a, team_b, row_a, row_b, colors, stats_a, stats_b):
     """Shape-comparison radar - a visual complement to the delta table
     above, not a replacement: axes are scaled to just these two players
     (see ui.charts.render_radar's docstring for why - no league-wide
-    player percentile source exists yet)."""
-    stats_a = _numeric_stat_map(get_player_season_stats(team_a, season, row_a['id']))
-    stats_b = _numeric_stat_map(get_player_season_stats(team_b, season, row_b['id']))
+    player percentile source exists yet). `stats_a`/`stats_b` are the raw
+    profile dicts render() already resolved via get_player_season_profile."""
+    stats_a = _numeric_stat_map(stats_a)
+    stats_b = _numeric_stat_map(stats_b)
     axes = [ax for ax in _RADAR_AXES if ax in stats_a and ax in stats_b]
     if len(axes) < 3:
         return

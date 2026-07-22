@@ -1,12 +1,20 @@
 """
-Matchup Analyzer tab: player-vs-team-defense prep, live via
-CollegeBasketballData.com - built for individual matchup research (props,
-"how does this player fare against this defense") rather than a team-vs-team
-score projection. Two independent columns: PLAYER (any player's own tendency
-percentiles plus a last-10-games-vs-season-average trend, the same vocabulary
-Player Search uses) on the left, TEAM DEFENSE (any one team's defensive shape
-vs D-I, plus the positional matchup defense breakdown - what opposing
-Guards/Forwards/Centers have actually done against that team) on the right.
+Matchup Analyzer tab: player-vs-team-defense prep, built for individual
+matchup research (props, "how does this player fare against this defense")
+rather than a team-vs-team score projection. Two independent columns: PLAYER
+(any player's own tendency percentiles plus a last-10-games-vs-season-average
+trend, the same vocabulary Player Search uses) on the left, TEAM DEFENSE (any
+one team's defensive shape vs D-I, plus the positional matchup defense
+breakdown - what opposing Guards/Forwards/Centers have actually done against
+that team) on the right. Both columns now prefer the free ESPN/SportsDataverse
+season box file over CollegeBasketballData.com (season stats/game log for
+PLAYER via data.loaders.get_player_season_profile, positional defense for TEAM
+DEFENSE via load_positional_matchup_data) and fall back to CBBD automatically
+whenever that free source is missing, unreachable, or too stale for the
+selected team - the roster/player picker itself stays on CBBD's /teams/roster
+either way (cheap, not the quota-heavy part). PLAYER wasn't included when
+Player Search's CBBD-free pipeline was first built (see HANDOFF.md's
+"Player Search ONLY" scope note from that pass) - this is that follow-up.
 Deliberately not team-vs-team anymore: no venue/win-probability/projected-
 score/Four-Factors-matchup/style-profile/recent-form content, all of which
 lived here in an earlier "Team A vs Team B" version of this tab - removed
@@ -21,12 +29,13 @@ import streamlit as st
 from config import AVAILABLE_SEASONS
 from data.loaders import (
     current_cbb_season, load_all_team_season_stats, load_team_roster, load_positional_matchup_data,
-    get_player_season_stats, load_player_game_logs, load_conference_player_season_stats,
+    get_player_season_profile, load_player_game_logs, load_conference_player_season_stats,
     load_all_player_season_stats, load_teams,
 )
 from data.transforms import (
     position_bucket, positional_defense_summary, positional_defense_trend,
     player_percentile_rows, player_trend_series, team_defense_profile_rows,
+    espn_player_season_stats_for_teams,
 )
 from ui.components import render_coming_soon
 from ui.charts import render_trend_line, render_relative_bars
@@ -99,7 +108,9 @@ def _render_player_panel(season, teams_df):
     sel_row = roster_df.iloc[labels.index(sel_label)]
 
     with st.spinner("Loading stats..."):
-        stats = get_player_season_stats(team_choice, season, sel_row['id'])
+        stats, include_net_rating, source, box_df = get_player_season_profile(
+            team_choice, season, sel_row.get('sourceId'), sel_row['id'],
+        )
     if not stats:
         st.info("No season stats for this player yet.")
         return
@@ -108,10 +119,20 @@ def _render_player_panel(season, teams_df):
     conf = conf_series.iloc[0] if not conf_series.empty else None
 
     compare_all = st.checkbox(
-        "Compare against all of Division I instead of just this conference (cached ~weekly)",
+        "Compare against all of Division I instead of just this conference"
+        + ("" if source == 'espn' else " (cached ~weekly)"),
         key="ma_player_compare_all",
+        help="Free either way when the ESPN box file is in use — same already-downloaded season file, no per-team fan-out." if source == 'espn' else None,
     )
-    if compare_all:
+    if source == 'espn':
+        # box_df is the SAME already-downloaded file get_player_season_profile
+        # used for `stats` above - a D-I-wide (or conference) group costs
+        # nothing extra here, unlike the CBBD branch below (see
+        # espn_player_season_stats_for_teams' docstring).
+        conf_teams = teams_df.loc[teams_df['Conference'] == conf, 'Team'].tolist() if conf else None
+        group_df = espn_player_season_stats_for_teams(box_df, teams=None if compare_all else conf_teams)
+        group_label = "D-I" if (compare_all or not conf) else conf
+    elif compare_all:
         with st.spinner("Loading Division I player stats..."):
             group_df = load_all_player_season_stats(season)
         group_label = "D-I"
@@ -124,19 +145,34 @@ def _render_player_panel(season, teams_df):
         group_label = "conference"
 
     st.markdown(f"**{sel_row['name']} — tendency profile**")
-    rows = player_percentile_rows(stats, group_df, _PLAYER_STAT_HELP)
+    rows = player_percentile_rows(stats, group_df, _PLAYER_STAT_HELP, include_net_rating=include_net_rating)
     render_relative_bars(rows)
     if not group_df.empty:
         st.caption(f"Percentile vs. {group_label} (≥5 games played). Tick mark = the group's average.")
     else:
         st.caption("No comparison group available right now — showing raw values only.")
+    st.caption(
+        "Source: free ESPN/SportsDataverse box file (refreshes twice weekly, zero CBBD-quota cost)."
+        if source == 'espn' else
+        "Source: CollegeBasketballData.com (the free box file isn't fresh enough for this team yet — see HANDOFF.md)."
+    )
 
     st.markdown(f"**{sel_row['name']} — last 10 games vs season average**")
-    with st.spinner("Loading game log..."):
-        logs = load_player_game_logs(team_choice, season)
-    mine = logs[logs['athleteSourceId'].astype(str) == str(sel_row.get('sourceId'))] if not logs.empty else logs
-    if mine.empty and not logs.empty:
-        mine = logs[logs['name'] == sel_row['name']]
+    if source == 'espn':
+        # Same box_df, no second download - this is the per-game rows
+        # get_player_season_profile's season totals were themselves summed
+        # from, so season stats and this trend can never disagree about
+        # which games happened, unlike sourcing them from two different
+        # endpoints the way the CBBD branch below does.
+        mine = box_df[
+            (box_df['Team'] == team_choice) & (box_df['athleteSourceId'].astype(str) == str(sel_row.get('sourceId')))
+        ].copy()
+    else:
+        with st.spinner("Loading game log..."):
+            logs = load_player_game_logs(team_choice, season)
+        mine = logs[logs['athleteSourceId'].astype(str) == str(sel_row.get('sourceId'))] if not logs.empty else logs
+        if mine.empty and not logs.empty:
+            mine = logs[logs['name'] == sel_row['name']]
     if mine.empty:
         st.info("No per-game data for this player yet this season.")
         return
