@@ -242,12 +242,19 @@ def player_trend_series(player_games, col, n=10):
 _PCT_SUFFIX_LABELS = {'3PT Rate', '2PT Rate', 'FT Rate'}
 
 
-def player_profile_values(stats):
+def player_profile_values(stats, include_net_rating=True):
     """
     Flat {label: raw_value} for one player's season stat dict (the shape
     data.loaders.get_player_season_stats returns) - PPG/RPG/rebound split/
     APG/shooting splits/shot-selection rates/efficiency/usage. Returns {}
     if `stats` is falsy or the player has no games played.
+
+    `include_net_rating=False` omits the 'Net Rating' row entirely (not
+    just a '--' value) - Player Search's CBBD-free pipeline has no source
+    for it (on/off point differential needs lineup-level play-by-play
+    tracking, not just box-score totals - not worth building for a stat
+    explicitly deprioritized) and passes False; every other caller
+    (Matchup Analyzer's Player panel, still CBBD-based) keeps the default.
     """
     if not stats:
         return {}
@@ -284,7 +291,11 @@ def player_profile_values(stats):
     # playmaking, rebounding split), then shooting/efficiency, then Net
     # Rating, then the "other" per-game counting stats, then Usage last.
     # MPG has no requested slot - kept at the very end rather than dropped.
-    return {
+    # Built via sequential assignment (not one dict literal) so
+    # include_net_rating=False can OMIT that key - and its ordering slot -
+    # entirely rather than just nulling its value, while every other key
+    # keeps the exact user-specified order regardless of the flag.
+    out = {
         'PPG': per_game(stats.get('points')),
         'APG': per_game(stats.get('assists')),
         'RPG': per_game(reb.get('total')),
@@ -298,15 +309,17 @@ def player_profile_values(stats):
         'FT%': ft.get('pct'),
         'eFG%': stats.get('effectiveFieldGoalPct'),
         'TS%': (ts_pct * 100) if ts_pct is not None else None,
-        'Net Rating': stats.get('netRating'),
-        'SPG': per_game(stats.get('steals')),
-        'BPG': per_game(stats.get('blocks')),
-        'Usage %': stats.get('usage'),
-        'MPG': per_game(stats.get('minutes')),
     }
+    if include_net_rating:
+        out['Net Rating'] = stats.get('netRating')
+    out['SPG'] = per_game(stats.get('steals'))
+    out['BPG'] = per_game(stats.get('blocks'))
+    out['Usage %'] = stats.get('usage')
+    out['MPG'] = per_game(stats.get('minutes'))
+    return out
 
 
-def player_percentile_rows(stats, group_df, stat_help=None):
+def player_percentile_rows(stats, group_df, stat_help=None, include_net_rating=True):
     """
     Ready-to-render rows for ui.charts.render_relative_bars: this player's
     raw values (player_profile_values) plus their percentile (and the
@@ -314,10 +327,11 @@ def player_percentile_rows(stats, group_df, stat_help=None):
     player-stats DataFrame (conference or full D-I, whatever the caller
     already loaded via data.loaders). `stat_help`: optional {label: help
     text} - kept as a caller-supplied param rather than baked in here so
-    this stays UI-copy-free (data/ layer convention).
+    this stays UI-copy-free (data/ layer convention). `include_net_rating`:
+    passed straight through to player_profile_values - see its docstring.
     """
     stat_help = stat_help or {}
-    values = player_profile_values(stats)
+    values = player_profile_values(stats, include_net_rating=include_net_rating)
     rates = player_rate_stats(group_df)
     rows = []
     for label, value in values.items():
@@ -331,6 +345,157 @@ def player_percentile_rows(stats, group_df, stat_help=None):
                 avg_pct = pct_rank(dist, dist.mean())
         rows.append({'label': label, 'help': stat_help.get(label, ''), 'value_str': value_str, 'pct': pct, 'avg_pct': avg_pct})
     return rows
+
+
+# ---------------------------------------------------------------------------
+# ESPN/SportsDataverse-native player season stats (Player Search's CBBD-
+# free pipeline - data.loaders.load_espn_season_player_box_native). Builds
+# a wide, CBBD-shaped ('games'/'points'/nested fieldGoals-threePointField
+# Goals-freeThrows-rebounds dicts) DataFrame from raw per-game box scores,
+# so player_rate_stats/player_percentile_rows/player_profile_values (all
+# built against that CBBD shape) work COMPLETELY UNCHANGED regardless of
+# which source produced a given row - only the loader function differs.
+# ---------------------------------------------------------------------------
+
+def espn_player_season_stats_for_teams(box_df, teams=None):
+    """
+    Wide, CBBD-shaped player-season-stats DataFrame from the ESPN/
+    SportsDataverse box file, scoped to `teams` (a single team name, a
+    list of team names, or None for every team in `box_df`) - this is
+    Player Search's CBBD-free season-stats AND percentile-comparison-group
+    source in ONE function: a single row (filtered to one team + one
+    athleteSourceId) is that player's own season totals; the whole
+    returned DataFrame IS a ready-made comparison group for
+    player_rate_stats (conference = scope to that conference's teams, D-I
+    = scope=None). All local computation, no per-team API fan-out the way
+    the CBBD path needs (see data.loaders.load_conference_player_season_stats
+    /load_all_player_season_stats) - the whole season is already in the one
+    already-downloaded file, so a D-I-wide comparison group costs nothing
+    extra here, unlike CBBD's opt-in-because-expensive equivalent.
+
+    No 'netRating' key anywhere in the output (see player_profile_values'
+    include_net_rating flag) - box scores alone can't produce an on/off,
+    per-100-possession stat without lineup-level play-by-play tracking,
+    and it was explicitly deprioritized rather than worth building.
+
+    Usage% IS computed here (CBBD hands it over precomputed; box scores
+    don't), via the standard formula summed across the player's games:
+        100 * Σ[(FGA + 0.44*FTA + TOV) * (teamMIN/5)]
+            / Σ[MIN * (teamFGA + 0.44*teamFTA + teamTOV)]
+    where teamMIN/teamFGA/teamFTA/teamTOV are that TEAM's own totals for
+    each specific game (every player who suited up that game, summed from
+    the same box file - not a separate call).
+
+    Free-throw fields (FTM/FTA) and the offensive/defensive rebound split
+    (OREB/DREB) are a documented but NOT live-verified guess at
+    SportsDataverse's column names (see data.loaders.
+    _fetch_espn_season_box_raw_cached's docstring). If a real payload
+    turns out not to carry them, `box_df` will show those columns as
+    entirely null - detected here (`has_ft`/`has_reb_split`, checked once
+    across the whole scope, not per-player) and degraded to None/'--'
+    rather than silently computing FT%/FT-rate/Usage%/TS% from a phantom
+    zero, which would look confidently wrong instead of honestly missing.
+    Usage% falls back to an FTA-free approximation (FGA+TOV only) in that
+    case rather than going missing entirely, since it was specifically
+    requested; TS% (which fundamentally needs FTA) goes to None instead.
+
+    Returns an empty DataFrame if `box_df` is empty or `teams` matches
+    nothing in it.
+    """
+    if box_df is None or box_df.empty:
+        return pd.DataFrame()
+    if teams is None:
+        scoped = box_df
+    elif isinstance(teams, str):
+        scoped = box_df[box_df['Team'] == teams]
+    else:
+        scoped = box_df[box_df['Team'].isin(teams)]
+    if scoped.empty:
+        return pd.DataFrame()
+
+    has_ft = (
+        'FTA' in scoped.columns and 'FTM' in scoped.columns
+        and scoped['FTA'].notna().any() and scoped['FTM'].notna().any()
+    )
+    has_reb_split = (
+        'OREB' in scoped.columns and 'DREB' in scoped.columns
+        and scoped['OREB'].notna().any() and scoped['DREB'].notna().any()
+    )
+    ft_multiplier = 0.44 if has_ft else 0.0
+    team_fta_for_totals = scoped['FTA'].fillna(0) if has_ft else 0
+
+    team_totals = scoped.assign(_teamFTA=team_fta_for_totals).groupby(['GameId', 'Team']).agg(
+        teamFGA=('FGA', 'sum'), teamFTA=('_teamFTA', 'sum'), teamTOV=('Turnovers', 'sum'), teamMIN=('Minutes', 'sum'),
+    ).reset_index()
+
+    rows = []
+    for (team, sid), g in scoped.groupby(['Team', 'athleteSourceId']):
+        if pd.isna(sid):
+            continue
+        games = len(g)
+        fga, tov = g['FGA'].sum(), g['Turnovers'].sum()
+        fgm, tpm, tpa = g['FGM'].sum(), g['3PM'].sum(), g['3PA'].sum()
+        pts, reb, ast, stl, blk, mins = (
+            g['Points'].sum(), g['Rebounds'].sum(), g['Assists'].sum(),
+            g['Steals'].sum(), g['Blocks'].sum(), g['Minutes'].sum(),
+        )
+        fta = g['FTA'].sum() if has_ft else None
+        ftm = g['FTM'].sum() if has_ft else None
+        oreb = g['OREB'].sum() if has_reb_split else None
+        dreb = g['DREB'].sum() if has_reb_split else None
+
+        player_fta_for_usage = g['FTA'].fillna(0) if has_ft else 0
+        joined = g.assign(_playerFTA=player_fta_for_usage).merge(team_totals, on=['GameId', 'Team'], how='left')
+        numer = ((joined['FGA'] + ft_multiplier * joined['_playerFTA'] + joined['Turnovers']) * (joined['teamMIN'] / 5)).sum()
+        denom = (joined['Minutes'] * (joined['teamFGA'] + ft_multiplier * joined['teamFTA'] + joined['teamTOV'])).sum()
+        usage = (numer / denom * 100) if denom else None
+
+        efg = ((fgm + 0.5 * tpm) / fga * 100) if fga else None
+        ts = (pts / (2 * (fga + 0.44 * fta))) if (has_ft and pd.notna(fta) and (fga or fta)) else None
+
+        rows.append({
+            'Team': team, 'athleteSourceId': sid, 'name': g['name'].iloc[0], 'games': games,
+            'points': float(pts), 'assists': float(ast), 'steals': float(stl), 'blocks': float(blk),
+            'minutes': float(mins), 'usage': usage, 'effectiveFieldGoalPct': efg, 'trueShootingPct': ts,
+            'fieldGoals': {'made': float(fgm), 'attempted': float(fga), 'pct': (fgm / fga * 100) if fga else None},
+            'threePointFieldGoals': {'made': float(tpm), 'attempted': float(tpa), 'pct': (tpm / tpa * 100) if tpa else None},
+            'freeThrows': {
+                'made': float(ftm) if pd.notna(ftm) else None,
+                'attempted': float(fta) if pd.notna(fta) else None,
+                'pct': (float(ftm) / float(fta) * 100) if (pd.notna(ftm) and pd.notna(fta) and fta) else None,
+            },
+            'rebounds': {
+                'total': float(reb),
+                'offensive': float(oreb) if pd.notna(oreb) else None,
+                'defensive': float(dreb) if pd.notna(dreb) else None,
+            },
+        })
+    return pd.DataFrame(rows)
+
+
+def espn_player_result_map(box_df, team):
+    """
+    {GameId: 'W'/'L'} for every game `team` played, derived entirely from
+    box_df itself (summing every one of that team's players' Points for
+    each GameId gives the team's own score for that game; the same GameId
+    filtered to the Opponent side gives the opponent's score) - no
+    separate schedule/scores endpoint needed, unlike the CBBD path's
+    load_team_games. Returns {} if `team` has no rows in `box_df`.
+    """
+    if box_df is None or box_df.empty:
+        return {}
+    team_games = box_df[box_df['Team'] == team]
+    if team_games.empty:
+        return {}
+    team_scores = team_games.groupby('GameId')['Points'].sum()
+    result = {}
+    for game_id, team_pts in team_scores.items():
+        opp_rows = box_df[(box_df['GameId'] == game_id) & (box_df['Opponent'] == team)]
+        if opp_rows.empty:
+            continue
+        opp_pts = opp_rows['Points'].sum()
+        result[game_id] = 'W' if team_pts > opp_pts else ('L' if team_pts < opp_pts else None)
+    return result
 
 
 # ---------------------------------------------------------------------------

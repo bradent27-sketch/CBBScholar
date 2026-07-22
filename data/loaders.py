@@ -52,6 +52,25 @@ def _week_bucket():
     return f"{year}-W{week:02d}"
 
 
+def _twice_weekly_bucket():
+    """
+    ISO (year, week, half) string, e.g. '2026-W04-A' - same mechanism as
+    `_week_bucket()` (a real, hashed cache-key argument, since `ttl=` is
+    silently ignored on a `persist="disk"` cache - see that function's
+    docstring) but splits each ISO week into two halves (Monday-Wednesday
+    = 'A', Thursday-Sunday = 'B'), giving a fresh cache key roughly every
+    3-4 days instead of every 7. This is the refresh cadence requested
+    specifically for the ESPN/SportsDataverse season box-score file (Player
+    Search's CBBD-free pipeline) - a plain file re-download costs nothing
+    extra either way (no CBBD-style monthly quota is at stake here), so
+    there's no cost reason to keep it weekly once asked for something
+    fresher.
+    """
+    year, week, weekday = datetime.date.today().isocalendar()
+    half = 'A' if weekday <= 3 else 'B'
+    return f"{year}-W{week:02d}-{half}"
+
+
 @st.cache_data(ttl=86400)
 def fetch_net_rankings_manual():
     """
@@ -165,6 +184,131 @@ def load_conference_standings(season, espn_conference_abbr):
             'L': stats.get('losses', '--'),
             'PCT': stats.get('winPercent', '--'),
             'Streak': stats.get('streak', '--'),
+        })
+    return pd.DataFrame(rows)
+
+
+# ==========================================
+# ESPN-native player pipeline (Player Search's CBBD-free path) - team list
+# + roster, both live ESPN calls, no key required. Paired with the ESPN/
+# SportsDataverse season box file further below (load_espn_season_player_
+# box_native) for season stats/game logs - together these replace CBBD
+# entirely for Player Search specifically (Compare and Matchup Analyzer's
+# player panel are UNCHANGED, still CBBD-based, by explicit scope decision -
+# see HANDOFF.md).
+# ==========================================
+
+@st.cache_data(ttl=86400)
+def load_espn_teams(season=None):
+    """
+    Full D-I team list (name, ESPN id, conference, colors) - built from the
+    SAME standings payload Conference Standings already fetches
+    (_fetch_standings_raw), NOT a separate/unverified /teams endpoint.
+    ESPN's team object shape is consistent across their API (id/
+    displayName/color/alternateColor show up on every embedded team dict,
+    not just in the standings response this app already trusts is live/
+    working) - reusing that payload avoids guessing at a brand new endpoint
+    for something this app already has a working call for. This is the
+    canonical team reference for Player Search's CBBD-free pipeline -
+    mirrors the role load_teams() plays for the CBBD-based path elsewhere.
+
+    id/color/alternateColor fields on the standings' embedded team object
+    are NOT independently live-verified in this sandbox (only displayName/
+    location were previously confirmed, via conference_standings.py) - a
+    reasoned extension of an already-confirmed object, not a cold guess at
+    a new shape, same standard this file holds every other addition to.
+
+    Returns columns: Team, EspnId, Conference, Color, AltColor. Empty
+    DataFrame if the standings payload is empty/unreachable.
+    """
+    season = season or current_cbb_season()
+    data = _fetch_standings_raw(season)
+    rows = []
+    for conf in data.get('children', []):
+        if not conf.get('isConference'):
+            continue
+        conf_name = conf.get('name') or conf.get('abbreviation')
+        entries = (conf.get('standings') or {}).get('entries', [])
+        for e in entries:
+            team = e.get('team') or {}
+            color = team.get('color')
+            alt = team.get('alternateColor')
+            name = team.get('displayName') or team.get('location')
+            if not name:
+                continue
+            rows.append({
+                'Team': name,
+                'EspnId': team.get('id'),
+                'Conference': conf_name,
+                'Color': f"#{color}" if color else None,
+                'AltColor': f"#{alt}" if alt else None,
+            })
+    return pd.DataFrame(rows)
+
+
+ESPN_ROSTER_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/teams/{team_id}/roster"
+
+
+@st.cache_data(ttl=3600)
+def load_espn_roster(team_espn_id, season=None):
+    """
+    One team's roster (bio fields) via ESPN's public roster endpoint - the
+    `/apis/site/v2/...` base path (the SAME family Conference Standings'
+    sibling scoreboard/rankings endpoints use, confirmed distinct from the
+    `/apis/v2/...` standings path - see load_conference_standings' own
+    docstring for that gotcha). NOT independently live-verified in this
+    sandbox (same caveat as every other new endpoint in this pipeline -
+    confirm against a real payload before fully trusting it).
+
+    Defensively handles both a flat athlete list and a position-grouped
+    one (`{'position': ..., 'items': [...]}`) since which shape ESPN's
+    roster response uses for NCAAB specifically couldn't be confirmed here
+    - CBBD's own roster endpoint hit an analogous "confirm the real shape"
+    gotcha with position granularity (see HANDOFF.md), so this defaults to
+    the more defensive parse rather than assuming one shape works.
+
+    Returns columns: sourceId (ESPN athlete id - the SAME id namespace the
+    season box file's athleteSourceId already uses, so these join directly
+    with no separate id-reconciliation step), name, jersey, position,
+    height (inches, if present), displayHeight (formatted string, e.g.
+    "6'8\"" - preferred for display since it sidesteps guessing whether
+    `height` is really inches), weight, city, state, country. Empty
+    DataFrame on any failure or a missing/falsy `team_espn_id`.
+    """
+    if not team_espn_id:
+        return pd.DataFrame()
+    try:
+        resp = requests.get(ESPN_ROSTER_URL.format(team_id=team_espn_id), timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception:
+        return pd.DataFrame()
+
+    raw_athletes = data.get('athletes', []) if isinstance(data, dict) else []
+    flat = []
+    for entry in raw_athletes:
+        if isinstance(entry, dict) and 'items' in entry:
+            flat.extend(entry.get('items') or [])
+        else:
+            flat.append(entry)
+
+    rows = []
+    for a in flat:
+        if not isinstance(a, dict):
+            continue
+        pos = a.get('position') or {}
+        birth = a.get('birthPlace') or {}
+        rows.append({
+            'sourceId': a.get('id'),
+            'name': a.get('displayName') or a.get('fullName'),
+            'jersey': a.get('jersey'),
+            'position': pos.get('abbreviation') or pos.get('name'),
+            'height': a.get('height'),
+            'displayHeight': a.get('displayHeight'),
+            'weight': a.get('weight'),
+            'city': birth.get('city'),
+            'state': birth.get('state'),
+            'country': birth.get('country'),
         })
     return pd.DataFrame(rows)
 
@@ -894,29 +1038,32 @@ _ESPN_BOX_AVG_COLS = ['Points', 'Rebounds', 'Assists', 'FGA', '3PA']
 
 
 @st.cache_data(show_spinner=False, persist="disk")
-def _load_espn_season_player_box_cached(season, _week):
+def _fetch_espn_season_box_raw_cached(season, _bucket):
     """
-    Every D-I player's game-by-game box score for the WHOLE season, from
-    one free file download - see module docstring above for the full
-    rationale and the "not live-verified" caveat.
+    Raw download + parquet parse of SportsDataverse's published season
+    file - the one actual network/IO cost in this whole subsystem, factored
+    out so it's shared by BOTH "finishing" steps below instead of each
+    downloading the same file independently: `_load_espn_season_player_box_cached`
+    (CBBD-name-resolved, powers positional matchup defense) and
+    `_load_espn_season_player_box_native_cached` (ESPN-name-resolved, powers
+    Player Search's CBBD-free pipeline - see that function's docstring for
+    why it needs its own name resolution instead of reusing the CBBD one).
 
-    Team names are reconciled to THIS app's canonical CBBD team names
-    (data.utils.resolve_team_name against load_teams()) once here, for
-    the whole file, rather than per-caller - rows whose team/opponent
-    can't be resolved to a known CBBD team are dropped rather than joined
-    to the wrong team.
+    Returns RAW columns (team names NOT yet resolved to any canonical list -
+    each finisher does that against its own reference) with numeric
+    coercion applied. Also carries free-throw and offensive/defensive-
+    rebound-split columns the original (CBBD-resolved-only) version didn't
+    extract - added for Player Search's Usage%/FT%/FT-rate/ORB-DRB split,
+    harmless to the CBBD-resolved finisher since it just doesn't select
+    them. FTM/FTA/OREB/DREB field names are a documented sibling-guess of
+    the already-relied-on field_goals_made/attempted pattern (same
+    reasoning as everywhere else in this module) - NOT independently live-
+    verified, same caveat as the rest of this file (see module docstring).
 
-    Returns columns: GameId, Date, Team, Opponent, Home/Away,
-    athleteSourceId (ESPN's own athlete id - see the field-level comment
-    below for why this is expected, not confirmed, to line up with CBBD's
-    sourceId/athleteSourceId), name, Position ('Guard'/'Forward'/'Center'
-    - this source's one clear edge over the CBBD path: no separate roster
-    call needed for position), Minutes, Points, Rebounds, Assists, Steals,
-    Blocks, Turnovers, FGM, FGA, 3PM, 3PA. Empty DataFrame on any failure.
-
-    Weekly refresh + disk persistence via `_week_bucket()`, not a `ttl=`
-    (silently ignored on a persist="disk" cache by Streamlit - see that
-    function's docstring).
+    Empty DataFrame on any failure (network, parse, or an empty file).
+    Twice-weekly refresh + disk persistence via `_twice_weekly_bucket()`
+    (bumped from `_week_bucket()` on request - a plain file re-download
+    costs nothing extra, no CBBD-style quota is at stake).
     """
     try:
         resp = requests.get(ESPN_SEASON_PLAYER_BOX_URL.format(season=season), timeout=45)
@@ -930,17 +1077,12 @@ def _load_espn_season_player_box_cached(season, _week):
     def col(name):
         return raw[name] if name in raw.columns else pd.Series([None] * len(raw), index=raw.index)
 
-    teams_df = load_teams(season)
-    canonical = teams_df['Team'].dropna().tolist() if not teams_df.empty else []
-    distinct_names = set(col('team_location').dropna()) | set(col('opponent_team_location').dropna())
-    name_map = {n: resolve_team_name(n, canonical) for n in distinct_names} if canonical else {}
-
     game_date = pd.to_datetime(col('game_date'), errors='coerce')
-    out = pd.DataFrame({
+    return pd.DataFrame({
         'GameId': col('game_id'),
         'Date': game_date.dt.strftime('%Y-%m-%d'),
-        'Team': col('team_location').map(name_map) if name_map else None,
-        'Opponent': col('opponent_team_location').map(name_map) if name_map else None,
+        'TeamRaw': col('team_location'),
+        'OpponentRaw': col('opponent_team_location'),
         'Home/Away': col('home_away').map({'home': 'vs', 'away': '@'}),
         # SportsDataverse's athlete_id IS ESPN's own athlete id - the SAME
         # "ESPN-side id" namespace load_team_roster's sourceId and
@@ -958,6 +1100,8 @@ def _load_espn_season_player_box_cached(season, _week):
         'Minutes': pd.to_numeric(col('minutes'), errors='coerce'),
         'Points': pd.to_numeric(col('points'), errors='coerce'),
         'Rebounds': pd.to_numeric(col('rebounds'), errors='coerce'),
+        'OREB': pd.to_numeric(col('offensive_rebounds'), errors='coerce'),
+        'DREB': pd.to_numeric(col('defensive_rebounds'), errors='coerce'),
         'Assists': pd.to_numeric(col('assists'), errors='coerce'),
         'Steals': pd.to_numeric(col('steals'), errors='coerce'),
         'Blocks': pd.to_numeric(col('blocks'), errors='coerce'),
@@ -966,19 +1110,112 @@ def _load_espn_season_player_box_cached(season, _week):
         'FGA': pd.to_numeric(col('field_goals_attempted'), errors='coerce'),
         '3PM': pd.to_numeric(col('three_point_field_goals_made'), errors='coerce'),
         '3PA': pd.to_numeric(col('three_point_field_goals_attempted'), errors='coerce'),
+        'FTM': pd.to_numeric(col('free_throws_made'), errors='coerce'),
+        'FTA': pd.to_numeric(col('free_throws_attempted'), errors='coerce'),
     })
+
+
+def _resolve_espn_box_team_names(raw_box, canonical_names):
+    """
+    Maps TeamRaw/OpponentRaw (SportsDataverse's own team_location strings)
+    to `canonical_names` via data.utils.resolve_team_name, and drops rows
+    that don't resolve on either side - shared logic between the two
+    finishing steps below, which differ only in WHICH canonical name list
+    they resolve against (CBBD's `load_teams()` vs ESPN's own
+    `load_espn_teams()`). Returns columns identical to `raw_box` minus
+    TeamRaw/OpponentRaw, plus real Team/Opponent columns, sorted by Date.
+    """
+    if raw_box is None or raw_box.empty:
+        return pd.DataFrame()
+    distinct_names = set(raw_box['TeamRaw'].dropna()) | set(raw_box['OpponentRaw'].dropna())
+    name_map = {n: resolve_team_name(n, canonical_names) for n in distinct_names} if canonical_names else {}
+    out = raw_box.copy()
+    out['Team'] = out['TeamRaw'].map(name_map) if name_map else None
+    out['Opponent'] = out['OpponentRaw'].map(name_map) if name_map else None
+    out = out.drop(columns=['TeamRaw', 'OpponentRaw'])
     out = out.dropna(subset=['Team', 'Opponent', 'Date'])
     return out.sort_values('Date').reset_index(drop=True) if not out.empty else out
 
 
+@st.cache_data(show_spinner=False, persist="disk")
+def _load_espn_season_player_box_cached(season, _bucket):
+    """
+    Every D-I player's game-by-game box score for the WHOLE season, team
+    names resolved to THIS app's canonical CBBD team names (via
+    _resolve_espn_box_team_names against load_teams()) - powers positional
+    matchup defense (data.loaders.load_positional_matchup_data). Delegates
+    the actual download to `_fetch_espn_season_box_raw_cached` (shared with
+    Player Search's CBBD-free pipeline, so the file isn't fetched twice).
+
+    Returns columns: GameId, Date, Team, Opponent, Home/Away,
+    athleteSourceId, name, Position, Minutes, Points, Rebounds, Assists,
+    Steals, Blocks, Turnovers, FGM, FGA, 3PM, 3PA (unchanged from before
+    this function was refactored - positional matchup defense's contract
+    with this function is untouched). Empty DataFrame on any failure.
+    """
+    raw_box = _fetch_espn_season_box_raw_cached(season, _bucket)
+    if raw_box.empty:
+        return pd.DataFrame()
+    teams_df = load_teams(season)
+    canonical = teams_df['Team'].dropna().tolist() if not teams_df.empty else []
+    out = _resolve_espn_box_team_names(raw_box, canonical)
+    if out.empty:
+        return out
+    keep_cols = ['GameId', 'Date', 'Team', 'Opponent', 'Home/Away', 'athleteSourceId', 'name', 'Position',
+                 'Minutes', 'Points', 'Rebounds', 'Assists', 'Steals', 'Blocks', 'Turnovers', 'FGM', 'FGA', '3PM', '3PA']
+    return out[keep_cols]
+
+
 def load_espn_season_player_box(season=None):
     """
-    Public wrapper - resolves `season` and threads `_week_bucket()` through
-    to `_load_espn_season_player_box_cached` (see its docstring for the
-    full field-level breakdown and freshness caveats).
+    Public wrapper - resolves `season` and threads `_twice_weekly_bucket()`
+    through to `_load_espn_season_player_box_cached` (see its docstring for
+    the full field-level breakdown and freshness caveats). Powers
+    positional matchup defense.
     """
     season = season or current_cbb_season()
-    return _load_espn_season_player_box_cached(season, _week_bucket())
+    return _load_espn_season_player_box_cached(season, _twice_weekly_bucket())
+
+
+@st.cache_data(show_spinner=False, persist="disk")
+def _load_espn_season_player_box_native_cached(season, _bucket):
+    """
+    Same underlying box-score file as `_load_espn_season_player_box_cached`
+    (shares the raw download via `_fetch_espn_season_box_raw_cached`), but
+    resolved against ESPN's OWN team list (`load_espn_teams`) instead of
+    CBBD's `load_teams()` - Player Search's CBBD-free pipeline needs ZERO
+    CBBD calls anywhere in it, including team-name canonicalization, which
+    the CBBD-resolved sibling function above depends on. Also keeps the
+    OREB/DREB/FTM/FTA columns that sibling drops (positional matchup
+    defense doesn't need them; Player Search's season totals/Usage%/FT-
+    rate computation does - see data.transforms.espn_player_season_stats_for_teams).
+
+    Returns columns: GameId, Date, Team, Opponent, Home/Away,
+    athleteSourceId, name, Position, Minutes, Points, Rebounds, OREB, DREB,
+    Assists, Steals, Blocks, Turnovers, FGM, FGA, 3PM, 3PA, FTM, FTA. Empty
+    DataFrame on any failure.
+    """
+    raw_box = _fetch_espn_season_box_raw_cached(season, _bucket)
+    if raw_box.empty:
+        return pd.DataFrame()
+    teams_df = load_espn_teams()
+    canonical = teams_df['Team'].dropna().tolist() if not teams_df.empty else []
+    return _resolve_espn_box_team_names(raw_box, canonical)
+
+
+def load_espn_season_player_box_native(season=None):
+    """
+    Public wrapper for Player Search's CBBD-free box-score source -
+    resolves `season` and threads `_twice_weekly_bucket()` through to
+    `_load_espn_season_player_box_native_cached`. This IS Player Search's
+    game log AND season-stats source in one (season totals are just this
+    same per-game data summed - see data.transforms.
+    espn_player_season_stats_for_teams), unlike the CBBD path, which needs
+    two separate endpoints (/stats/player/season and /games/players) for
+    the same two things.
+    """
+    season = season or current_cbb_season()
+    return _load_espn_season_player_box_native_cached(season, _twice_weekly_bucket())
 
 
 def load_positional_matchup_data(team, season=None, max_recent_games=20):
@@ -1089,6 +1326,12 @@ def clear_league_wide_caches():
     _load_efficiency_ratings_cached.clear()
     _load_team_opponent_game_logs_cached.clear()
     _load_espn_season_player_box_cached.clear()
+    # Player Search's CBBD-free pipeline (twice-weekly by default - see
+    # _twice_weekly_bucket()) - clearing the shared raw fetch also
+    # invalidates both finishing steps' inputs, but each finisher has its
+    # own cache entry (the transformed output) that needs clearing too.
+    _fetch_espn_season_box_raw_cached.clear()
+    _load_espn_season_player_box_native_cached.clear()
 
 
 def _odds_api_key():

@@ -11,7 +11,88 @@ CollegeBasketballData.com (free key, configured), ESPN's public endpoints
 subsystem exists for this app at all — there's no PFF product for college
 basketball.
 
-**User-driven optimization pass (this doc's most recent update):** a
+**Player Search CBBD-free pipeline (this doc's most recent update):** on
+request (reduce reliance on CBBD's 1,000-call/month free tier for the
+tab that gets used most), Player Search was rebuilt to source EVERYTHING
+from ESPN's public endpoints + a free SportsDataverse season box-score
+file instead of CollegeBasketballData.com - the one deliberately CBBD-free
+tab in this app. **Scope decision: Player Search ONLY** - Compare and
+Matchup Analyzer's PLAYER panel still use CBBD's `/teams/roster`/`/stats/
+player/season`/`/games/players` exactly as before, unchanged, including
+Net Rating. Don't assume this pipeline extends to those tabs without
+separately being asked.
+
+New pieces: `data.loaders.load_espn_teams` (team list/colors/conference,
+reused from the SAME standings payload Conference Standings already
+fetches, rather than guessing at a new `/teams` endpoint), `load_espn_
+roster` (bio fields, a new live ESPN call), and `load_espn_season_player_
+box_native` (the CBBD-free twin of the existing `load_espn_season_player_
+box` positional-defense source - same underlying file, shared raw
+download via the new `_fetch_espn_season_box_raw_cached`, but resolved
+against ESPN's own team list instead of CBBD's, and carrying extra columns
+- OREB/DREB/FTM/FTA - the CBBD-resolved twin doesn't need). This ONE file
+is both season stats AND game log for Player Search (totals are just the
+per-game rows summed - `data.transforms.espn_player_season_stats_for_teams`)
+- unlike CBBD's two-separate-endpoints design. D-I-wide and conference-wide
+percentile comparison groups are now free (no per-team fan-out - the whole
+season's already in the one downloaded file), so the "compare vs D-I"
+checkbox lost its old "cached ~weekly, first pull takes a bit" framing.
+
+Net Rating is GONE from Player Search, not blank - deprioritized on
+request, and genuinely not buildable from box scores alone (on/off point
+differential needs lineup-level play-by-play tracking). `data.transforms.
+player_profile_values`/`player_percentile_rows` got an `include_net_rating`
+flag (default True, unchanged for every other caller) so Player Search can
+omit the row's ORDERING SLOT entirely, not just null its value.
+
+Usage% IS built here - CBBD hands it over precomputed, box scores don't -
+via the standard formula, summed across the player's games, using that
+team's own per-game FGA/FTA/TOV/minutes totals (derived by summing every
+player who suited up that game, from the same box file). See
+`espn_player_season_stats_for_teams`'s docstring for the exact formula and
+its `has_ft`/`has_reb_split` graceful-degradation checks (computed once
+per scope, not per-player) - if the guessed FTM/FTA/OREB/DREB column names
+turn out to be wrong once this runs against a real payload, FT%/FT-rate/
+ORB-DRB/TS% degrade to `None`/'--' and Usage% falls back to an FTA-free
+approximation, rather than any of them silently computing a confidently-
+wrong number from a phantom zero. Verified this degradation path with a
+synthetic "columns entirely absent" test before trusting it - see this
+pass's own testing discipline below.
+
+Cache cadence: the ESPN/SportsDataverse box file (both the CBBD-resolved
+positional-defense version AND the new CBBD-free version) now refreshes
+**twice weekly** (`data.loaders._twice_weekly_bucket()`, same year-week
+ISO string as `_week_bucket()` but split Monday-Wednesday/Thursday-Sunday)
+instead of once weekly - bumped on request, since a plain file re-download
+costs nothing extra (no CBBD-style quota at stake). This is a SHARED bump
+- positional matchup defense also gets fresher data as a side effect, not
+just Player Search. The sidebar's existing "🔄 Refresh league-wide data"
+button is the manual override (both new cache-holding functions were
+added to `clear_league_wide_caches()`) - no new UI element needed, unlike
+NET Rankings' manual-only scrape (that one's manual because NCAA.org's
+terms of service prohibit automation; neither ESPN's JSON API nor
+SportsDataverse's published file downloads have that constraint, so both
+can be, and are, fully automatic).
+
+**Verification status - the biggest open risk in this pass**: none of
+`load_espn_teams`'s reliance on `id`/`color`/`alternateColor` existing on
+the standings payload's embedded team object, `load_espn_roster`'s
+endpoint path/response shape, or the new OREB/DREB/FTM/FTA parquet column
+names are live-verified (same standing network-blocked-sandbox caveat as
+every other ESPN/SportsDataverse touchpoint in this app). Tested instead
+via `streamlit.testing.v1.AppTest` end-to-end against a synthetic-but-
+realistically-shaped monkeypatched data layer (same substitute prior
+passes in this doc used) PLUS targeted unit tests of `espn_player_season_
+stats_for_teams` confirming: Usage% comes out in a sane 0-100 range,
+`include_net_rating=False` omits the key entirely, and - critically - an
+"all guessed columns absent" scenario degrades every dependent stat to
+`None` rather than a silently-wrong zero. **This cannot confirm the real
+endpoint/column shapes are correct** - run this for real (real network)
+and sanity-check Usage%/FT%/ORB-DRB specifically against a player you
+know before trusting them, same discipline this doc has applied to every
+previous ESPN/SportsDataverse addition.
+
+**User-driven optimization pass:** a
 tab-by-tab pass based on real usage (personal team-watching, bracketology,
 and player-prop betting - the stated primary use case). Player Search: an
 "All Teams" option on the team picker plus a fuzzy-matched search box

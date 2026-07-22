@@ -43,7 +43,7 @@ efficiency ratings, rankings — without the bot-wall problem.
 
 | Tab | Source | Status |
 |---|---|---|
-| Player Search | CollegeBasketballData.com API — `/teams/roster`, `/stats/player/season` | **Live** |
+| Player Search | ESPN public endpoints (team list, roster) + a free SportsDataverse season box-score file — NOT CollegeBasketballData.com | **Live** — the one deliberately CBBD-free tab in this app (see HANDOFF.md); season stats/game log both come from the same box-score file, summed locally. Net Rating dropped (not buildable from box scores alone); Usage% computed locally from box-score totals instead of a precomputed API field |
 | Team Efficiency | CollegeBasketballData.com API `/ratings/adjusted` | **Live** |
 | NET & Resume | ncaa.com (manual fetch — see below) + CollegeBasketballData.com API `/rankings` (AP/Coaches poll) | **Live** |
 | Conference Standings | ESPN public standings endpoint | **Live**, no key needed |
