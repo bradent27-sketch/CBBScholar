@@ -11,8 +11,72 @@ CollegeBasketballData.com (free key, configured), ESPN's public endpoints
 subsystem exists for this app at all — there's no PFF product for college
 basketball.
 
-**Real bugs, live-confirmed after deploy (this doc's most recent update):
-the ESPN roster/box-file id mismatch, and DNP rows inflating games
+**UI copy cleanup + Matchup Analyzer conference-mismatch bug + D-I
+comparison caching + a positional-defense source indicator (this doc's
+most recent update).** Three requested changes from real usage:
+
+1. **Cut most of the small explanatory `st.caption()` text app-wide** -
+   "how to read this chart"/"what does this feature do" prose under
+   charts and tables, per explicit request ("just the titles are fine").
+   Removed from Team Efficiency, Player Search, NET & Resume, Matchup
+   Analyzer, Live Odds, Player Compare, Transfer Portal, Conference
+   Standings, and the sidebar (which also had a stale "this pass ships
+   navigation and theme only" placeholder left over from early
+   development - removed, not accurate for a while). KEPT: short factual/
+   status captions (row counts, "Source: X", "no data yet" states) - the
+   distinction is explanation-of-mechanics vs. a fact the user needs. On-
+   hover `help=` tooltips (checkboxes, sliders, stat bars) were left alone
+   - different UX pattern (opt-in, not always-visible clutter).
+
+2. **Matchup Analyzer's PLAYER panel showed no comparison bars for some
+   players** even though Player Search worked fine for the same players.
+   Root cause: the conference-scoped comparison group was filtered using
+   `conf` - CBBD's spelling of the player's conference (e.g. "ACC") -
+   against ESPN's OWN team list, whose conference field can be formatted
+   differently (e.g. "Atlantic Coast Conference"). A mismatch silently
+   produced an empty comparison group (no bars), while the "compare
+   against all of Division I" checkbox worked for every player, since
+   that path never needs a conference match at all - exactly the reported
+   symptom. **Fixed** the same way Player Search already avoided this
+   entirely: derive the conference from ESPN's OWN team list for the
+   player's own (ESPN-spelled) team, never cross-reference CBBD's
+   spelling against ESPN's list.
+
+   Also **cached the "compare against all of Division I" aggregation**
+   (new `data.loaders.load_espn_di_player_stats`/
+   `_espn_di_player_stats_cached`) - this is a real pandas groupby over
+   every D-I player's whole season of box scores, slow enough to cause a
+   noticeable pause on every player switch, not just first load (a real,
+   reported perf complaint). Cached to the SAME twice-weekly cadence as
+   the underlying box file (`_twice_weekly_bucket()` - recomputing more
+   often than the source data changes is pure waste), `persist="disk"`
+   for cross-restart survival, and wired into `clear_league_wide_caches()`
+   for the manual refresh button. Shared by Player Search's own "compare
+   against all of D-I" checkbox too (previously recomputed the same
+   aggregation independently, unconditionally, on every rerun) - one
+   cached computation instead of two independent uncached ones.
+
+3. **Positional matchup defense now shows which source it actually used**
+   ("Source: free ESPN season file." / "Source: CollegeBasketballData.com
+   (CBBD API calls used)."), right after loading - requested explicitly
+   ("i want to know if CBBD calls are occurring"). Determined from
+   `load_positional_matchup_data`'s own existing contract: it carries a
+   real `Position` value on every row when the free ESPN file was used,
+   and sets it to `None` on every row for the CBBD fallback (see that
+   function's docstring) - reused as the signal rather than threading a
+   new return value through the whole call chain.
+
+Verified via `streamlit.testing.v1.AppTest`: a synthetic conference-name-
+mismatch scenario (CBBD "ACC" vs. ESPN "Atlantic Coast Conference")
+confirming bars now render; a call-counting mock confirming the D-I
+aggregation only actually computes once across multiple reruns (cache
+hit, not recompute); and both branches of the source indicator (ESPN vs.
+CBBD-fallback `Position` columns) showing the correct caption. Still not
+verified against live CBBD/ESPN - same standing sandbox caveat as
+everything else in this pipeline.
+
+**Real bugs, live-confirmed after deploy: the ESPN roster/box-file id
+mismatch, and DNP rows inflating games
 played.** The previous pass's ESPN-native pipeline extension shipped
 without live verification (standard caveat for this sandbox). Once
 actually run against real data, three real, connected bugs surfaced:

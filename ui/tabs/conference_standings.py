@@ -52,8 +52,4 @@ def render():
         width="stretch", height=df_auto_height(len(indexed)),
         column_config=column_config,
     )
-    st.caption(
-        "Source: ESPN (public, no key required). Sorted by ESPN's own conference "
-        "ordering (playoff seed). Tiebreaker detail, NET-adjusted views, and "
-        "non-conference (overall) standings land in the data-wiring pass."
-    )
+    st.caption("Source: ESPN.")

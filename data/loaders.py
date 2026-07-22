@@ -1291,6 +1291,32 @@ def load_espn_season_player_box_native(season=None):
         return pd.DataFrame()
 
 
+@st.cache_data(show_spinner=False, persist="disk")
+def _espn_di_player_stats_cached(season, _bucket):
+    box_df = load_espn_season_player_box_native(season)
+    return espn_player_season_stats_for_teams(box_df, teams=None)
+
+
+def load_espn_di_player_stats(season=None):
+    """
+    The full-D-I `espn_player_season_stats_for_teams(box_df, teams=None)`
+    groupby, cached - this is the "compare against all of Division I"
+    comparison group both Player Search and Matchup Analyzer's PLAYER
+    panel build, and it was slow enough (a real pandas groupby over every
+    D-I player's whole season of box scores) to cause a noticeable pause
+    on every widget rerun, not just first load - confirmed as a real,
+    user-reported perf complaint, not a hypothetical one. Cached to the
+    SAME twice-weekly cadence as the underlying box file itself
+    (`_twice_weekly_bucket()` - recomputing more often than the source
+    data actually changes is pure waste), `persist="disk"` so a restarted
+    app reuses this instead of recomputing on the very next visit. Shared
+    by both callers specifically so they don't independently recompute
+    (or worse, silently drift on) the exact same D-I-wide aggregation.
+    """
+    season = season or current_cbb_season()
+    return _espn_di_player_stats_cached(season, _twice_weekly_bucket())
+
+
 def load_positional_matchup_data(team, season=None, max_recent_games=20):
     """
     Positional-matchup-defense data source for `team`, preferring the free
@@ -1508,6 +1534,7 @@ def clear_league_wide_caches():
     # own cache entry (the transformed output) that needs clearing too.
     _fetch_espn_season_box_raw_cached.clear()
     _load_espn_season_player_box_native_cached.clear()
+    _espn_di_player_stats_cached.clear()
 
 
 def _odds_api_key():

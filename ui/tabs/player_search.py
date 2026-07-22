@@ -64,6 +64,7 @@ import streamlit as st
 from config import AVAILABLE_SEASONS
 from data.loaders import (
     current_cbb_season, load_espn_teams, load_espn_roster, load_espn_season_player_box_native,
+    load_espn_di_player_stats,
 )
 from data.transforms import last_n_form, player_percentile_rows, espn_player_season_stats_for_teams, espn_player_result_map
 from data.utils import fuzzy_filter_names, match_player_name
@@ -229,7 +230,7 @@ def render():
         help="Free either way with this source — the whole season's already in one downloaded file, no per-team fan-out needed.",
     )
     if compare_all:
-        group_df = espn_player_season_stats_for_teams(box_df, teams=None)
+        group_df = load_espn_di_player_stats(season)
         group_label = "D-I"
     elif player_conf:
         conf_teams = espn_teams.loc[espn_teams['Conference'] == player_conf, 'Team'].tolist()
@@ -243,12 +244,9 @@ def render():
 
     render_relative_bars(rows)
     if not group_df.empty:
-        st.caption(
-            f"Bar position + color: this season's percentile vs. {group_label} (≥5 games played and ≥15 minutes "
-            f"per game, to keep the comparison group meaningful). Tick mark = the group's average. {games} games played."
-        )
+        st.caption(f"vs. {group_label} · {games} games played.")
     else:
-        st.caption(f"No comparison group available right now — showing raw values only. {games} games played.")
+        st.caption(f"No comparison group available. {games} games played.")
 
     _render_game_log_section(box_df, team, source_id, colors)
 
@@ -310,9 +308,4 @@ def _render_game_log_section(box_df, team, source_id, colors):
     render_sticky_footer_table(
         mine[table_cols], avg_row, numeric_cols=numeric_cols, team_color_map=colors,
         opponent_col='Opponent', win_loss_col='Result', height=360,
-    )
-    st.caption(
-        "Season averages stay pinned to the bottom of the table no matter where you've scrolled within it. "
-        "Opponent tinted by that team's color; Result (W/L) tinted green/red — derived locally from this "
-        "team's own summed box-score points per game, not a separate schedule/scores source."
     )

@@ -187,9 +187,5 @@ def render():
                     ]
                     shop_rows = [{'book': r['Book'], 'line': r['Line'], 'odds': r['Odds']} for _, r in bet_rows.iterrows()]
                     render_prop_line_shop(shop_rows)
-                    st.caption(
-                        "Sorted best price first (★) — for American odds, less-negative/more-positive is always "
-                        "the better price for the bettor, regardless of which side of zero it's on."
-                    )
             else:
                 st.info("No player props posted for this game yet by any tracked bookmaker.")

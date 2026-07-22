@@ -68,15 +68,8 @@ def render_setup_status_sidebar():
         _line(bool(cbbd_key), "CollegeBasketballData.com API key", "Configured", "Not set — see DATA_SOURCES.md")
         _line(bool(odds_key), "Odds API key", "Configured", "Not set — needed for Live Odds")
 
-        st.caption("This pass ships navigation and theme only — tabs go live as each source above is wired in during the follow-up data pass.")
-
         st.markdown("---")
         st.markdown("**League-wide data**")
-        st.caption(
-            "Percentiles, D-I rankings, and matchup defense profiles are cached ~weekly "
-            "(not re-fetched every visit) — a team/player's own stats stay fresh on their "
-            "usual short cache. Click below for a fresh league-wide pull on demand."
-        )
         if st.button("🔄 Refresh league-wide data", key="sb_refresh_league"):
             from data.loaders import clear_league_wide_caches
             clear_league_wide_caches()

@@ -139,8 +139,4 @@ def render():
         style_plain_dataframe(_fmt_bio_cols(display), numeric_pct_cols={'Stars': star_pct}),
         width="stretch", height=df_auto_height(min(len(display), 30)),
     )
-    st.caption(
-        "Recruiting and portal data via CollegeBasketballData.com. Height/weight are a best-effort field-name "
-        "guess, unverified against a live payload from this environment — may show '--' if the source doesn't "
-        "carry them under these names."
-    )
+    st.caption("Source: CollegeBasketballData.com.")

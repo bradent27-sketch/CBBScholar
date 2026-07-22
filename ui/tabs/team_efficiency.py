@@ -80,8 +80,6 @@ def _render_rankings_subtab(df, colors, ranked):
         x_label="Adjusted offensive rating (right = better offense)",
         y_label="Adjusted defensive rating (up = better defense)",
     )
-    st.caption("Each dot is a team in its own colors — hover for exact ratings. Dashed lines are the D-I medians, so the top-right quadrant is 'above-median both ways'.")
-
     # 'Team' stays a real column, not the index - Streamlit's dataframe
     # grid doesn't render Styler colors on index/row-header cells at all
     # (confirmed live), only on data columns, so a `.set_index('Team')`
@@ -111,12 +109,6 @@ def _render_rankings_subtab(df, colors, ranked):
         width="stretch", height=df_auto_height(min(len(display_df), 30)),
         column_config=column_config, hide_index=True,
     )
-    st.caption(
-        "Net Rating: points per 100 possessions better than an average team, adjusted "
-        "for opponent strength — this app's KenPom-equivalent (Def Rating: lower = better). "
-        "Net and Off Rating columns render as league-scaled meters. Rows colored by each team's own color."
-    )
-
 
 def _render_four_factors_subtab(df, ranked, season):
     team_stats = load_all_team_season_stats(season)
@@ -134,8 +126,3 @@ def _render_four_factors_subtab(df, ranked, season):
         st.info("No Four Factors data for this scope yet.")
     else:
         render_percentile_heatmap(pct_grid, raw_grid, ff_cols)
-        st.caption(
-            "Each cell is that team's D-I percentile on Dean Oliver's Four Factors (shooting, turnovers, "
-            "rebounding, free-throw rate), offense and defense sides shown separately — hover a cell for the "
-            "raw value. Rows sorted by average percentile across all eight columns, best profile first."
-        )

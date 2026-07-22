@@ -40,7 +40,7 @@ from config import AVAILABLE_SEASONS
 from data.loaders import (
     current_cbb_season, load_all_team_season_stats, load_team_roster, load_positional_matchup_data,
     get_player_season_profile, load_player_game_logs, load_conference_player_season_stats,
-    load_all_player_season_stats, load_teams, load_espn_teams,
+    load_all_player_season_stats, load_teams, load_espn_teams, load_espn_di_player_stats,
 )
 from data.transforms import (
     position_bucket, positional_defense_summary, positional_defense_trend,
@@ -73,10 +73,6 @@ def _safe_max_abs(series):
 
 def render():
     st.markdown("<div class='custom-section-header'>MATCHUP ANALYZER</div>", unsafe_allow_html=True)
-    st.caption(
-        "Pull up any player's stat profile next to any team's defense — built for individual matchup prep "
-        "(player props, \"how does this guy do against this defense\") rather than a team-vs-team projection."
-    )
 
     default_season = current_cbb_season()
     seasons = AVAILABLE_SEASONS if default_season in AVAILABLE_SEASONS else [default_season] + AVAILABLE_SEASONS
@@ -136,18 +132,31 @@ def _render_player_panel(season, teams_df):
     )
     if source == 'espn':
         # box_df is the SAME already-downloaded file get_player_season_profile
-        # used for `stats` above - a D-I-wide (or conference) group costs
-        # nothing extra here, unlike the CBBD branch below (see
-        # espn_player_season_stats_for_teams' docstring). Scoped against
-        # ESPN's OWN team list (not teams_df, which is CBBD-sourced) since
-        # box_df's 'Team' column uses ESPN's spelling - stats['Team'] IS
-        # that spelling for the selected player's own team already.
-        espn_conf_teams = None
-        if conf and not compare_all:
+        # used for `stats` above. Conference is looked up from ESPN's OWN
+        # team list for stats['Team'] (the box file's own spelling), NOT
+        # from `conf` (CBBD's spelling for team_choice) - those two
+        # sources don't always agree on conference-name formatting, and
+        # filtering ESPN's team list by a CBBD-spelled conference string
+        # was silently coming back empty for some players (no comparison
+        # bars at all - only the D-I checkbox worked, since that path
+        # never needs a conference match) - a real, reported bug. The
+        # D-I case is cached (load_espn_di_player_stats) since the full
+        # groupby was slow enough to cause a noticeable pause on every
+        # player switch, not just first load.
+        if compare_all:
+            group_df = load_espn_di_player_stats(season)
+            group_label = "D-I"
+        else:
             espn_teams_season = load_espn_teams(season)
-            espn_conf_teams = espn_teams_season.loc[espn_teams_season['Conference'] == conf, 'Team'].tolist()
-        group_df = espn_player_season_stats_for_teams(box_df, teams=espn_conf_teams)
-        group_label = "D-I" if (compare_all or not conf) else conf
+            espn_conf_row = espn_teams_season.loc[espn_teams_season['Team'] == stats['Team'], 'Conference']
+            espn_conf = espn_conf_row.iloc[0] if not espn_conf_row.empty else None
+            if espn_conf:
+                espn_conf_teams = espn_teams_season.loc[espn_teams_season['Conference'] == espn_conf, 'Team'].tolist()
+                group_df = espn_player_season_stats_for_teams(box_df, teams=espn_conf_teams)
+                group_label = espn_conf
+            else:
+                group_df = pd.DataFrame()
+                group_label = "conference"
     elif compare_all:
         with st.spinner("Loading Division I player stats..."):
             group_df = load_all_player_season_stats(season)
@@ -164,14 +173,10 @@ def _render_player_panel(season, teams_df):
     rows = player_percentile_rows(stats, group_df, _PLAYER_STAT_HELP, include_net_rating=include_net_rating)
     render_relative_bars(rows)
     if not group_df.empty:
-        st.caption(f"Percentile vs. {group_label} (≥5 games played). Tick mark = the group's average.")
+        st.caption(f"vs. {group_label}")
     else:
-        st.caption("No comparison group available right now — showing raw values only.")
-    st.caption(
-        "Source: free ESPN/SportsDataverse box file (refreshes twice weekly, zero CBBD-quota cost)."
-        if source == 'espn' else
-        "Source: CollegeBasketballData.com (couldn't match this player against ESPN's own roster/box-score data yet — see HANDOFF.md)."
-    )
+        st.caption("No comparison group available.")
+    st.caption("Source: free ESPN/SportsDataverse box file." if source == 'espn' else "Source: CollegeBasketballData.com.")
 
     st.markdown(f"**{sel_row['name']} — last 10 games vs season average**")
     if source == 'espn':
@@ -210,7 +215,6 @@ def _render_player_panel(season, teams_df):
     # Stacked one-per-row, not the 2-per-row grid an earlier team-vs-team
     # version used - this panel is now a half-width column, so a 2-across
     # grid would cramp each chart to a quarter of the page's width.
-    shown_any = False
     for stat, suffix in _PLAYER_TREND_STATS:
         if stat not in mine.columns:
             continue
@@ -218,11 +222,8 @@ def _render_player_panel(season, teams_df):
         st.markdown(f"_{stat} — last {len(values)} games_")
         if len(values) >= 2:
             render_trend_line(dates, values, avg=avg, avg_label='season avg', y_suffix=suffix, height=150)
-            shown_any = True
         else:
             st.caption("Not enough games yet for a trend.")
-    if shown_any:
-        st.caption("Green points are above the season average, red are below — a run of green is a player heating up.")
 
 
 def _position_map_for_matchup(matchup_df, season):
@@ -280,24 +281,11 @@ def _render_team_defense_panel(season, teams_df):
     if profile_rows:
         st.markdown(f"**{team} — defensive profile (vs D-I)**")
         render_relative_bars(profile_rows)
-        st.caption(
-            "Percentile vs all of D-I. Pace is context, not a quality claim (fast/slow isn't itself good or "
-            "bad defense - it just means more/fewer raw possessions to defend per game). Every stat after it "
-            "IS a quality claim with the correct direction baked in — an ALLOWED rate/percentage is colored "
-            "good when it's LOW; this team's own DREB% and TO ratio forced are colored good when HIGH."
-        )
     else:
         st.info(f"No defensive profile available for {team} yet.")
 
     st.markdown("---")
     st.markdown(f"**{team} — positional matchup defense**")
-    st.caption(
-        f"What opposing Guards/Forwards/Centers have actually done against {team} this season, relative to "
-        "those same players' own season averages — the 'is this defense good against guards or against bigs' "
-        "question. Built from this team's own recent games, preferring a free ESPN season file (zero CBBD-quota "
-        "cost) and falling back to CBBD's API (~1 call per opponent already faced) only where that free file "
-        "isn't available or fresh yet — see HANDOFF.md for the full architecture and caveats."
-    )
     recent_games_cap = st.slider(
         "Games to include (most recent)", min_value=5, max_value=30, value=20, step=5,
         key="ma_pos_defense_window",
@@ -318,6 +306,14 @@ def _render_team_defense_panel(season, teams_df):
     if matchup_df.empty:
         st.info(f"No opponent game log data available for {team} yet.")
         return
+    # load_positional_matchup_data carries a real Position value on every
+    # row when the free ESPN file was used, and sets it to None on every
+    # row for the CBBD fallback (see that function's docstring) - the
+    # cheapest reliable signal for which source this particular click
+    # actually used, without needing a second return value threaded
+    # through the whole call chain.
+    used_espn = 'Position' in matchup_df.columns and matchup_df['Position'].notna().any()
+    st.caption("Source: free ESPN season file." if used_espn else "Source: CollegeBasketballData.com (CBBD API calls used).")
     pos_map = _position_map_for_matchup(matchup_df, season)
     summary = positional_defense_summary(matchup_df, pos_map)
     if summary.empty:
@@ -334,10 +330,6 @@ def _render_team_defense_panel(season, teams_df):
             'Assists Delta': _safe_max_abs(display['Assists Delta']),
         }),
         width="stretch", height=df_auto_height(len(display)),
-    )
-    st.caption(
-        "Allowed = mean stat line in games against this team. Delta = allowed minus that player's OWN "
-        "season average (green = outperforming their normal production against this team; red = held below it)."
     )
 
     # Position-group picker + all three stats for whichever bucket is

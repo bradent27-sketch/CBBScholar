@@ -192,7 +192,7 @@ def _render_delta_table(row_a, row_b, stats_a, stats_b):
         style_plain_dataframe(df, diverging_cols={'Edge %': max_abs}),
         width="stretch", height=df_auto_height(len(df)),
     )
-    st.caption(f"Edge %: relative difference — green = {row_a['name']} leads, red = {row_b['name']} leads.")
+    st.caption(f"Green = {row_a['name']} leads, red = {row_b['name']} leads.")
 
 
 _RADAR_AXES = ['PPG', 'RPG', 'APG', 'FG%', '3P%', 'Usage %']
@@ -213,8 +213,4 @@ def _render_radar_section(team_a, team_b, row_a, row_b, colors, stats_a, stats_b
     render_radar(
         axes, stats_a, stats_b, row_a['name'], row_b['name'],
         color_a=colors.get(team_a), color_b=colors.get(team_b),
-    )
-    st.caption(
-        "Each axis is scaled to these two players only (not a league percentile) — the shape shows relative "
-        "strengths between them, not where either player ranks nationally."
     )

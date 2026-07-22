@@ -34,12 +34,6 @@ _NET_DISPLAY_COLS = ['Rank', 'Team', 'Conference', 'Record', 'Prev', 'Quad 1', '
 
 def render():
     st.markdown("**NET Rankings &amp; Quad Records**")
-    st.caption(
-        "Real data from ncaa.com's official NET rankings page — the only place this exists "
-        "for free (not CollegeBasketballData.com, not ESPN, confirmed by checking both "
-        "directly). ncaa.com's terms of service restrict automated access, so this is a "
-        "manual, one-click fetch — never automatic, never on a schedule."
-    )
 
     if st.button("Fetch latest NET rankings from NCAA.com"):
         st.session_state['net_data_fetched'] = True
@@ -67,9 +61,9 @@ def render():
                 style_plain_dataframe(display_df, team_color_map=net_colors),
                 width="stretch", height=df_auto_height(min(len(display_df), 30)), hide_index=True,
             )
-            st.caption(f"{len(shown)} of {len(net_df)} teams shown. Source: ncaa.com, fetched on your request, cached 24h.")
+            st.caption(f"{len(shown)} of {len(net_df)} teams shown. Source: ncaa.com.")
     else:
-        st.info("Click above to fetch real NET rank and Quad 1-4 records — cached for 24 hours after each fetch.")
+        st.info("Click above to fetch real NET rank and Quad 1-4 records.")
 
     st.markdown("---")
     st.markdown("**Polls (AP / Coaches)**")
@@ -127,7 +121,3 @@ def render():
         st.info("No trajectory data for this poll.")
         return
     render_rank_trajectory(pivot, labels, team_color_map(season))
-    st.caption(
-        "Rank 1 at the top; a line gap = the team dropped out of the poll that week. "
-        "Hover any point for the exact week and rank. Same cached data as the table above — no extra API cost."
-    )
