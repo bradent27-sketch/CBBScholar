@@ -5,7 +5,7 @@ import streamlit as st
 
 from config import AVAILABLE_SEASONS_WITH_UPCOMING
 from data.loaders import current_cbb_season, list_conferences, load_conference_standings, team_color_map
-from ui.styling import style_plain_dataframe, df_auto_height, build_column_help_config
+from ui.styling import df_auto_height, build_column_help_config, render_responsive_table
 
 
 def render():
@@ -47,9 +47,8 @@ def render():
     # coverage from the ~70 hand-typed config.TEAM_CONFIG entries to all of
     # D-I instead of relying on style_plain_dataframe's implicit fallback.
     standings_colors = team_color_map(season)
-    st.dataframe(
-        style_plain_dataframe(indexed, team_color_map=standings_colors),
-        width="stretch", height=df_auto_height(len(indexed)),
-        column_config=column_config,
+    render_responsive_table(
+        f"conference_standings_{conf_abbr}", indexed, primary_col='Team', index_label='Rank',
+        team_color_map=standings_colors, height=df_auto_height(len(indexed)), column_config=column_config,
     )
     st.caption("Source: ESPN.")

@@ -9,6 +9,7 @@ primary color instead, so the accent is driven entirely by config.py.
 import base64
 import html
 import os
+import re
 
 import pandas as pd
 import streamlit as st
@@ -526,6 +527,156 @@ def inject_theme():
         button[data-testid="stBaseButton-elementToolbar"]:hover {{
             color: {C['primary']} !important;
         }}
+
+        /* ===================================================================
+           MOBILE RESPONSIVENESS (<=767px only) - every rule in this block is
+           scoped to this one media query, so nothing here touches >=768px.
+           Two different patterns depending on what a given table actually IS:
+           1. Hand-rolled HTML tables (render_sticky_footer_table's
+              `.sft-table`) are real DOM - a genuine table-row -> card CSS
+              transform is possible and lives here.
+           2. st.dataframe tables are canvas-rendered (glide-data-grid) - CSS
+              cannot restyle individual cells/rows in them at all (see the
+              chart-hover-affordance comment above, confirmed live). Those get
+              a SEPARATE hand-rolled mobile card component instead
+              (ui.styling.render_responsive_table), toggled by the .st-key-*
+              classes st.container(key=...) emits - a media query choosing
+              WHICH of two whole components to show, not a query reaching
+              inside the dataframe itself.
+           =================================================================== */
+        @media (max-width: 767px) {{
+            /* --- render_sticky_footer_table: row -> card. Header hidden (each
+               cell shows its own label instead, via the data-label attribute
+               that function now emits); every column stays present, just
+               reflowed into a labeled grid.
+
+               .sft-wrap's max-height (set inline, in px, per-call) was tuned
+               for compact TABLE ROWS (~35px each) - a card is 3-5x taller, so
+               reusing that same px cap here would clip cards mid-content
+               (confirmed live: a 300px cap tuned for ~8 rows only fit about
+               half of one card). Override with a viewport-relative height
+               instead of a fixed px value so it scales sanely across phone
+               sizes, while still keeping the sticky-footer-in-a-scroll-box
+               behavior (an unbounded height would break `position: sticky`'s
+               "stick to the bottom of ITS scrolling ancestor" meaning). */
+            .sft-wrap {{ max-height: 65vh !important; }}
+            .sft-table thead {{ display: none; }}
+            .sft-table, .sft-table tbody {{ display: block; width: 100% !important; }}
+            .sft-table tr.sft-row, .sft-table tr.sft-footer-row {{
+                display: flex !important;
+                flex-wrap: wrap;
+                gap: 2px 14px;
+                width: 100% !important;
+                border: 1px solid {C['outline_variant']};
+                border-radius: {R['md']};
+                margin: 0 0 8px 0;
+                padding: 10px 12px;
+                background: {C['surface_container']};
+            }}
+            .sft-table tr.sft-footer-row {{
+                position: sticky;
+                bottom: 0;
+                border-color: {C['primary']};
+                border-top: 2px solid {C['primary']};
+                background: {C['surface_container_high']};
+                margin-top: 4px;
+            }}
+            .sft-table tr.sft-row td, .sft-table tr.sft-footer-row td {{
+                display: block !important;
+                position: static !important;
+                flex: 1 1 26%;
+                padding: 2px 4px !important;
+                white-space: normal !important;
+                text-align: left !important;
+                border: none !important;
+                border-radius: {R['sm']};
+            }}
+            .sft-table tr.sft-row td::before, .sft-table tr.sft-footer-row td::before {{
+                content: attr(data-label);
+                display: block;
+                font-size: 9px;
+                font-weight: 700;
+                text-transform: uppercase;
+                letter-spacing: 0.05em;
+                color: {C['on_surface_variant']};
+                margin-bottom: 1px;
+            }}
+
+            /* --- render_responsive_table's mobile card list (st.dataframe
+               replacement) - see that function's own docstring for the
+               desktop/mobile toggle mechanism. Cards use the same visual
+               language as .sft-table above for consistency. */
+            .rt-card {{
+                border: 1px solid {C['outline_variant']};
+                border-radius: {R['md']};
+                padding: 10px 12px;
+                margin: 0 0 8px 0;
+                background: {C['surface_container']};
+                font-family: {F['mono']};
+                font-size: 12px;
+                color: {C['on_surface']};
+            }}
+            .rt-card .rt-primary {{
+                font-size: 14px;
+                font-weight: 700;
+                margin-bottom: 6px;
+                padding-bottom: 6px;
+                border-bottom: 1px solid {C['outline_variant']};
+            }}
+            .rt-card .rt-fields {{
+                display: flex;
+                flex-wrap: wrap;
+                gap: 4px 14px;
+            }}
+            .rt-card .rt-field {{
+                flex: 1 1 40%;
+            }}
+            .rt-card .rt-field .rt-label {{
+                display: block;
+                font-size: 9px;
+                font-weight: 700;
+                text-transform: uppercase;
+                letter-spacing: 0.05em;
+                color: {C['on_surface_variant']};
+                margin-bottom: 1px;
+            }}
+
+            /* --- Touch targets: buttons/selects/inputs/checkbox/slider all
+               bumped to >=44x44px (WCAG 2.5.5 / Apple & Material HIG's
+               shared minimum) - desktop's own sizing (set earlier in this
+               file, outside this media query) is untouched. Every selector
+               below is a STABLE Streamlit-assigned class/testid (.stButton,
+               .stCheckbox, data-testid="stSlider", etc.), not one of
+               Streamlit's own internal emotion-hashed classes (those change
+               across versions and would be fragile to depend on). */
+            .stButton button, .stDownloadButton button {{
+                min-height: 44px;
+                min-width: 44px;
+                padding: 10px 20px !important;
+            }}
+            .stSelectbox [role="group"], .stMultiSelect [role="group"],
+            .stNumberInput [role="group"], .stDateInput [role="group"],
+            div[data-baseweb="select"] > div, .stTextInput input, .stTextArea textarea, .stNumberInput input {{
+                min-height: 44px !important;
+            }}
+            /* Checkbox: the native input is tiny (~13px) but its <label>
+               wraps the whole row and IS the real click target per HTML
+               semantics - stretch that to 44px instead of resizing the
+               checkbox glyph itself (which would look oversized/broken). */
+            .stCheckbox {{
+                min-height: 44px;
+                display: flex;
+                align-items: center;
+            }}
+            /* Slider: the actual thumb lives inside Streamlit's own
+               emotion-hashed markup (unstable across versions - not safe to
+               target directly). Thickening the stable [role="group"] drag
+               strip widens the effective grabbable area without depending
+               on those internal class names. */
+            div[data-testid="stSlider"] [role="group"] {{
+                padding: 10px 0;
+            }}
+        }}
         </style>
     """, unsafe_allow_html=True)
 
@@ -745,7 +896,8 @@ def _table_decimals(series):
 
 
 def render_sticky_footer_table(df, footer, numeric_cols=None, team_color_map=None,
-                                opponent_col=None, win_loss_col=None, height=360):
+                                opponent_col=None, win_loss_col=None, height=360,
+                                mobile_headline_cols=None):
     """
     Hand-rolled scrollable HTML table with a CSS `position: sticky` FOOTER
     row (a season-average row, in practice) that stays visible at the
@@ -772,6 +924,20 @@ def render_sticky_footer_table(df, footer, numeric_cols=None, team_color_map=Non
     style_plain_dataframe, applied to `df`'s rows only - the footer row
     gets its own fixed highlighted treatment instead (it isn't a real
     per-game Opponent/Result, so team/W-L tinting doesn't apply to it).
+
+    Mobile (<=767px): since this is real DOM (not st.dataframe's canvas),
+    a CSS-only "row becomes a card" transform is possible here and lives in
+    ui.styling.inject_theme()'s `.sft-table` media-query block - every
+    `<td>` gets a `data-label` attribute (its column name) so the mobile
+    CSS can render a label above each value via `content: attr(data-label)`
+    without any Python-side layout logic. `mobile_headline_cols`: which
+    columns should visually lead each mobile card (larger, promoted to the
+    top via CSS `order` - DOM order is untouched, only visual order changes)
+    - defaults to the first 4 columns of `df` if not given, a reasonable
+    "identity fields first" fallback for any future caller of this
+    already-generic function. The footer row gets its own `sft-footer-row`
+    class so it becomes a distinct summary card on mobile instead of just
+    another row.
     """
     if df is None or df.empty:
         return
@@ -780,6 +946,7 @@ def render_sticky_footer_table(df, footer, numeric_cols=None, team_color_map=Non
         c for c in cols if pd.api.types.is_numeric_dtype(df[c])
     }
     decimals = {c: _table_decimals(df[c]) for c in numeric_cols}
+    headline_cols = list(mobile_headline_cols) if mobile_headline_cols else cols[:4]
 
     team_color_map = team_color_map or {}
     norm_team_map = _expand_with_aliases({_normalize_team_name(k): v for k, v in team_color_map.items()})
@@ -809,7 +976,8 @@ def render_sticky_footer_table(df, footer, numeric_cols=None, team_color_map=Non
                 style += f"background:{C['positive']}2e; color:{C['positive']}; font-weight:800;"
             elif v == 'L':
                 style += f"background:{C['negative']}2e; color:{C['negative']}; font-weight:800;"
-        return f"<td style='{style}'>{text}</td>"
+        label = html.escape(str(col))
+        return f"<td data-label='{label}' style='{style}'>{text}</td>"
 
     header_html = "".join(
         f"<th style='position:sticky; top:0; z-index:2; background:{C['surface_container_high']}; "
@@ -824,19 +992,254 @@ def render_sticky_footer_table(df, footer, numeric_cols=None, team_color_map=Non
     )
     footer_get = footer.get if hasattr(footer, 'get') else (lambda c: footer[c])
     footer_html = "".join(
-        f"<td style='position:sticky; bottom:0; z-index:2; background:{C['surface_container_high']}; "
-        f"border-top:2px solid {C['primary']}; padding:7px 10px; font-weight:700; white-space:nowrap; "
-        f"text-align:{'right' if c in numeric_cols else 'left'};'>{_fmt(c, footer_get(c))}</td>"
+        f"<td data-label='{html.escape(str(c))}' style='position:sticky; bottom:0; z-index:2; "
+        f"background:{C['surface_container_high']}; border-top:2px solid {C['primary']}; padding:7px 10px; "
+        f"font-weight:700; white-space:nowrap; text-align:{'right' if c in numeric_cols else 'left'};'>"
+        f"{_fmt(c, footer_get(c))}</td>"
         for c in cols
     )
+    # Per-instance mobile headline-column CSS (which columns visually lead
+    # each card) - scoped to a media query so it never affects desktop's
+    # table-cell layout, and kept per-call (not in the shared inject_theme()
+    # block) since `headline_cols` varies by caller/dataset. Safe with a
+    # single caller today (Player Search's game log); a second caller with
+    # different headline columns for the SAME data-label names would need
+    # its own scoping if that ever comes up - not a real risk yet.
+    headline_css = "".join(f"td[data-label='{html.escape(str(c))}']," for c in headline_cols).rstrip(',')
+    mobile_instance_css = (
+        f"@media (max-width: 767px) {{ {headline_css} {{ order: -1; font-weight: 700; font-size: 13px; flex-basis: 46%; }} }}"
+        if headline_css else ""
+    )
     st.markdown(
-        f"<div style='max-height:{height}px; overflow:auto; border:1px solid {C['outline_variant']}; "
+        f"<div class='sft-wrap' style='max-height:{height}px; overflow:auto; border:1px solid {C['outline_variant']}; "
         f"border-radius:{R['sm']}; background:{C['surface_container']};'>"
-        f"<style>.sft-row:hover td {{ background:rgba({_PRIMARY_RGB}, 0.06); }}</style>"
-        f"<table style='width:100%; border-collapse:collapse; font-family:{F['mono']}; font-size:12px; "
-        f"color:{C['on_surface']};'>"
+        f"<style>.sft-row:hover td {{ background:rgba({_PRIMARY_RGB}, 0.06); }} {mobile_instance_css}</style>"
+        f"<table class='sft-table' style='width:100%; border-collapse:collapse; font-family:{F['mono']}; "
+        f"font-size:12px; color:{C['on_surface']};'>"
         f"<thead><tr>{header_html}</tr></thead>"
-        f"<tbody>{body_html}<tr>{footer_html}</tr></tbody>"
+        f"<tbody>{body_html}<tr class='sft-footer-row'>{footer_html}</tr></tbody>"
         f"</table></div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _mobile_cell_bg(row, pos, col, diverging_cols, pct_arrays, matchup_arrays,
+                     team_color_map, norm_team_map, opponent_col, opponent_color_map,
+                     norm_opp_map, win_loss_col):
+    """
+    One cell's (background, text_color, font_weight) for
+    render_responsive_table's mobile card list - (None, None, None) means
+    "no special tint, just the card's own default text color."
+
+    Deliberately a SEPARATE, self-contained implementation of the same five
+    color rules `style_plain_dataframe`'s `style_row` already applies
+    (diverging -> matchup -> percentile -> Team -> opponent -> win/loss),
+    NOT a refactor of that function's internals - this app's mobile
+    overhaul is explicitly required to leave the proven, already-live
+    desktop rendering untouched, and the safest way to guarantee that is to
+    never modify the function desktop already depends on. A small amount
+    of intentional duplication here is the trade-off for that guarantee.
+    """
+    if col in diverging_cols:
+        return get_diverging_color(row[col], diverging_cols[col]), '#ffffff', '700'
+    if col in matchup_arrays and pos < len(matchup_arrays[col]):
+        return get_matchup_color(matchup_arrays[col][pos]), '#ffffff', '700'
+    if col in pct_arrays and pos < len(pct_arrays[col]):
+        return get_grade_color(pct_arrays[col][pos]), '#ffffff', '700'
+    if col == 'Team':
+        team_color = team_color_map.get(str(row[col])) or norm_team_map.get(_normalize_team_name(str(row[col])))
+        if team_color:
+            return team_color, '#ffffff', '700'
+        return None, None, None
+    if opponent_col and col == opponent_col:
+        opp_color = opponent_color_map.get(str(row[col])) or norm_opp_map.get(_normalize_team_name(str(row[col])))
+        if opp_color:
+            return f"{opp_color}66", '#ffffff', '600'
+        return None, None, None
+    if win_loss_col and col == win_loss_col:
+        v = str(row[col]).strip().upper()
+        if v == 'W':
+            return f"{C['positive']}2e", C['positive'], '800'
+        if v == 'L':
+            return f"{C['negative']}2e", C['negative'], '800'
+        return None, None, None
+    return None, None, None
+
+
+def render_responsive_table(key, df, primary_col=None, card_fields=None, index_label=None,
+                             numeric_pct_cols=None, diverging_cols=None, matchup_pct_cols=None,
+                             team_color_map=None, opponent_col=None, opponent_color_map=None,
+                             win_loss_col=None, height=None, mobile_max_height="65vh", **dataframe_kwargs):
+    """
+    Drop-in wrapper around `st.dataframe(style_plain_dataframe(df, ...), ...)`
+    that ALSO renders a mobile card-list version of the SAME data, with pure
+    CSS choosing which one is visible per viewport width.
+
+    WHY a second, separate rendering instead of a media query reaching
+    INTO the dataframe: st.dataframe's grid (glide-data-grid) is canvas-
+    rendered, not real DOM - already confirmed elsewhere in this app
+    (see the chart-hover-affordance comment in inject_theme(), and
+    render_sticky_footer_table's own docstring) that CSS cannot restyle
+    individual cells/rows inside it, add hover states, or turn a row into a
+    card. The only way to get a card layout for this data on mobile is a
+    SECOND, independent rendering - so this renders both every time and
+    lets CSS show exactly one, keyed off the `st-key-` class Streamlit
+    gives an `st.container(key=...)` (confirmed against this app's pinned
+    Streamlit version).
+
+    The desktop path below is BYTE-IDENTICAL to what every existing caller
+    used to call directly (`st.dataframe(style_plain_dataframe(df, **kwargs),
+    width="stretch", height=height, **dataframe_kwargs)`) - just wrapped in
+    a keyed container so CSS can address it. Nothing about `style_plain_
+    dataframe` itself changes, and no desktop-visible behavior changes.
+
+    `key`: required, unique per call site (e.g. "team_efficiency_rankings",
+    or an f-string interpolating a team/player name) - becomes both
+    containers' `st.container(key=...)` value AND the CSS class the
+    show/hide media queries target. Sanitized internally (non
+    alphanumeric/underscore/hyphen -> hyphen) BEFORE either use, matching
+    Streamlit's own key->CSS-class sanitization (confirmed in its frontend
+    source) - callers can safely pass a raw team/player name containing
+    spaces without producing a broken CSS selector (an earlier version of
+    this function didn't do this and silently emitted an invalid selector
+    for any key containing a space, e.g. "positional_defense_North
+    Carolina State").
+    `primary_col`: the card's bold headline field - a column name, a list of
+    column names (joined with " — "), or `None` to use `df`'s own index
+    (the natural choice for tables indexed on the row subject, e.g.
+    Positional Defense's Bucket or Compare's Stat name). Excluded from the
+    field grid below when it's a real column (never double-shown).
+    `card_fields`: optional explicit ordered list of which OTHER columns to
+    show in the card body - defaults to every remaining column in `df`'s
+    own order. Every data FIELD desktop shows is still shown on mobile
+    either way; this only controls display ORDER, never omission.
+    `index_label`: optional short prefix (e.g. "Rank", "#") shown before
+    the headline using the row's own pandas index value - for tables where
+    the index carries a meaningful rank/order (Transfer Portal, Conference
+    Standings) alongside a real `primary_col`. Ignored when `primary_col`
+    is `None` (the index IS already the headline in that case).
+    `numeric_pct_cols`/`diverging_cols`/`matchup_pct_cols`/`team_color_map`/
+    `opponent_col`/`opponent_color_map`/`win_loss_col`: forwarded straight
+    to `style_plain_dataframe` for the desktop path, AND used to compute
+    matching colors for the mobile cards via `_mobile_cell_bg` (same
+    values, independently-implemented color logic - see that function's
+    docstring for why it's not shared code with the Styler).
+    `height`/`**dataframe_kwargs`: forwarded to the desktop `st.dataframe`
+    call exactly as an existing direct call would have passed them
+    (column_config, hide_index, etc.). `mobile_max_height`: a CSS max-height
+    VALUE (not a bare number - include the unit, e.g. "65vh" or "440px") for
+    the mobile card list's own scroll container - defaults to a viewport-
+    relative value rather than reusing `height` (which is tuned in px for
+    compact table ROWS, not much-taller cards - reusing it as-is clipped
+    card content mid-render, confirmed live against render_sticky_footer_
+    table's identical height-reuse mistake before this default was added).
+    """
+    if df is None or df.empty:
+        return
+    safe_key = re.sub(r'[^a-zA-Z0-9_-]', '-', str(key))
+    desktop_key = f"rt-desktop-{safe_key}"
+    mobile_key = f"rt-mobile-{safe_key}"
+
+    with st.container(key=desktop_key):
+        st.dataframe(
+            style_plain_dataframe(
+                df, numeric_pct_cols=numeric_pct_cols, diverging_cols=diverging_cols,
+                matchup_pct_cols=matchup_pct_cols, team_color_map=team_color_map,
+                opponent_col=opponent_col, opponent_color_map=opponent_color_map, win_loss_col=win_loss_col,
+            ),
+            width="stretch", height=height, **dataframe_kwargs,
+        )
+
+    with st.container(key=mobile_key):
+        _render_mobile_card_list(
+            df, primary_col=primary_col, card_fields=card_fields, index_label=index_label,
+            numeric_pct_cols=numeric_pct_cols, diverging_cols=diverging_cols, matchup_pct_cols=matchup_pct_cols,
+            team_color_map=team_color_map, opponent_col=opponent_col, opponent_color_map=opponent_color_map,
+            win_loss_col=win_loss_col, max_height=mobile_max_height,
+        )
+
+    # Per-instance show/hide toggle - the ONLY thing that decides which of
+    # the two already-rendered components is visible. Scoped to these two
+    # exact keys, so it can never affect any other table's containers.
+    st.markdown(
+        f"<style>"
+        f"@media (max-width: 767px) {{ div.st-key-{desktop_key} {{ display: none !important; }} }}"
+        f"@media (min-width: 768px) {{ div.st-key-{mobile_key} {{ display: none !important; }} }}"
+        f"</style>",
+        unsafe_allow_html=True,
+    )
+
+
+def _render_mobile_card_list(df, primary_col, card_fields, index_label,
+                              numeric_pct_cols, diverging_cols, matchup_pct_cols,
+                              team_color_map, opponent_col, opponent_color_map, win_loss_col,
+                              max_height):
+    """The actual mobile card markup for render_responsive_table - see that
+    function's docstring for every parameter's meaning."""
+    cols = list(df.columns)
+    primary_is_column = primary_col is not None
+    primary_col_list = [] if not primary_is_column else (
+        primary_col if isinstance(primary_col, (list, tuple)) else [primary_col]
+    )
+    fields = list(card_fields) if card_fields else [c for c in cols if c not in primary_col_list]
+
+    numeric_cols = {c for c in cols if pd.api.types.is_numeric_dtype(df[c])}
+    decimals = {c: _table_decimals(df[c]) for c in numeric_cols}
+
+    def _fmt(col, value):
+        if col in numeric_cols:
+            v = pd.to_numeric(pd.Series([value]), errors='coerce').iloc[0]
+            return '--' if pd.isna(v) else f"{v:.{decimals.get(col, 1)}f}"
+        return '--' if value is None or (isinstance(value, float) and pd.isna(value)) else html.escape(str(value))
+
+    team_color_map = team_color_map if team_color_map is not None else {v['name']: v['color'] for v in TEAM_CONFIG.values()}
+    team_color_map = {**team_color_map, **{k: v['color'] for k, v in TEAM_CONFIG.items()}}
+    opponent_color_map = opponent_color_map if opponent_color_map is not None else (team_color_map if opponent_col else {})
+    norm_team_map = _expand_with_aliases({_normalize_team_name(k): v for k, v in team_color_map.items()})
+    norm_opp_map = _expand_with_aliases({_normalize_team_name(k): v for k, v in opponent_color_map.items()})
+    pct_arrays = {col: list(vals) for col, vals in (numeric_pct_cols or {}).items()}
+    matchup_arrays = {col: list(vals) for col, vals in (matchup_pct_cols or {}).items()}
+    diverging_cols = diverging_cols or {}
+
+    def _tinted(col, value, bg, fg, fw):
+        text = _fmt(col, value)
+        if not bg:
+            return text
+        style = f"background:{bg}; color:{fg}; font-weight:{fw}; border-radius:{R['sm']}; padding:1px 7px; display:inline-block;"
+        return f"<span style='{style}'>{text}</span>"
+
+    cards = []
+    for pos, (idx, row) in enumerate(df.iterrows()):
+        if primary_is_column:
+            headline_text = " — ".join(html.escape(str(row[c])) for c in primary_col_list)
+            bg, fg, fw = _mobile_cell_bg(
+                row, pos, primary_col_list[0], diverging_cols, pct_arrays, matchup_arrays,
+                team_color_map, norm_team_map, opponent_col, opponent_color_map, norm_opp_map, win_loss_col,
+            )
+            if bg:
+                style = f"background:{bg}; color:{fg}; border-radius:{R['sm']}; padding:2px 8px; display:inline-block;"
+                headline_text = f"<span style='{style}'>{headline_text}</span>"
+            prefix = f"{html.escape(str(index_label))} {idx} — " if index_label else ""
+        else:
+            prefix = ""
+            headline_text = html.escape(str(idx))
+
+        field_html = []
+        for col in fields:
+            bg, fg, fw = _mobile_cell_bg(
+                row, pos, col, diverging_cols, pct_arrays, matchup_arrays,
+                team_color_map, norm_team_map, opponent_col, opponent_color_map, norm_opp_map, win_loss_col,
+            )
+            field_html.append(
+                f"<div class='rt-field'><span class='rt-label'>{html.escape(str(col))}</span>"
+                f"{_tinted(col, row[col], bg, fg, fw)}</div>"
+            )
+        cards.append(
+            f"<div class='rt-card'><div class='rt-primary'>{prefix}{headline_text}</div>"
+            f"<div class='rt-fields'>{''.join(field_html)}</div></div>"
+        )
+
+    st.markdown(
+        f"<div style='max-height:{max_height}; overflow:auto;'>{''.join(cards)}</div>",
         unsafe_allow_html=True,
     )

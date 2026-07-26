@@ -218,12 +218,12 @@ def _render_delta_table(row_a, row_b, stats_a, stats_b):
             'Edge %': round(rel, 1),
         })
     import pandas as pd
-    from ui.styling import style_plain_dataframe, df_auto_height
+    from ui.styling import df_auto_height, render_responsive_table
     df = pd.DataFrame(rows).set_index('Stat')
     max_abs = df['Edge %'].abs().max() or 1
-    st.dataframe(
-        style_plain_dataframe(df, diverging_cols={'Edge %': max_abs}),
-        width="stretch", height=df_auto_height(len(df)),
+    render_responsive_table(
+        f"compare_delta_{row_a['name']}_{row_b['name']}", df, primary_col=None,
+        diverging_cols={'Edge %': max_abs}, height=df_auto_height(len(df)),
     )
     st.caption(f"Green = {row_a['name']} leads, red = {row_b['name']} leads.")
 

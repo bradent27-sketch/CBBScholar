@@ -5,6 +5,85 @@ Sibling app to NFL Scholar (`C:\FantasyF`) and CFB Scholar
 college basketball. This doc follows NFL Scholar's own HANDOFF.md section
 structure on purpose, so all three stay easy to cross-reference.
 
+**Mobile responsiveness overhaul (this doc's most recent update):** every
+wide data table now gets a real mobile card layout below 768px, with the
+desktop `st.dataframe`/table code paths left completely untouched (verified
+live, not just by reading the code - see below). Two different mechanisms
+depending on what a table actually IS in the DOM:
+
+1. **`render_sticky_footer_table`** (Player Search's game log - the one
+   hand-rolled real-DOM table in this app) gets a pure CSS
+   `@media (max-width: 767px)` transform in `ui.styling.inject_theme()`:
+   header hidden, each row becomes a bordered card, each cell shows its own
+   label via a new `data-label` attribute + CSS `content: attr(data-label)`.
+   A new `mobile_headline_cols` param lets the caller promote specific
+   fields (Date/Opponent/Result/Points) to the top of each card via CSS
+   `order` - DOM order is unchanged, only visual order. The wrapping
+   scroll container's `max-height` (tuned in px for compact table rows)
+   is overridden to a viewport-relative `65vh` on mobile via a new
+   `.sft-wrap` class - reusing the row-height px value clipped card
+   content mid-render, a real bug caught via live Playwright screenshot
+   before this fix, not just code review.
+2. **`st.dataframe` tables** (the other 9 - Team Efficiency, NET rankings,
+   Polls, Positional Matchup Defense, Compare's delta table, Live Odds'
+   two tables, Transfer Portal's two tables, Conference Standings) are
+   canvas-rendered (glide-data-grid) - already confirmed elsewhere in this
+   doc that CSS cannot reach into that canvas at all. A media query
+   INSIDE the dataframe was never going to work. New
+   `ui.styling.render_responsive_table` instead renders BOTH the existing,
+   byte-identical desktop `st.dataframe(style_plain_dataframe(df, ...), ...)`
+   call AND a new hand-rolled mobile card list for the same data, each
+   wrapped in `st.container(key=...)` - Streamlit gives that a real,
+   addressable `st-key-<key>` CSS class (confirmed against this app's
+   pinned Streamlit 1.60 via direct frontend-bundle inspection, not
+   assumed from docs) - and a per-instance CSS block shows exactly one of
+   the two based on viewport width. Every existing caller's `style_plain_
+   dataframe` kwargs (team_color_map, diverging_cols, numeric_pct_cols,
+   opponent_col, win_loss_col) are forwarded unchanged to the desktop
+   path AND independently re-implemented (deliberately NOT a shared
+   refactor - see `_mobile_cell_bg`'s docstring for why) for the mobile
+   cards, so both sides color-code identically without risking the
+   proven desktop Styler. `primary_col` accepts a column name, a list of
+   column names (for compound-key tables like Live Odds' props comparison
+   or Compare's Market/Player/Selection rows), or `None` to use the
+   DataFrame's own index (Positional Defense's Bucket, Compare's Stat
+   name). A real bug caught and fixed before shipping: the `key` string
+   (which can be an f-string interpolating a team/player name, e.g.
+   "positional_defense_North Carolina State") needs sanitizing the SAME
+   way Streamlit sanitizes it for the CSS class name (non
+   alphanumeric/underscore/hyphen -> hyphen) BEFORE building the show/hide
+   CSS selector, or a name containing a space produces a broken selector
+   - confirmed by reading Streamlit's own frontend bundle's sanitization
+   regex and matching it exactly.
+
+Also: every touch target (buttons, selectboxes, multiselect, text inputs,
+checkboxes, the positional-defense games-per-team slider) bumped to
+>=44x44px below 768px, using only Streamlit's STABLE component classes/
+testids (`.stButton`, `.stCheckbox`, `data-testid="stSlider"`, etc.), not
+its internal emotion-hashed classes (those change across versions). One
+honest limitation flagged, not silently glossed over: `st.dataframe`'s
+in-canvas column-sort headers cannot be resized via CSS at all (same
+canvas limitation as above) - mitigated, not fixed, by the mobile card
+view providing its own real, properly-sized filter/sort controls instead
+of asking mobile users to tap the tiny canvas header.
+
+**Verification**: unlike most passes in this doc, this one was checked
+against a REAL running app in a REAL headless browser (Playwright,
+pre-installed in this environment) at both a 1280px desktop and a 375-
+390px mobile viewport, not just AppTest/code-reading - confirmed live:
+the desktop `st.dataframe` grid renders pixel-identical to before at
+1280px; at mobile width the desktop container's computed `display` is
+`none` and the mobile card container's is not, with real team names
+appearing in the page's extracted text only in the mobile case (proving
+the canvas dataframe truly isn't there vs. the real-DOM cards truly are);
+touch targets measured >=44px via `boundingBox()` on mobile and
+unchanged at desktop width. This caught two real bugs pure code review
+would have missed (the `sft-wrap` height-clipping and the unsanitized-
+key CSS selector above) - both fixed before this entry was written.
+
+---
+
+
 **Status as of this writing: 7 of 7 tabs live with real data** (Player
 Search, Team Efficiency, Rankings, Matchup Analyzer, Live Odds, Player
 Compare, Transfer Portal - NET & Resume and Conference Standings are
@@ -24,7 +103,7 @@ scoring entries are left as historical record rather than deleted (same
 correction in this doc), but treat them as NOT LIVE - see DATA_SOURCES.md's
 own correction note on its per-tab table for the same fix.
 
-**Review-flagged fixes pass (this doc's most recent update):** an external
+**Review-flagged fixes pass:** an external
 review of this codebase (not a live-usage report like every other pass
 below) flagged several real bugs and gaps, verified against the code and
 fixed:

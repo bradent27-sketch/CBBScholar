@@ -64,7 +64,7 @@ from data.transforms import (
 from data.utils import match_player_name, resolve_team_name
 from ui.components import render_coming_soon
 from ui.charts import render_trend_line, render_relative_bars
-from ui.styling import style_plain_dataframe, df_auto_height
+from ui.styling import df_auto_height, render_responsive_table
 
 _PLAYER_TREND_STATS = [('Points', ''), ('Assists', ''), ('Rebounds', ''), ('Minutes', ''), ('3P%', '%')]
 
@@ -415,13 +415,14 @@ def _render_positional_defense(team, season):
         )
         return
     display = summary.set_index('Bucket')
-    st.dataframe(
-        style_plain_dataframe(display, diverging_cols={
+    render_responsive_table(
+        f"positional_defense_{team}", display, primary_col=None,
+        diverging_cols={
             'Points Delta': _safe_max_abs(display['Points Delta']),
             'Rebounds Delta': _safe_max_abs(display['Rebounds Delta']),
             'Assists Delta': _safe_max_abs(display['Assists Delta']),
-        }),
-        width="stretch", height=df_auto_height(len(display)),
+        },
+        height=df_auto_height(len(display)),
     )
 
     # Position-group picker + all three stats for whichever bucket is

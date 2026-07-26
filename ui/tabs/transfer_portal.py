@@ -20,7 +20,7 @@ import streamlit as st
 from config import AVAILABLE_SEASONS_WITH_UPCOMING
 from data.loaders import current_cbb_season, load_recruiting_rankings, load_transfer_portal, load_teams
 from ui.components import render_coming_soon
-from ui.styling import style_plain_dataframe, df_auto_height
+from ui.styling import df_auto_height, render_responsive_table
 from ui.tabs.player_search import _fmt_height
 
 _MAX_STARS = 5
@@ -115,9 +115,9 @@ def render():
         display.index = display.index + 1
         star_pct = [_star_pct(s) for s in display['Stars']]
         st.caption(f"{len(display):,} of {len(recruits):,} recruits shown")
-        st.dataframe(
-            style_plain_dataframe(_fmt_bio_cols(display), numeric_pct_cols={'Stars': star_pct}),
-            width="stretch", height=df_auto_height(min(len(display), 30)),
+        render_responsive_table(
+            "transfer_portal_recruits", _fmt_bio_cols(display), primary_col='Player', index_label='#',
+            numeric_pct_cols={'Stars': star_pct}, height=df_auto_height(min(len(display), 30)),
         )
 
     st.markdown("**Transfer Portal**")
@@ -135,8 +135,8 @@ def render():
     display = filtered.head(200).reset_index(drop=True)
     display.index = display.index + 1
     star_pct = [_star_pct(s) for s in display['Stars']]
-    st.dataframe(
-        style_plain_dataframe(_fmt_bio_cols(display), numeric_pct_cols={'Stars': star_pct}),
-        width="stretch", height=df_auto_height(min(len(display), 30)),
+    render_responsive_table(
+        "transfer_portal_entries", _fmt_bio_cols(display), primary_col='Player', index_label='#',
+        numeric_pct_cols={'Stars': star_pct}, height=df_auto_height(min(len(display), 30)),
     )
     st.caption("Source: CollegeBasketballData.com.")

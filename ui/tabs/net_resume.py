@@ -27,7 +27,7 @@ from data.loaders import (
 from data.transforms import poll_trajectory
 from ui.components import render_coming_soon
 from ui.charts import render_rank_trajectory
-from ui.styling import style_plain_dataframe, df_auto_height, build_column_help_config
+from ui.styling import df_auto_height, build_column_help_config, render_responsive_table
 
 _NET_DISPLAY_COLS = ['Rank', 'Team', 'Conference', 'Record', 'Prev', 'Quad 1', 'Quad 2', 'Quad 3', 'Quad 4']
 
@@ -63,9 +63,9 @@ def render():
             # docstring. hide_index=True + a plain sequential index instead.
             display_df = shown[cols].reset_index(drop=True)
             net_colors = team_color_map()
-            st.dataframe(
-                style_plain_dataframe(display_df, team_color_map=net_colors),
-                width="stretch", height=df_auto_height(min(len(display_df), 30)), hide_index=True,
+            render_responsive_table(
+                "net_rankings", display_df, primary_col='Team', team_color_map=net_colors,
+                height=df_auto_height(min(len(display_df), 30)), hide_index=True,
             )
             st.caption(f"{len(shown)} of {len(net_df)} teams shown. Source: ncaa.com.")
     else:
@@ -104,10 +104,9 @@ def render():
     display_df = df.reset_index(drop=True)
     column_config = build_column_help_config(display_df, pinned_cols=['Rank'])
     poll_colors = team_color_map(season)
-    st.dataframe(
-        style_plain_dataframe(display_df, team_color_map=poll_colors),
-        width="stretch", height=df_auto_height(len(display_df)),
-        column_config=column_config, hide_index=True,
+    render_responsive_table(
+        "net_resume_polls", display_df, primary_col='Team', team_color_map=poll_colors,
+        height=df_auto_height(len(display_df)), column_config=column_config, hide_index=True,
     )
     st.caption("Source: CollegeBasketballData.com.")
 

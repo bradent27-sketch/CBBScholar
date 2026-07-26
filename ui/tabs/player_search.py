@@ -344,4 +344,5 @@ def _render_game_log_section(box_df, team, source_id, colors):
     render_sticky_footer_table(
         mine[table_cols], avg_row, numeric_cols=numeric_cols, team_color_map=colors,
         opponent_col='Opponent', win_loss_col='Result', height=360,
+        mobile_headline_cols=['Date', 'Opponent', 'Result', 'Points'],
     )

@@ -12,7 +12,7 @@ from config import ODDS_API_PLAYER_PROP_MARKETS
 from data.loaders import fetch_ncaab_odds, fetch_ncaab_player_props
 from ui.components import render_coming_soon
 from ui.charts import render_prop_line_shop
-from ui.styling import style_plain_dataframe, df_auto_height
+from ui.styling import df_auto_height, render_responsive_table
 
 
 def _fmt_tipoff(iso_str):
@@ -135,8 +135,9 @@ def render():
         # same way NET & Resume's did before that fix. Harmless today (no
         # team_color_map is passed here), but keep 'Book' as a real column
         # + hide_index=True for consistency with the app's own convention.
-        st.dataframe(
-            style_plain_dataframe(lines_df), width="stretch", height=df_auto_height(len(lines_df)), hide_index=True,
+        render_responsive_table(
+            f"odds_lines_{game.get('id', '')}", lines_df, primary_col='Book',
+            height=df_auto_height(len(lines_df)), hide_index=True,
         )
     else:
         st.info("No bookmakers have posted lines for this game yet.")
@@ -169,15 +170,15 @@ def render():
 
                 comparison_df = _build_props_comparison_table(filtered_long)
                 st.markdown("**Cross-book comparison** — one row per bet, one column per bookmaker (odds shown as `price (line)`; click a column header to sort)")
-                st.dataframe(
-                    # NOT .set_index('Player') - a player with both an Over
-                    # and Under row (the normal case for any prop market)
-                    # makes 'Player' non-unique, and Styler.apply/.map raise
-                    # on a non-unique index (same class of bug HANDOFF.md
-                    # documents hitting elsewhere in this app). The pivot
-                    # already returns a clean sequential index - keep it.
-                    style_plain_dataframe(comparison_df),
-                    width="stretch", height=df_auto_height(min(len(comparison_df), 30))
+                # NOT .set_index('Player') - a player with both an Over
+                # and Under row (the normal case for any prop market)
+                # makes 'Player' non-unique, and Styler.apply/.map raise
+                # on a non-unique index (same class of bug HANDOFF.md
+                # documents hitting elsewhere in this app). The pivot
+                # already returns a clean sequential index - keep it.
+                render_responsive_table(
+                    f"odds_props_{game.get('id', '')}", comparison_df, primary_col=['Market', 'Player', 'Selection'],
+                    height=df_auto_height(min(len(comparison_df), 30)),
                 )
 
                 st.markdown("<div class='custom-section-header'>LINE SHOPPING</div>", unsafe_allow_html=True)

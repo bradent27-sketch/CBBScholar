@@ -9,7 +9,7 @@ from data.loaders import current_cbb_season, load_efficiency_ratings, load_all_t
 from data.transforms import four_factors_percentile_grid
 from ui.components import render_coming_soon, render_hero_tiles
 from ui.charts import render_efficiency_scatter, render_percentile_heatmap
-from ui.styling import style_plain_dataframe, df_auto_height, build_column_help_config
+from ui.styling import df_auto_height, build_column_help_config, render_responsive_table
 
 
 def render():
@@ -104,9 +104,9 @@ def _render_rankings_subtab(df, colors, ranked):
     # caps the same way for the same reason (see ui/tabs/net_resume.py);
     # this just brings Team Efficiency's rankings table in line with that
     # established pattern instead of being the one outlier.
-    st.dataframe(
-        style_plain_dataframe(display_df, team_color_map=colors),
-        width="stretch", height=df_auto_height(min(len(display_df), 30)),
+    render_responsive_table(
+        "team_efficiency_rankings", display_df, primary_col='Team',
+        team_color_map=colors, height=df_auto_height(min(len(display_df), 30)),
         column_config=column_config, hide_index=True,
     )
 
