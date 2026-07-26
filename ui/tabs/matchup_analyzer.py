@@ -54,12 +54,14 @@ from data.loaders import (
     current_cbb_season, load_all_team_season_stats, load_team_roster, load_positional_matchup_data,
     get_player_season_profile, load_player_game_logs, load_conference_player_season_stats,
     load_all_player_season_stats, load_teams, load_espn_teams, load_espn_di_player_stats,
+    load_espn_season_player_box_native,
 )
 from data.transforms import (
     position_bucket, positional_defense_summary, positional_defense_trend,
     player_percentile_rows, player_trend_series, team_defense_profile_rows,
     espn_player_season_stats_for_teams,
 )
+from data.utils import match_player_name, resolve_team_name
 from ui.components import render_coming_soon
 from ui.charts import render_trend_line, render_relative_bars
 from ui.styling import style_plain_dataframe, df_auto_height
@@ -137,6 +139,18 @@ def _pick_player(season, teams_df):
     can be interleaved into synchronized row-pairs (see render()) instead
     of each column independently stacking picker+profile+trend end to end.
 
+    The player dropdown is CBBD's own season-scoped `/teams/roster` UNIONED
+    with this season's own ESPN box-file players for the team, same fix
+    Player Search already applies (see ui/tabs/player_search.py) - CBBD's
+    roster endpoint IS season-aware (unlike ESPN's live-only roster
+    endpoint), but can still desync from box-score reality (transfer-portal
+    timing, a walk-on added mid-season, etc.), silently hiding a player
+    from this dropdown despite them having real stats this tab could show.
+    Box-only rows are bare pd.Series with just name/position set (no CBBD
+    `id`) - get_player_season_profile resolves those via ESPN's own data
+    anyway, and its CBBD-fallback path degrades gracefully to "no stats"
+    rather than crashing on a missing id (see get_player_season_stats).
+
     Returns a context dict, or None (after showing its own st.info message)
     if no team/roster/stats data is available - a None here doesn't stop
     TEAM DEFENSE's own rows from rendering; each row checks its own side
@@ -151,16 +165,33 @@ def _pick_player(season, teams_df):
 
     with st.spinner("Loading roster..."):
         roster_df = load_team_roster(team_choice, season)
-    if roster_df.empty:
-        st.info(f"No roster data for {team_choice}.")
+
+    box_only_rows = []
+    espn_teams_season = load_espn_teams(season)
+    if not espn_teams_season.empty:
+        espn_team = resolve_team_name(team_choice, espn_teams_season['Team'].dropna().tolist())
+        if espn_team:
+            box_df_for_picker = load_espn_season_player_box_native(season)
+            if not box_df_for_picker.empty and 'Team' in box_df_for_picker.columns:
+                box_team_players = box_df_for_picker[box_df_for_picker['Team'] == espn_team][['name', 'Position']].drop_duplicates(subset=['name'])
+                existing_names = roster_df['name'] if not roster_df.empty else pd.Series([], dtype=str)
+                box_only = box_team_players[
+                    box_team_players['name'].apply(lambda n: match_player_name(n, existing_names) is None)
+                ]
+                box_only_rows = [pd.Series({'name': r['name'], 'position': r['Position']}) for _, r in box_only.iterrows()]
+
+    roster_rows = [roster_df.iloc[i] for i in range(len(roster_df))]
+    combined_rows = roster_rows + box_only_rows
+    if not combined_rows:
+        st.info(f"No roster or season data found for {team_choice} in {season}.")
         return None
-    labels = [f"{r['name']} ({r['position'] or '?'})" for _, r in roster_df.iterrows()]
+    labels = [f"{r['name']} ({r.get('position') or '?'})" for r in combined_rows]
     sel_label = st.selectbox("Player", labels, key="ma_player_select")
-    sel_row = roster_df.iloc[labels.index(sel_label)]
+    sel_row = combined_rows[labels.index(sel_label)]
 
     with st.spinner("Loading stats..."):
         stats, include_net_rating, source, box_df, athlete_source_id = get_player_season_profile(
-            team_choice, season, sel_row['name'], sel_row['id'],
+            team_choice, season, sel_row['name'], sel_row.get('id'),
         )
     if not stats:
         st.info("No season stats for this player yet.")

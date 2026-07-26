@@ -5,13 +5,187 @@ Sibling app to NFL Scholar (`C:\FantasyF`) and CFB Scholar
 college basketball. This doc follows NFL Scholar's own HANDOFF.md section
 structure on purpose, so all three stay easy to cross-reference.
 
-**Status as of this writing: 10 of 10 tabs live with real data** via
+**Status as of this writing: 7 of 7 tabs live with real data** (Player
+Search, Team Efficiency, Rankings, Matchup Analyzer, Live Odds, Player
+Compare, Transfer Portal - NET & Resume and Conference Standings are
+sub-tabs under Rankings, not separate top-level tabs) via
 CollegeBasketballData.com (free key, configured), ESPN's public endpoints
 (no key), and The Odds API (free key, configured). No PFF-equivalent
 subsystem exists for this app at all — there's no PFF product for college
 basketball.
 
-**Four polish items (this doc's most recent update): confirmed D-I caching
+**CORRECTION (doc-drift fix, this pass): this line previously said "10 of
+10 tabs."** Bracketology and Fantasy & Pools, both still described in
+present tense in this doc's §3 below, are NOT in `app.py`'s tab list and
+have no `ui/tabs/` file - they were removed from the app at some point
+without a corresponding HANDOFF.md update. §3's Bracketology/Fantasy
+scoring entries are left as historical record rather than deleted (same
+"correct forward, don't rewrite history" convention as every other
+correction in this doc), but treat them as NOT LIVE - see DATA_SOURCES.md's
+own correction note on its per-tab table for the same fix.
+
+**Review-flagged fixes pass (this doc's most recent update):** an external
+review of this codebase (not a live-usage report like every other pass
+below) flagged several real bugs and gaps, verified against the code and
+fixed:
+
+1. **`get_player_season_profile` gated on `load_espn_roster` - TODAY's
+   live roster, no season parameter - before ever checking the season box
+   file**, the exact same root cause as the earlier-fixed Cameron Boozer
+   bug in Player Search, just never ported to this function. A player who
+   left the program since `season` (draft/transfer/graduation) has real
+   box-file rows but isn't on today's live roster, so this gate silently
+   forced a CBBD fallback for a player ESPN's own data could serve.
+   **Fixed**: removed the `load_espn_roster` gate entirely - the box-file
+   name match (`stats_idx`) was already the real, season-correct existence
+   check; the roster gate added nothing but a chance to reject a valid
+   ESPN-servable player. Also found and fixed a related, more impactful bug
+   while in there: this function's `fallback` tuple was built EAGERLY at
+   the top of the function (`fallback = (get_player_season_stats(...), ...)`),
+   which calls CBBD's API on every single invocation regardless of whether
+   the ESPN path succeeds - directly contradicting this function's own
+   documented contract ("CBBD is only actually CALLED when the ESPN path
+   can't be used") and burning quota on every Matchup Analyzer PLAYER
+   panel / Player Compare lookup, successful or not. Fixed by making it a
+   lazily-called `_cbbd_fallback()` closure, invoked only on an actual
+   fallback branch.
+2. **Positional matchup defense's ESPN box file resolved raw team names
+   directly against CBBD's team list in one hop** - any opponent whose
+   CBBD spelling diverged from the raw SportsDataverse name (much likelier
+   than the specific team being looked up, since an opponent can be any of
+   360+ teams) silently dropped that opponent's entire row via
+   `_resolve_espn_box_team_names`' dropna, undercounting opponents and
+   tripping `_is_espn_data_fresh_enough`'s staleness check for no real
+   reason. **Fixed**: resolve against ESPN's OWN team list first (same
+   source family as the box file, so this hop rarely misses), then bridge
+   that ESPN-canonical name to CBBD's list - a row whose CBBD bridge fails
+   now keeps its ESPN-spelled name instead of being dropped. Factored the
+   actual two-step logic into a new pure function,
+   `_bridge_espn_box_to_cbbd_names`, specifically so it's unit-testable
+   without touching the surrounding `persist="disk"` cache.
+3. **`data.utils.normalize_team_name`/`resolve_team_name` had no mascot-
+   stripping mechanism** - "Duke Blue Devils" never resolved against a
+   mascot-free canonical list like "Duke" (the original live Cameron
+   Boozer-adjacent bug, see the `load_espn_teams` entry further down).
+   **Fixed**: added a generic (not hardcoded-per-school) word-prefix
+   matching fallback tier, `_mascot_prefix_match` - picks the LONGEST
+   canonical name whose words are a whole-word prefix of the raw name's
+   words, operating on the alias-EXPANDED map so an alias like `'miami' ->
+   'Miami (FL)'` also covers "Miami Hurricanes" for free. Longest-match-
+   wins avoids a real collision class (a short name like "Washington"
+   winning over the correct, more specific "Washington State" for
+   "Washington State Cougars").
+4. **Several `@st.cache_data(persist="disk")` CBBD loaders swallowed a
+   transient fetch failure into an empty DataFrame INSIDE the cached
+   function body** - Streamlit then memoized that empty result as
+   durably as a real success for up to a week (this app's own
+   `_fetch_espn_season_box_raw_cached` had already fixed this exact
+   pattern for the ESPN box pipeline - see the "caching-robustness gap"
+   entry further down - but it was explicitly left unapplied to the CBBD
+   side "if this class of bug shows up again elsewhere," which it did).
+   **Fixed** the same way, extended to the CBBD side: a new
+   `_cbbd_get_or_raise` propagates a real network/HTTP-status/JSON failure
+   instead of swallowing it; `_load_efficiency_ratings_cached` (Team
+   Efficiency) and `_load_all_team_season_stats_cached` (Team Defense
+   profile) call it directly. `load_teams`/`load_team_player_stats`/
+   `load_team_games`/`load_player_game_logs` were each split into a
+   raising `_..._cached` inner (still the SAME cache entry, so no loss of
+   call-sharing) plus a thin, unchanged-contract public wrapper that
+   catches at the boundary - `_load_conference_player_season_stats_cached`/
+   `_load_all_player_season_stats_cached`/`_load_team_opponent_game_logs_cached`
+   now call those raising inner variants directly so a genuine failure
+   anywhere in their fan-out propagates out of the whole weekly aggregation
+   uncaught, instead of silently caching an incomplete result for a week.
+   `_fetch_standings_raw` (1h cache, not persist="disk", but the same
+   swallow-into-`{}` pattern - explicitly named as breaking "Player
+   Search's entire ESPN path when standings fail transiently") got the
+   same raise/catch-at-callers treatment via a new `_safe_standings`
+   helper. `fetch_net_rankings_manual` too, split into a raising
+   `_fetch_net_rankings_manual_cached` + safe public wrapper.
+5. **Matchup Analyzer's and Player Compare's player pickers only used
+   `load_team_roster` (CBBD)** - CBBD's roster endpoint IS season-aware
+   (unlike ESPN's live-only roster endpoint), but can still desync from
+   box-score reality (transfer-portal timing, a walk-on added mid-season),
+   hiding a player from the dropdown despite them having real season
+   stats. **Fixed**: both pickers now union CBBD's roster with this
+   season's own ESPN box-file players for the team, same pattern Player
+   Search already used for its own version of this problem. Box-only rows
+   are bare `pd.Series` with every field the rest of each tab accesses set
+   (position, and in Compare's case jersey/height/weight/id, all `None`)
+   so bracket access downstream never `KeyError`s.
+6. **`fetch_net_rankings_manual`'s "Fetch latest NET rankings" button
+   didn't bust its own 24h cache** - clicking it again the same day
+   silently reused the cached HTML, misleading a user who explicitly asked
+   for a refresh. **Fixed**: the button handler now calls
+   `fetch_net_rankings_manual.clear()` before triggering a fetch - only on
+   an actual click (not on every rerun from, say, typing in the team
+   filter box), so ordinary reruns still benefit from the cache.
+7. **No visibility into CBBD call volume this session** - the app has
+   detailed quota-arithmetic documentation (DATA_SOURCES.md's API budget
+   section) but nothing in the UI itself. **Fixed**: a lightweight,
+   session-local counter (`st.session_state['cbbd_calls_this_session']`,
+   incremented inside the new `_cbbd_get_or_raise`) now shows in the
+   sidebar whenever it's nonzero - not a real quota readout (session-local
+   only, doesn't account for disk-cached calls from earlier sessions), but
+   enough to make quota risk visible at a glance, same spirit as Live
+   Odds' real "requests remaining" caption.
+8. **`load_all_rosters`/`_load_all_rosters_cached` had no caller anywhere
+   except `clear_league_wide_caches()`** - dead code that would fan out to
+   all 360+ CBBD teams if ever wired in. **Removed** both functions and
+   the now-invalid `clear_league_wide_caches()` reference to the deleted
+   one.
+9. **`live_odds.py`'s game-lines table did `.set_index('Book')` before
+   `style_plain_dataframe`** - the same Styler-index-cell limitation
+   documented elsewhere in this file (§5) that silently no-ops any
+   team/row coloring on index cells. Harmless today (no color map is
+   passed here), but inconsistent with this app's own established
+   convention. **Fixed**: kept `Book` as a real column with
+   `hide_index=True`, matching every other table in this app.
+10. **Zero `test_*.py` files existed anywhere in this repo**, despite this
+    doc repeatedly citing `AppTest`/synthetic verification as this app's
+    testing discipline. **Added** a `tests/` directory (stdlib `unittest`,
+    no new dependency) covering `match_player_name`/`resolve_team_name`
+    (including the new mascot-stripping fallback and a documented,
+    NOT-yet-fixed ambiguous-name-collision case - see the "meaningful
+    UX/correctness gap" flagged but not fixed this pass, below), the DNP
+    row filter, the ESPN/CBBD team-name bridge, and
+    `get_player_season_profile`'s ESPN-vs-CBBD-fallback branches
+    (including a regression test for the eager-fallback quota bug found
+    while fixing #1). Run via `python3 -m unittest discover -s tests -v`.
+
+**Flagged but deliberately NOT fixed this pass** (scope discipline - real,
+but lower-priority or judgment-call items):
+- `match_player_name` still returns the FIRST match when two players share
+  an exact normalized name with no distinguishing suffix - no warning
+  surfaced. Documented as a known limitation with its own test
+  (`tests/test_utils.py`'s `test_ambiguous_names_resolve_to_first_occurrence`)
+  rather than silently left unverified.
+- Mixed-source Player Compare (one player resolves via ESPN, the other via
+  CBBD) still runs the delta table/radar - the existing caption already
+  warns which case this is; a harder gate (refusing to compare at all)
+  wasn't requested and would make the tab less useful for exactly the case
+  (a player only one source has data for yet) where comparison is most
+  wanted.
+- Position-bucket granularity, ESPN standings' embedded color/id fields,
+  SportsDataverse's exact FTM/FTA/OREB/DREB column names, CBBD's
+  recruiting height/weight field names, and whether `trueShootingPct` is a
+  0-1 ratio or 0-100 - all still unverified against a real live payload,
+  same standing sandbox caveat as every prior pass. Nothing code-side to
+  fix here without live network access; worth a spot-check once the season
+  starts, per this doc's usual discipline.
+
+**Not independently live-verified** - same standing sandbox caveat as
+every pass in this doc: this environment still can't reach
+api.collegebasketballdata.com or ESPN's live endpoints. Verified instead
+via direct unit tests (see #10 above) against synthetic payloads
+replicating each bug's exact reported symptom, plus a full
+`python3 -m py_compile` pass and manual monkeypatched exercise of the
+`_cbbd_get`/`_cbbd_get_or_raise` split confirming a simulated transient
+failure is retried on the next call instead of being cached as a false
+"empty" result. **Before trusting this**: run `streamlit run app.py` for
+real once the season starts, same discipline as every previous pass.
+
+**Four polish items: confirmed D-I caching
 is already shared, fixed a missing-player bug in Player Search, aligned
 Matchup Analyzer's two columns into synchronized rows, and reordered
 tabs.**

@@ -128,7 +128,16 @@ def render():
     lines_df = _build_lines_table(game)
     if not lines_df.empty:
         st.markdown("**Game Lines — Moneyline / Spread / Total (every bookmaker, click a header to sort)**")
-        st.dataframe(style_plain_dataframe(lines_df.set_index('Book')), width="stretch", height=df_auto_height(len(lines_df)))
+        # NOT .set_index('Book') - Streamlit's dataframe grid never renders
+        # Styler colors on index/row-header cells at all (confirmed
+        # elsewhere in this app - see HANDOFF.md's Styler gotcha), so a
+        # future team-coloring pass on this table would silently no-op the
+        # same way NET & Resume's did before that fix. Harmless today (no
+        # team_color_map is passed here), but keep 'Book' as a real column
+        # + hide_index=True for consistency with the app's own convention.
+        st.dataframe(
+            style_plain_dataframe(lines_df), width="stretch", height=df_auto_height(len(lines_df)), hide_index=True,
+        )
     else:
         st.info("No bookmakers have posted lines for this game yet.")
 

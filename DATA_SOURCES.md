@@ -41,15 +41,23 @@ efficiency ratings, rankings — without the bot-wall problem.
 
 ## Per-tab source map
 
+**Correction:** this table previously listed Bracketology and Fantasy &
+Pools as their own rows. Neither exists as a tab anymore — `app.py` wires
+exactly 7 top-level tabs (Player Search, Team Efficiency, Rankings,
+Matchup Analyzer, Live Odds, Player Compare, Transfer Portal), with NET &
+Resume and Conference Standings as sub-tabs under Rankings, not separate
+top-level tabs — and no `ui/tabs/bracketology.py` or
+`ui/tabs/fantasy_pools.py` file exists in the repo. HANDOFF.md's §3 still
+describes both systems in present tense from when they existed; this is a
+documentation-drift correction, not a claim that removing them was wrong.
+
 | Tab | Source | Status |
 |---|---|---|
 | Player Search | ESPN public endpoints (team list, roster) + a free SportsDataverse season box-score file — NOT CollegeBasketballData.com | **Live** — the one deliberately CBBD-free tab in this app (see HANDOFF.md); season stats/game log both come from the same box-score file, summed locally. Net Rating dropped (not buildable from box scores alone); Usage% computed locally from box-score totals instead of a precomputed API field |
 | Team Efficiency | CollegeBasketballData.com API `/ratings/adjusted` | **Live** |
-| NET & Resume | ncaa.com (manual fetch — see below) + CollegeBasketballData.com API `/rankings` (AP/Coaches poll) | **Live** |
-| Conference Standings | ESPN public standings endpoint | **Live**, no key needed |
-| Bracketology | CollegeBasketballData.com API `/ratings/adjusted` (simplified seed-line projection) | **Live**, explicitly not a committee simulation |
+| Rankings → NET & Resume | ncaa.com (manual fetch — see below) + CollegeBasketballData.com API `/rankings` (AP/Coaches poll) | **Live** |
+| Rankings → Conference Standings | ESPN public standings endpoint | **Live**, no key needed |
 | Transfer Portal | CollegeBasketballData.com API `/recruiting/players`, `/recruiting/portal` | **Live** |
-| Fantasy & Pools | CollegeBasketballData.com API stats + local scoring config | **Live** — season totals only |
 | Matchup Analyzer | PLAYER panel: ESPN's own endpoints + the ESPN-native SportsDataverse season file (same architecture as Player Search), falling back to CollegeBasketballData.com only if ESPN's own roster/box-file lookup comes up empty for that player. TEAM DEFENSE: CollegeBasketballData.com `/stats/team/season` for the defensive profile, plus a SEPARATE CBBD-name-resolved ESPN file for the positional breakdown (falls back to CBBD scoped to opponents actually played on staleness). `/teams/roster` powers the player picker on both, either way | **Live** — a two-column player-vs-team-defense prep tool (not a team-vs-team projection anymore; `/ratings/adjusted` is no longer used here). See HANDOFF.md for why PLAYER's fallback logic changed from a date-freshness heuristic to "does ESPN's own data actually have this player" — the freshness heuristic was tripping constantly due to a team-name-resolution mismatch, not real staleness |
 | Live Odds | The Odds API `basketball_ncaab` | **Live** (shows "no games" in the off-season — correct behavior) |
 | Player Compare | ESPN's own endpoints + the ESPN-native SportsDataverse season file (same architecture as Player Search), falling back to CollegeBasketballData.com only if ESPN's own roster/box-file lookup comes up empty for that player. `/teams/roster` powers the player picker either way | **Live** — both players' season-stat profiles resolve independently via `data.loaders.get_player_season_profile`, so one player can come from the free file while the other falls back to CBBD if only one player isn't found in ESPN's own data yet |
@@ -122,10 +130,13 @@ automatically — silently, no error shown — whenever the file is missing,
 unreachable, or too far behind. **What to actually check once the 2026-27
 season starts:** open Matchup Analyzer → Team Defense for any team with a
 few games played, and see whether the "Positional Matchup Defense" section
-loads without hitting the CBBD-cost path (nothing definitive to check for
-in the UI yet either way — if this matters, ask for a small "data source
-used: ESPN file / CBBD fallback" indicator to be added to that section).
-If the file turns out to consistently lag more than a couple weeks behind
+loads without hitting the CBBD-cost path — **now has a UI indicator**: the
+section shows "Source: free ESPN season file." or "Source:
+CollegeBasketballData.com (CBBD API calls used)." right after loading
+(added in a later pass than this section was originally written — this
+paragraph is corrected accordingly, not describing a gap that's still
+open). If the file turns out to consistently lag more than a couple weeks
+behind
 the live season, CBBD's per-opponent fan-out (with the `max_recent_games`
 cap below) remains the reliable path — nothing about this fallback risks
 making the feature WORSE than it already was, only better when it works.

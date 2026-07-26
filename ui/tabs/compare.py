@@ -15,28 +15,61 @@ when Player Search's CBBD-free pipeline was first built (see HANDOFF.md's
 Both players' profiles are resolved ONCE in render() and threaded into
 every section below (column tiles, delta table, radar) instead of each
 section independently re-fetching, which the CBBD-only version used to do."""
+import pandas as pd
 import streamlit as st
 
 from config import AVAILABLE_SEASONS
 from data.loaders import (
     current_cbb_season, load_teams, load_team_roster, get_player_season_profile, team_color_map,
+    load_espn_teams, load_espn_season_player_box_native,
 )
+from data.utils import match_player_name, resolve_team_name
 from ui.components import render_coming_soon, render_team_banner, render_bio_strip, render_stat_tiles
 from ui.charts import render_radar
 from ui.tabs.player_search import _fmt_height, _pct, _per_game
 
 
 def _player_picker(col, label_prefix, season, teams_list, key_prefix, default_team=None):
+    """Team + player selectors. The player dropdown is CBBD's own season-
+    scoped `/teams/roster` UNIONED with this season's own ESPN box-file
+    players for the team - same fix Player Search already applies (see
+    ui/tabs/player_search.py): CBBD's roster endpoint IS season-aware
+    (unlike ESPN's live-only roster endpoint), but can still desync from
+    box-score reality, hiding a player who otherwise has real stats this
+    tab could show. Box-only rows are bare pd.Series with every field
+    _render_player_column/render() can access set to None except
+    name/position, so bracket access on 'jersey'/'id' elsewhere never
+    KeyErrors."""
     with col:
         default_idx = teams_list.index(default_team) if default_team in teams_list else 0
         team = st.selectbox(f"{label_prefix} — team", teams_list, index=default_idx, key=f"{key_prefix}_team")
         roster_df = load_team_roster(team, season)
-        if roster_df.empty:
+
+        box_only_rows = []
+        espn_teams_season = load_espn_teams(season)
+        if not espn_teams_season.empty:
+            espn_team = resolve_team_name(team, espn_teams_season['Team'].dropna().tolist())
+            if espn_team:
+                box_df_for_picker = load_espn_season_player_box_native(season)
+                if not box_df_for_picker.empty and 'Team' in box_df_for_picker.columns:
+                    box_team_players = box_df_for_picker[box_df_for_picker['Team'] == espn_team][['name', 'Position']].drop_duplicates(subset=['name'])
+                    existing_names = roster_df['name'] if not roster_df.empty else pd.Series([], dtype=str)
+                    box_only = box_team_players[
+                        box_team_players['name'].apply(lambda n: match_player_name(n, existing_names) is None)
+                    ]
+                    box_only_rows = [
+                        pd.Series({'name': r['name'], 'position': r['Position'], 'jersey': None, 'height': None, 'weight': None, 'id': None})
+                        for _, r in box_only.iterrows()
+                    ]
+
+        roster_rows = [roster_df.iloc[i] for i in range(len(roster_df))]
+        combined_rows = roster_rows + box_only_rows
+        if not combined_rows:
             st.info("No roster data.")
             return None, None
-        labels = [f"{r['name']} ({r['position'] or '?'})" for _, r in roster_df.iterrows()]
+        labels = [f"{r['name']} ({r.get('position') or '?'})" for r in combined_rows]
         sel_label = st.selectbox(f"{label_prefix} — player", labels, key=f"{key_prefix}_player")
-        return team, roster_df.iloc[labels.index(sel_label)]
+        return team, combined_rows[labels.index(sel_label)]
 
 
 def _render_player_column(col, team, row, colors, stats):
@@ -91,8 +124,8 @@ def render():
         return
 
     with st.spinner("Loading season stats..."):
-        stats_a, _net_a, source_a, _box_a, _sid_a = get_player_season_profile(team_a, season, row_a['name'], row_a['id'])
-        stats_b, _net_b, source_b, _box_b, _sid_b = get_player_season_profile(team_b, season, row_b['name'], row_b['id'])
+        stats_a, _net_a, source_a, _box_a, _sid_a = get_player_season_profile(team_a, season, row_a['name'], row_a.get('id'))
+        stats_b, _net_b, source_b, _box_b, _sid_b = get_player_season_profile(team_b, season, row_b['name'], row_b.get('id'))
 
     colors = team_color_map(season)
     st.markdown(f"<div class='custom-section-header'>{row_a['name']} vs {row_b['name']}</div>", unsafe_allow_html=True)

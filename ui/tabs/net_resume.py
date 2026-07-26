@@ -36,6 +36,12 @@ def render():
     st.markdown("**NET Rankings &amp; Quad Records**")
 
     if st.button("Fetch latest NET rankings from NCAA.com"):
+        # Bust the 24h cache on every click of THIS button specifically -
+        # without this, clicking again the same day silently reused the
+        # cached HTML (the cache exists to stop ordinary page reruns, like
+        # typing in the team filter below, from re-hitting ncaa.com, not
+        # to suppress an explicit "fetch latest" click).
+        fetch_net_rankings_manual.clear()
         st.session_state['net_data_fetched'] = True
 
     if st.session_state.get('net_data_fetched'):

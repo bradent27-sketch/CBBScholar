@@ -81,7 +81,7 @@ def _twice_weekly_bucket():
 
 
 @st.cache_data(ttl=86400)
-def fetch_net_rankings_manual():
+def _fetch_net_rankings_manual_cached():
     """
     Real NCAA NET rankings + Quad 1-4 records, scraped from ncaa.com's
     official page - the ONLY source found for this data anywhere in this
@@ -96,27 +96,48 @@ def fetch_net_rankings_manual():
     "prefer free APIs over scraping" policy (see HANDOFF.md), not a default
     this app applies anywhere else. It stays a manual action by design:
     this function is never called on tab load or on any schedule, only
-    from an explicit button click in ui/tabs/net_resume.py, and the 24h
-    cache means one click covers a full day rather than hitting the page
-    repeatedly.
+    from an explicit button click in ui/tabs/net_resume.py (which also
+    calls `.clear()` on this cached function first - see that file - so a
+    repeat click actually refetches instead of silently reusing the same
+    day's HTML), and the 24h cache still covers ordinary page reruns
+    (typing in the team filter, switching tabs and back) that aren't a
+    fresh click.
+
+    RAISES on a fetch/parse failure (network, HTTP status, no parseable
+    table, or a table shape that doesn't match what this parser expects)
+    instead of swallowing it into an empty DataFrame - same reasoning as
+    every other _..._cached function in this file: an empty result from a
+    transient blip shouldn't get memoized as durably as a real success for
+    the full TTL window. Caught by fetch_net_rankings_manual below, at the
+    public-wrapper boundary - external behavior (empty DataFrame on
+    failure) is unchanged, only the caching of a failure is fixed.
     """
-    try:
-        resp = requests.get(
-            NCAA_NET_RANKINGS_URL,
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
-            timeout=15,
-        )
-        resp.raise_for_status()
-        tables = pd.read_html(io.StringIO(resp.text))
-    except Exception:
-        return pd.DataFrame()
+    resp = requests.get(
+        NCAA_NET_RANKINGS_URL,
+        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    tables = pd.read_html(io.StringIO(resp.text))
     if not tables:
-        return pd.DataFrame()
+        raise ValueError("ncaa.com NET rankings page returned no parseable tables")
     df = tables[0].rename(columns={'School': 'Team', 'Conf': 'Conference'})
     required = {'Rank', 'Team', 'Record', 'Quad 1', 'Quad 2', 'Quad 3', 'Quad 4'}
     if not required.issubset(set(df.columns)):
-        return pd.DataFrame()
+        raise ValueError("ncaa.com NET rankings page's table shape didn't match the expected columns")
     return df
+
+
+def fetch_net_rankings_manual():
+    """Public wrapper - see _fetch_net_rankings_manual_cached's docstring
+    for the full behavior. A fetch/parse failure inside the cached body is
+    caught here, at the public-wrapper boundary, instead of being cached
+    as a false "empty" result for the rest of the 24h window."""
+    try:
+        return _fetch_net_rankings_manual_cached()
+    except Exception:
+        return pd.DataFrame()
+
 
 ESPN_CBB_STANDINGS_URL = "https://site.api.espn.com/apis/v2/sports/basketball/mens-college-basketball/standings"
 
@@ -137,13 +158,33 @@ def current_cbb_season():
 
 @st.cache_data(ttl=3600)
 def _fetch_standings_raw(season):
-    """Cached raw fetch (1hr TTL) of the FULL standings response (every
-    conference at once) - shared by both accessors below so picking a
-    different conference in the UI doesn't refetch."""
+    """
+    Cached raw fetch (1hr TTL) of the FULL standings response (every
+    conference at once) - shared by every accessor below so picking a
+    different conference in the UI doesn't refetch. RAISES on a real fetch
+    failure instead of swallowing it into `{}` - that empty dict used to
+    get cached for the full hour just like a real "no standings"
+    response, which broke Conference Standings AND, since load_espn_teams
+    further below reuses this same payload, silently broke Player Search's
+    entire ESPN path (team list -> empty) for that same hour on nothing
+    more than a single transient network blip (see HANDOFF.md's
+    "transient failures get cached for a week/hour" gotcha). Callers catch
+    this at their own boundary via `_safe_standings` below, so external
+    behavior (an empty dict on failure) is unchanged - only the CACHING of
+    a failure is fixed, same pattern as the ESPN box pipeline.
+    """
+    resp = requests.get(ESPN_CBB_STANDINGS_URL, params={'season': season}, timeout=10)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _safe_standings(season):
+    """Every _fetch_standings_raw call site wants the same "degrade to {}
+    on any failure, never raise" behavior - factored out once so a real
+    failure is caught at the boundary instead of inside the cached
+    function (see _fetch_standings_raw's docstring for why that matters)."""
     try:
-        resp = requests.get(ESPN_CBB_STANDINGS_URL, params={'season': season}, timeout=10)
-        resp.raise_for_status()
-        return resp.json()
+        return _fetch_standings_raw(season)
     except Exception:
         return {}
 
@@ -152,7 +193,7 @@ def list_conferences(season):
     """[(display_name, espn_abbreviation), ...] for whatever conferences
     ESPN's response actually contains this season - not a hardcoded list,
     so it won't silently go stale if ESPN adds/renames a conference."""
-    data = _fetch_standings_raw(season)
+    data = _safe_standings(season)
     confs = [
         (c.get('name'), c.get('abbreviation'))
         for c in data.get('children', []) if c.get('isConference')
@@ -171,7 +212,7 @@ def load_conference_standings(season, espn_conference_abbr):
     Returns an empty DataFrame if the conference isn't found or the request
     fails - never raises.
     """
-    data = _fetch_standings_raw(season)
+    data = _safe_standings(season)
     conf = next(
         (c for c in data.get('children', []) if c.get('abbreviation') == espn_conference_abbr),
         None,
@@ -246,7 +287,7 @@ def load_espn_teams(season=None):
     AltColor. Empty DataFrame if the standings payload is empty/unreachable.
     """
     season = season or current_cbb_season()
-    data = _fetch_standings_raw(season)
+    data = _safe_standings(season)
     rows = []
     for conf in data.get('children', []):
         if not conf.get('isConference'):
@@ -292,13 +333,23 @@ def load_espn_roster(team_espn_id, season=None):
     gotcha with position granularity (see HANDOFF.md), so this defaults to
     the more defensive parse rather than assuming one shape works.
 
-    Returns columns: sourceId (ESPN athlete id - the SAME id namespace the
-    season box file's athleteSourceId already uses, so these join directly
-    with no separate id-reconciliation step), name, jersey, position,
-    height (inches, if present), displayHeight (formatted string, e.g.
-    "6'8\"" - preferred for display since it sidesteps guessing whether
-    `height` is really inches), weight, city, state, country. Empty
-    DataFrame on any failure or a missing/falsy `team_espn_id`.
+    Returns columns: sourceId (this endpoint's own athlete id), name,
+    jersey, position, height (inches, if present), displayHeight
+    (formatted string, e.g. "6'8\"" - preferred for display since it
+    sidesteps guessing whether `height` is really inches), weight, city,
+    state, country. Empty DataFrame on any failure or a missing/falsy
+    `team_espn_id`.
+
+    CORRECTION: this docstring originally claimed sourceId was "the SAME
+    id namespace the season box file's athleteSourceId already uses, so
+    these join directly with no separate id-reconciliation step." That
+    turned out to be wrong, live-confirmed (see HANDOFF.md): every id-based
+    join between this endpoint's sourceId and the box file's
+    athleteSourceId matched nothing, for every player. Callers join by
+    NAME instead (data.utils.match_player_name) - see
+    data.transforms.espn_player_season_stats_for_teams' callers in
+    ui/tabs/player_search.py and data.loaders.get_player_season_profile,
+    neither of which use this function's sourceId for that join anymore.
     """
     if not team_espn_id:
         return pd.DataFrame()
@@ -355,29 +406,59 @@ def _cbbd_headers():
     return {"Authorization": f"Bearer {key}"}
 
 
-def _cbbd_get(path, params=None):
+def _cbbd_get_or_raise(path, params=None):
+    """
+    Like _cbbd_get, but propagates a real network/HTTP-status/JSON failure
+    instead of swallowing it into None - used by loaders that need to tell
+    "the call genuinely failed" apart from "the call succeeded and
+    legitimately returned nothing" (the persist="disk" weekly loaders
+    below rely on this - see HANDOFF.md's "transient failures get cached
+    for a week" gotcha, first fixed for the ESPN box pipeline's
+    _fetch_espn_season_box_raw_cached and applied here to the CBBD side).
+    Returns None (not a raise) when no API key is configured at all -
+    that's a real "nothing to fetch" state, not a transient failure worth
+    retrying.
+
+    Also counts every actual HTTP attempt toward st.session_state's
+    running CBBD-call tally, win or lose - one real call against the
+    monthly quota was spent either way - for the sidebar's rough "API
+    calls this session" indicator (ui.components.render_setup_status_sidebar).
+    """
     headers = _cbbd_headers()
     if headers is None:
         return None
     try:
-        resp = requests.get(f"{CBBD_BASE}{path}", headers=headers, params=params or {}, timeout=15)
-        resp.raise_for_status()
-        return resp.json()
+        st.session_state['cbbd_calls_this_session'] = st.session_state.get('cbbd_calls_this_session', 0) + 1
+    except Exception:
+        pass
+    resp = requests.get(f"{CBBD_BASE}{path}", headers=headers, params=params or {}, timeout=15)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _cbbd_get(path, params=None):
+    """Safe wrapper around _cbbd_get_or_raise - never raises, degrades to
+    None on any failure (network, HTTP status, bad JSON), same contract
+    every existing caller of this function already expects."""
+    try:
+        return _cbbd_get_or_raise(path, params)
     except Exception:
         return None
 
 
 @st.cache_data(ttl=86400)
-def load_teams(season=None):
+def _load_teams_cached(season):
     """
-    Every Division I team with CBBD's own official name/colors/conference -
-    verified live against /teams before writing this. Replaces the
-    hand-typed ~70-team TEAM_CONFIG in config.py with the real, full D-I
-    list (360+ teams) once a key is configured; falls back to an empty
-    DataFrame (callers fall back to config.TEAM_CONFIG) otherwise.
+    Cached inner body for load_teams - RAISES on a real fetch failure (via
+    _cbbd_get_or_raise) instead of degrading to an empty DataFrame, so
+    st.cache_data never memoizes a transient blip as a successful "no
+    teams" result for the full ttl window. Called directly (bypassing the
+    safe load_teams wrapper below) by other cached loaders further down
+    this file that want a genuine failure to propagate through THEM too
+    (see e.g. _load_conference_player_season_stats_cached) - same
+    underlying st.cache_data entry either way, so no loss of call-sharing.
     """
-    season = season or current_cbb_season()
-    data = _cbbd_get("/teams", params={"season": season})
+    data = _cbbd_get_or_raise("/teams", params={"season": season})
     if not data:
         return pd.DataFrame()
     rows = []
@@ -392,6 +473,23 @@ def load_teams(season=None):
             'Color': f"#{color}" if color and not str(color).startswith('#') else color,
         })
     return pd.DataFrame(rows)
+
+
+def load_teams(season=None):
+    """
+    Every Division I team with CBBD's own official name/colors/conference -
+    verified live against /teams before writing this. Replaces the
+    hand-typed ~70-team TEAM_CONFIG in config.py with the real, full D-I
+    list (360+ teams) once a key is configured; falls back to an empty
+    DataFrame (callers fall back to config.TEAM_CONFIG) otherwise - a real
+    fetch failure inside _load_teams_cached is caught here, at the public-
+    wrapper boundary, so it's never cached as a false "empty" result.
+    """
+    season = season or current_cbb_season()
+    try:
+        return _load_teams_cached(season)
+    except Exception:
+        return pd.DataFrame()
 
 
 def team_color_map(season=None):
@@ -462,18 +560,32 @@ def load_team_roster(team, season=None):
 
 
 @st.cache_data(ttl=3600)
+def _load_team_player_stats_cached(team, season):
+    """Cached inner body for load_team_player_stats - RAISES on a real
+    fetch failure (see _load_teams_cached's docstring for the same pattern
+    and why). Called directly by other cached loaders further down this
+    file (e.g. _load_conference_player_season_stats_cached) that want a
+    per-team failure to propagate rather than being silently skipped."""
+    data = _cbbd_get_or_raise("/stats/player/season", params={"team": team, "season": season})
+    if not data:
+        return pd.DataFrame()
+    return pd.DataFrame(data)
+
+
 def load_team_player_stats(team, season=None):
     """
     One team's full season stats, already WIDE format (one row per player,
     unlike CFBD's long/pivot-needed shape) - verified live against
     /stats/player/season before writing this. Field names below (games,
-    points, fieldGoals.pct, etc.) are exact.
+    points, fieldGoals.pct, etc.) are exact. A real fetch failure is
+    caught here, at the public-wrapper boundary - see load_teams' docstring
+    for why.
     """
     season = season or current_cbb_season()
-    data = _cbbd_get("/stats/player/season", params={"team": team, "season": season})
-    if not data:
+    try:
+        return _load_team_player_stats_cached(team, season)
+    except Exception:
         return pd.DataFrame()
-    return pd.DataFrame(data)
 
 
 def get_player_season_stats(team, season, athlete_id):
@@ -491,11 +603,23 @@ def get_player_season_stats(team, season, athlete_id):
 
 @st.cache_data(show_spinner=False, persist="disk")
 def _load_conference_player_season_stats_cached(conference, season, _week):
-    teams_df = load_teams(season)
+    """
+    Calls the RAISING inner variants (_load_teams_cached/
+    _load_team_player_stats_cached), not the safe load_teams/
+    load_team_player_stats wrappers - deliberately, so a genuine fetch
+    failure anywhere in this fan-out propagates all the way out of this
+    persist="disk"-decorated function uncaught, and Streamlit doesn't
+    memoize a network blip (or a partial, some-teams-missing result) as a
+    successful weekly snapshot for up to a week (see HANDOFF.md's
+    "transient failures get cached for a week" gotcha). The public wrapper
+    below catches it at the boundary. Same cache entries either way as the
+    safe wrappers - no loss of call-sharing.
+    """
+    teams_df = _load_teams_cached(season)
     if teams_df.empty:
         return pd.DataFrame()
     conf_teams = teams_df[teams_df['Conference'] == conference]['Team'].dropna().tolist()
-    frames = [load_team_player_stats(t, season) for t in conf_teams]
+    frames = [_load_team_player_stats_cached(t, season) for t in conf_teams]
     frames = [f for f in frames if not f.empty]
     if not frames:
         return pd.DataFrame()
@@ -526,26 +650,37 @@ def load_conference_player_season_stats(conference, season=None):
     inactivity, which would otherwise silently drop an in-memory-only
     cache and eat the full fan-out cost again) - see
     clear_league_wide_caches() for the manual-refresh path wired to the
-    sidebar, for whenever fresher-than-a-week data is wanted.
+    sidebar, for whenever fresher-than-a-week data is wanted. A real fetch
+    failure inside the cached fan-out is caught here, at the public-
+    wrapper boundary, instead of being cached as a false "empty" result.
     """
     season = season or current_cbb_season()
-    return _load_conference_player_season_stats_cached(conference, season, _week_bucket())
+    try:
+        return _load_conference_player_season_stats_cached(conference, season, _week_bucket())
+    except Exception:
+        return pd.DataFrame()
 
 
 @st.cache_data(show_spinner=False, persist="disk")
 def _load_all_player_season_stats_cached(season, _week):
-    teams_df = load_teams(season)
+    """Same raise-through reasoning as
+    _load_conference_player_season_stats_cached above, scaled to every D-I
+    team - calls the raising _load_teams_cached/_load_team_player_stats_cached
+    inner variants directly."""
+    teams_df = _load_teams_cached(season)
     if teams_df.empty:
         return pd.DataFrame()
     all_teams = teams_df['Team'].dropna().tolist()
     progress = st.progress(0.0, text="Loading Division I player stats (cached ~weekly - this only runs when the cache is cold)...")
-    frames = []
-    for i, t in enumerate(all_teams):
-        df = load_team_player_stats(t, season)
-        if not df.empty:
-            frames.append(df)
-        progress.progress((i + 1) / len(all_teams), text=f"Loading Division I player stats... ({i + 1}/{len(all_teams)} teams)")
-    progress.empty()
+    try:
+        frames = []
+        for i, t in enumerate(all_teams):
+            df = _load_team_player_stats_cached(t, season)
+            if not df.empty:
+                frames.append(df)
+            progress.progress((i + 1) / len(all_teams), text=f"Loading Division I player stats... ({i + 1}/{len(all_teams)} teams)")
+    finally:
+        progress.empty()
     if not frames:
         return pd.DataFrame()
     return pd.concat(frames, ignore_index=True)
@@ -571,57 +706,26 @@ def load_all_player_season_stats(season=None):
     real expiry - see that function's docstring). `persist="disk"` means a
     restarted app reuses last week's pull instead of re-running the full
     360-team fan-out on the next visit. See clear_league_wide_caches() for
-    the manual "refresh now" escape hatch (wired to the sidebar).
+    the manual "refresh now" escape hatch (wired to the sidebar). A real
+    fetch failure inside the cached fan-out is caught here, at the public-
+    wrapper boundary, instead of being cached as a false "empty" result.
     """
     season = season or current_cbb_season()
-    return _load_all_player_season_stats_cached(season, _week_bucket())
-
-
-@st.cache_data(show_spinner=False, persist="disk")
-def _load_all_rosters_cached(season, _week):
-    teams_df = load_teams(season)
-    if teams_df.empty:
+    try:
+        return _load_all_player_season_stats_cached(season, _week_bucket())
+    except Exception:
         return pd.DataFrame()
-    all_teams = teams_df['Team'].dropna().tolist()
-    progress = st.progress(0.0, text="Loading Division I rosters (cached ~weekly - this only runs when the cache is cold)...")
-    frames = []
-    for i, t in enumerate(all_teams):
-        df = load_team_roster(t, season)
-        if not df.empty:
-            df = df.copy()
-            df['Team'] = t
-            frames.append(df)
-        progress.progress((i + 1) / len(all_teams), text=f"Loading Division I rosters... ({i + 1}/{len(all_teams)} teams)")
-    progress.empty()
-    if not frames:
-        return pd.DataFrame()
-    return pd.concat(frames, ignore_index=True)
-
-
-def load_all_rosters(season=None):
-    """
-    Every D-I team's roster in one cached pull (same per-team fan-out over
-    load_teams() as load_all_player_season_stats, just against
-    load_team_roster instead of load_team_player_stats) - the corpus behind
-    Player Search's "All Teams" option, so a player can be found by name
-    without picking their team first (CBBD has no roster-by-name search of
-    its own - see HANDOFF.md). Adds a 'Team' column (load_team_roster's own
-    output doesn't carry one, since it's normally called already scoped to
-    a single team) so a name match can be traced back to the right team's
-    stats/game-log calls downstream.
-
-    Weekly refresh + disk persistence via `_week_bucket()`, not a `ttl=`
-    (silently ignored on a persist="disk" cache by Streamlit - see that
-    function's docstring) - same league-wide-data reasoning as
-    load_all_player_season_stats.
-    """
-    season = season or current_cbb_season()
-    return _load_all_rosters_cached(season, _week_bucket())
 
 
 @st.cache_data(persist="disk")
 def _load_efficiency_ratings_cached(season, _week):
-    data = _cbbd_get("/ratings/adjusted", params={"season": season})
+    """Calls _cbbd_get_or_raise directly (not the safe _cbbd_get) so a
+    real fetch failure propagates uncaught out of this persist="disk"
+    function instead of being memoized as a successful empty result for
+    up to a week (see HANDOFF.md's "transient failures get cached for a
+    week" gotcha - Team Efficiency was one of the two symptoms named
+    there). Caught at the public load_efficiency_ratings wrapper below."""
+    data = _cbbd_get_or_raise("/ratings/adjusted", params={"season": season})
     if not data:
         return pd.DataFrame()
     rows = []
@@ -650,10 +754,15 @@ def load_efficiency_ratings(season=None):
     Weekly refresh + disk persistence via `_week_bucket()`, not a `ttl=`
     (silently ignored on a persist="disk" cache by Streamlit - see that
     function's docstring) - same league-context-data reasoning as the
-    other full-league loaders in this file.
+    other full-league loaders in this file. A real fetch failure inside
+    the cached body is caught here, at the public-wrapper boundary,
+    instead of being cached as a false "empty" result.
     """
     season = season or current_cbb_season()
-    return _load_efficiency_ratings_cached(season, _week_bucket())
+    try:
+        return _load_efficiency_ratings_cached(season, _week_bucket())
+    except Exception:
+        return pd.DataFrame()
 
 
 @st.cache_data(ttl=3600)
@@ -761,7 +870,13 @@ def load_transfer_portal(season=None):
 
 @st.cache_data(persist="disk")
 def _load_all_team_season_stats_cached(season, _week):
-    data = _cbbd_get("/stats/team/season", params={"season": season})
+    """Calls _cbbd_get_or_raise directly (not the safe _cbbd_get) so a
+    real fetch failure propagates uncaught out of this persist="disk"
+    function instead of being memoized as a successful empty result for
+    up to a week - Matchup Analyzer's Team Defense profile was one of the
+    "empty for a week" symptoms named in HANDOFF.md's transient-failure
+    gotcha. Caught at the public load_all_team_season_stats wrapper below."""
+    data = _cbbd_get_or_raise("/stats/team/season", params={"season": season})
     if not data:
         return pd.DataFrame()
     rows = []
@@ -831,22 +946,24 @@ def load_all_team_season_stats(season=None):
     Weekly refresh + disk persistence via `_week_bucket()`, not a `ttl=`
     (silently ignored on a persist="disk" cache by Streamlit - see that
     function's docstring) - same league-wide-data reasoning as the other
-    full-league loaders in this file.
+    full-league loaders in this file. A real fetch failure inside the
+    cached body is caught here, at the public-wrapper boundary, instead of
+    being cached as a false "empty" result.
     """
     season = season or current_cbb_season()
-    return _load_all_team_season_stats_cached(season, _week_bucket())
+    try:
+        return _load_all_team_season_stats_cached(season, _week_bucket())
+    except Exception:
+        return pd.DataFrame()
 
 
 @st.cache_data(ttl=21600)
-def load_team_games(team, season=None):
-    """
-    One team's completed schedule/results via /games - verified live before
-    writing this (39 rows for a real 2025 team; field names below exact,
-    including homeTeamEloStart/End and excitement). Normalized to the
-    requested team's perspective.
-    """
-    season = season or current_cbb_season()
-    data = _cbbd_get("/games", params={"season": season, "team": team})
+def _load_team_games_cached(team, season):
+    """Cached inner body for load_team_games - RAISES on a real fetch
+    failure (see _load_teams_cached's docstring for the same pattern).
+    Called directly by _load_team_opponent_game_logs_cached below so a
+    real failure propagates through that persist="disk" aggregation too."""
+    data = _cbbd_get_or_raise("/games", params={"season": season, "team": team})
     if not data:
         return pd.DataFrame()
     rows = []
@@ -876,18 +993,29 @@ def load_team_games(team, season=None):
     return df.sort_values('Date').reset_index(drop=True) if not df.empty else df
 
 
-@st.cache_data(ttl=21600)
-def load_player_game_logs(team, season=None):
+def load_team_games(team, season=None):
     """
-    Per-game player box scores for one team's season via /games/players -
-    verified live before writing this (39 games for a real 2025 team; each
-    game row carries startDate/opponent/isHome context plus a players list
-    with minutes/points/rebounds/assists/gameScore/usage etc.). Returns one
-    row per (game, player), already joined to game context - unlike CFBD's
-    equivalent, no second call is needed for opponent/date.
+    One team's completed schedule/results via /games - verified live before
+    writing this (39 rows for a real 2025 team; field names below exact,
+    including homeTeamEloStart/End and excitement). Normalized to the
+    requested team's perspective. A real fetch failure is caught here, at
+    the public-wrapper boundary - see load_teams' docstring for why.
     """
     season = season or current_cbb_season()
-    data = _cbbd_get("/games/players", params={"season": season, "team": team})
+    try:
+        return _load_team_games_cached(team, season)
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=21600)
+def _load_player_game_logs_cached(team, season):
+    """Cached inner body for load_player_game_logs - RAISES on a real
+    fetch failure (see _load_teams_cached's docstring for the same
+    pattern). Called directly by _load_team_opponent_game_logs_cached
+    below so a real failure propagates through that persist="disk"
+    aggregation too."""
+    data = _cbbd_get_or_raise("/games/players", params={"season": season, "team": team})
     if not data:
         return pd.DataFrame()
     rows = []
@@ -922,6 +1050,24 @@ def load_player_game_logs(team, season=None):
             })
     df = pd.DataFrame(rows)
     return df.sort_values('Date').reset_index(drop=True) if not df.empty else df
+
+
+def load_player_game_logs(team, season=None):
+    """
+    Per-game player box scores for one team's season via /games/players -
+    verified live before writing this (39 games for a real 2025 team; each
+    game row carries startDate/opponent/isHome context plus a players list
+    with minutes/points/rebounds/assists/gameScore/usage etc.). Returns one
+    row per (game, player), already joined to game context - unlike CFBD's
+    equivalent, no second call is needed for opponent/date. A real fetch
+    failure is caught here, at the public-wrapper boundary - see
+    load_teams' docstring for why.
+    """
+    season = season or current_cbb_season()
+    try:
+        return _load_player_game_logs_cached(team, season)
+    except Exception:
+        return pd.DataFrame()
 
 
 @st.cache_data(show_spinner=False, persist="disk")
@@ -980,8 +1126,17 @@ def _load_team_opponent_game_logs_cached(team, season, max_recent_games, _week):
     Points/Rebounds/Assists/FGA/3PA (the game vs `team`), and
     Season Avg Points/Rebounds/Assists/FGA/3PA (that player's own full-
     season average, all games, from the same cached frame).
+
+    Calls the RAISING inner variants (_load_team_games_cached/
+    _load_player_game_logs_cached), not the safe load_team_games/
+    load_player_game_logs wrappers - same reasoning as
+    _load_conference_player_season_stats_cached above: a genuine fetch
+    failure for `team`'s own schedule or for any one opponent propagates
+    out of this persist="disk" function uncaught instead of silently
+    producing (and then week-long caching) an incomplete opponent list.
+    Caught at the public load_team_opponent_game_logs wrapper below.
     """
-    games = load_team_games(team, season)
+    games = _load_team_games_cached(team, season)
     if games.empty:
         return pd.DataFrame()
     # load_team_games already sorts by Date ascending - .tail(N) is the N
@@ -991,7 +1146,7 @@ def _load_team_opponent_game_logs_cached(team, season, max_recent_games, _week):
     avg_cols = ['Points', 'Rebounds', 'Assists', 'FGA', '3PA']
     rows = []
     for opp in opponents:
-        log = load_player_game_logs(opp, season)
+        log = _load_player_game_logs_cached(opp, season)
         if log.empty:
             continue
         vs_team = log[log['Opponent'] == team]
@@ -1020,10 +1175,15 @@ def load_team_opponent_game_logs(team, season=None, max_recent_games=20):
     to `_load_team_opponent_game_logs_cached` (see its docstring for the
     full behavior/cost breakdown). This is CBBD's own positional-matchup
     data source; `load_positional_matchup_data` below tries the free ESPN/
-    SportsDataverse season file first and falls back to this.
+    SportsDataverse season file first and falls back to this. A real fetch
+    failure inside the cached fan-out is caught here, at the public-
+    wrapper boundary, instead of being cached as a false "empty" result.
     """
     season = season or current_cbb_season()
-    return _load_team_opponent_game_logs_cached(team, season, max_recent_games, _week_bucket())
+    try:
+        return _load_team_opponent_game_logs_cached(team, season, max_recent_games, _week_bucket())
+    except Exception:
+        return pd.DataFrame()
 
 
 # ===========================================================
@@ -1195,11 +1355,36 @@ def _resolve_espn_box_team_names(raw_box, canonical_names):
 def _load_espn_season_player_box_cached(season, _bucket):
     """
     Every D-I player's game-by-game box score for the WHOLE season, team
-    names resolved to THIS app's canonical CBBD team names (via
-    _resolve_espn_box_team_names against load_teams()) - powers positional
-    matchup defense (data.loaders.load_positional_matchup_data). Delegates
-    the actual download to `_fetch_espn_season_box_raw_cached` (shared with
-    Player Search's CBBD-free pipeline, so the file isn't fetched twice).
+    names resolved to THIS app's canonical CBBD team names - powers
+    positional matchup defense (data.loaders.load_positional_matchup_data).
+    Delegates the actual download to `_fetch_espn_season_box_raw_cached`
+    (shared with Player Search's CBBD-free pipeline, so the file isn't
+    fetched twice).
+
+    Team-name resolution is TWO steps, not a single raw-to-CBBD hop: raw
+    SportsDataverse names are resolved against ESPN's OWN team list first
+    (load_espn_teams - the same source family as the box file itself, so
+    this hop rarely misses a real school, exactly the reasoning
+    load_espn_season_player_box_native already relies on for Player
+    Search), THEN bridged to CBBD's team list (load_teams) via
+    resolve_team_name a second time. A row that resolves at the ESPN hop
+    but fails to bridge to a CBBD name keeps its ESPN-spelled name rather
+    than being dropped outright.
+
+    This was a real robustness gap in the single-hop version: resolving
+    raw names straight against CBBD's independently-formatted list (which
+    also doesn't strip mascots - see data.utils.resolve_team_name) meant
+    ANY unresolved OPPONENT name (much likelier than the specific team
+    being looked up, since an opponent can be any of 360+ teams including
+    mid-majors CBBD/SportsDataverse spell differently) silently dropped
+    that entire row via _resolve_espn_box_team_names' dropna - undercounting
+    opponents, making a team's positional-defense data look emptier/staler
+    than it actually was, and tripping _is_espn_data_fresh_enough's
+    freshness check for no real reason. Routing through ESPN's own list
+    first (which the raw names already match almost exactly, by
+    construction) narrows the failure window to just the second, CBBD-
+    bridging hop - and even that failure now degrades to "keep the ESPN
+    name" instead of "drop the row."
 
     Returns columns: GameId, Date, Team, Opponent, Home/Away,
     athleteSourceId, name, Position, Minutes, Points, Rebounds, Assists,
@@ -1210,11 +1395,28 @@ def _load_espn_season_player_box_cached(season, _bucket):
     public wrapper below, not here (so a real failure doesn't get cached).
     """
     raw_box = _fetch_espn_season_box_raw_cached(season, _bucket)
+    espn_teams_df = load_espn_teams(season)
+    espn_canonical = espn_teams_df['Team'].dropna().tolist() if not espn_teams_df.empty else []
     teams_df = load_teams(season)
-    canonical = teams_df['Team'].dropna().tolist() if not teams_df.empty else []
-    out = _resolve_espn_box_team_names(raw_box, canonical)
+    cbbd_canonical = teams_df['Team'].dropna().tolist() if not teams_df.empty else []
+    return _bridge_espn_box_to_cbbd_names(raw_box, espn_canonical, cbbd_canonical)
+
+
+def _bridge_espn_box_to_cbbd_names(raw_box, espn_canonical, cbbd_canonical):
+    """
+    The actual two-step resolution _load_espn_season_player_box_cached
+    describes - factored out as a pure function (no caching, no network)
+    so it's directly unit-testable (see tests/test_espn_box_pipeline.py)
+    without touching that function's persist="disk" cache.
+    """
+    out = _resolve_espn_box_team_names(raw_box, espn_canonical)
     if out.empty:
         return out
+    if cbbd_canonical:
+        bridge = {n: (resolve_team_name(n, cbbd_canonical) or n) for n in set(out['Team']) | set(out['Opponent'])}
+        out = out.copy()
+        out['Team'] = out['Team'].map(bridge)
+        out['Opponent'] = out['Opponent'].map(bridge)
     keep_cols = ['GameId', 'Date', 'Team', 'Opponent', 'Home/Away', 'athleteSourceId', 'name', 'Position',
                  'Minutes', 'Points', 'Rebounds', 'Assists', 'Steals', 'Blocks', 'Turnovers', 'FGM', 'FGA', '3PM', '3PA']
     return out[keep_cols]
@@ -1406,8 +1608,8 @@ def get_player_season_profile(team, season, player_name, cbbd_athlete_id):
     One player's season-stats profile, preferring ESPN's own live
     endpoints plus the ESPN-native SportsDataverse season box file - the
     SAME architecture Player Search already uses successfully
-    (load_espn_teams/load_espn_roster/load_espn_season_player_box_native)
-    - over CollegeBasketballData.com. Shared by Matchup Analyzer's PLAYER
+    (load_espn_teams/load_espn_season_player_box_native) - over
+    CollegeBasketballData.com. Shared by Matchup Analyzer's PLAYER
     panel and Player Compare; both stayed CBBD-only when Player Search's
     CBBD-free pipeline was first built (HANDOFF.md's "Player Search ONLY"
     scope note), then got a first pass at this that used a DIFFERENT,
@@ -1423,12 +1625,25 @@ def get_player_season_profile(team, season, player_name, cbbd_athlete_id):
     source changes here). `team` gets bridged to ESPN's own canonical
     spelling via resolve_team_name (the same team-name aliasing this app
     already relies on everywhere else); `player_name` gets matched against
-    ESPN's roster and box-file names via data.utils.match_player_name, NOT
-    an id - ESPN's roster endpoint's athlete id and the box file's athlete
-    id turned out to be different id namespaces despite the original
+    the box file's OWN names via data.utils.match_player_name, NOT an id -
+    ESPN's roster endpoint's athlete id and the box file's athlete id
+    turned out to be different id namespaces despite the original
     assumption they were the same (confirmed: this exact id join matched
     nothing for any Player Search player - see HANDOFF.md). Name matching
     sidesteps that bad assumption entirely.
+
+    Deliberately does NOT gate on load_espn_roster (an earlier version of
+    this function did, as an extra "does this player really exist for this
+    team" check before trusting the box file) - load_espn_roster's URL has
+    no season parameter at all, so it always reflects TODAY's live roster,
+    never `season`'s (the exact same bug Player Search's team-filtered
+    picker hit and fixed - see HANDOFF.md's Cameron Boozer entry). Gating
+    on it here meant a player who left the program since `season` (draft,
+    transfer, graduation) fell back to CBBD for a season they demonstrably
+    played, even though the box file itself has their real stats - the
+    same root cause, just not ported to this function when that fix
+    shipped. The box-file match below (`stats_idx`) is the real, season-
+    correct existence check; nothing here needs the live roster at all.
 
     CBBD is only actually CALLED (get_player_season_stats, the one real
     API cost this function can incur) when the ESPN path can't be used -
@@ -1464,42 +1679,47 @@ def get_player_season_profile(team, season, player_name, cbbd_athlete_id):
 
     Falls back to CBBD (get_player_season_stats(team, season,
     cbbd_athlete_id), unchanged from before this function existed)
-    whenever: `team` doesn't resolve to an ESPN team, that team's ESPN
-    roster is empty/unreachable, `player_name` doesn't match anyone on
-    it, the ESPN season box file is empty/unreachable, or `player_name`
-    doesn't match anyone in this team's box-file rows either (e.g. very
-    early season, before the file has this player's first game). Every
-    one of these is a pure fallback to the ALREADY-PROVEN CBBD path - can
-    only ever help or be a silent no-op, never regress either tab's
-    reliability.
+    whenever: `team` doesn't resolve to an ESPN team, the ESPN season box
+    file is empty/unreachable, or `player_name` doesn't match anyone in
+    this team's box-file rows (e.g. very early season, before the file has
+    this player's first game, or a player who genuinely never played this
+    season). Every one of these is a pure fallback to the ALREADY-PROVEN
+    CBBD path - can only ever help or be a silent no-op, never regress
+    either tab's reliability.
     """
     season = season or current_cbb_season()
-    fallback = (get_player_season_stats(team, season, cbbd_athlete_id), True, 'cbbd', None, None)
+
+    def _cbbd_fallback():
+        # Computed lazily, only on an actual fallback path - NOT hoisted
+        # into an eagerly-evaluated `fallback = (...)` tuple at the top of
+        # this function (a real bug that lived here: tuple construction
+        # evaluates every element immediately, so get_player_season_stats
+        # - a genuine CBBD API call - was firing on EVERY invocation of
+        # this function, including the common case where the ESPN path
+        # succeeds and the fallback value is never used. That directly
+        # contradicted this function's own documented contract ("CBBD is
+        # only actually CALLED when the ESPN path can't be used") and
+        # burned quota on every single player lookup regardless of
+        # outcome - exactly the risk DATA_SOURCES.md's API budget section
+        # warns about.
+        return get_player_season_stats(team, season, cbbd_athlete_id), True, 'cbbd', None, None
 
     espn_teams = load_espn_teams(season)
     if espn_teams.empty:
-        return fallback
+        return _cbbd_fallback()
     espn_team = resolve_team_name(team, espn_teams['Team'].dropna().tolist())
     if not espn_team:
-        return fallback
-    espn_team_row = espn_teams[espn_teams['Team'] == espn_team]
-    if espn_team_row.empty:
-        return fallback
-    roster_df = load_espn_roster(espn_team_row.iloc[0]['EspnId'], season)
-    if roster_df.empty:
-        return fallback
-    if match_player_name(player_name, roster_df['name']) is None:
-        return fallback
+        return _cbbd_fallback()
 
     box_df = load_espn_season_player_box_native(season)
     if box_df.empty or 'Team' not in box_df.columns:
-        return fallback
+        return _cbbd_fallback()
     team_stats = espn_player_season_stats_for_teams(box_df, espn_team)
     if team_stats.empty:
-        return fallback
+        return _cbbd_fallback()
     stats_idx = match_player_name(player_name, team_stats['name'])
     if stats_idx is None:
-        return fallback
+        return _cbbd_fallback()
     row = team_stats.iloc[stats_idx].to_dict()
     return row, False, 'espn', box_df, row['athleteSourceId']
 
@@ -1522,7 +1742,6 @@ def clear_league_wide_caches():
     inner function now.
     """
     _load_all_player_season_stats_cached.clear()
-    _load_all_rosters_cached.clear()
     _load_conference_player_season_stats_cached.clear()
     _load_all_team_season_stats_cached.clear()
     _load_efficiency_ratings_cached.clear()

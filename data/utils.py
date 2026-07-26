@@ -218,17 +218,62 @@ def expand_team_name_aliases(norm_map):
     return expanded
 
 
+def _mascot_prefix_match(norm_name, norm_map):
+    """
+    Fallback tier for resolve_team_name: a source that always emits a
+    "School Mascot"-style name (e.g. ESPN's displayName, "Duke Blue
+    Devils") never resolves against a mascot-free canonical list
+    ("Duke") via normalize_team_name/TEAM_NAME_ALIASES alone - neither
+    strips mascots, only punctuation/case/university-suffixes/well-known
+    whole-name aliases. This was a real, live-confirmed bug (see
+    HANDOFF.md's load_espn_teams entry).
+
+    Generic fix, not a hardcoded mascot list (which could never be
+    exhaustive across 360+ schools): treats any `norm_map` key whose words
+    are a whole-word PREFIX of `norm_name`'s words as a candidate ("duke"
+    is a word-prefix of "duke blue devils"), and picks the LONGEST such
+    match. Word-boundary-aware (not a raw string prefix) and longest-wins
+    together avoid two real collision classes: a short school name that's
+    ALSO a valid prefix of a longer, DIFFERENT school's name ("Washington"
+    vs. "Washington State" - "washington state cougars" must resolve to
+    the more specific "washington state", not "washington"), and a mascot
+    word that happens to start with another school's name as a substring
+    (ruled out entirely by requiring whole-word equality at every prefix
+    position, not just a shared string prefix).
+
+    Operates on `norm_map` (already alias-expanded) rather than the raw
+    canonical list, so an alias like 'miami' -> 'Miami (FL)' also covers
+    "Miami Hurricanes" for free - the alias contributes 'miami' as its own
+    key, which becomes a valid one-word prefix match here.
+    """
+    name_words = norm_name.split()
+    if not name_words:
+        return None
+    best_key = None
+    for key in norm_map:
+        key_words = key.split()
+        if key_words and name_words[:len(key_words)] == key_words:
+            if best_key is None or len(key_words) > len(best_key.split()):
+                best_key = key
+    return norm_map.get(best_key) if best_key else None
+
+
 def resolve_team_name(name, canonical_names):
     """
     Resolves a team name from a foreign source (ESPN/SportsDataverse,
     ncaa.com scrape, etc.) to its matching entry in `canonical_names`
     (e.g. CBBD's own team list) - exact match first, then normalized +
-    alias match. Returns None if nothing resolves, so callers can drop or
-    flag an unattributable row instead of silently mis-joining it to the
-    wrong team.
+    alias match, then a mascot-stripping word-prefix match (see
+    _mascot_prefix_match) as a last resort. Returns None if nothing
+    resolves, so callers can drop or flag an unattributable row instead of
+    silently mis-joining it to the wrong team.
     """
     canonical_names = list(canonical_names)
     if name in canonical_names:
         return name
     norm_map = expand_team_name_aliases({normalize_team_name(c): c for c in canonical_names})
-    return norm_map.get(normalize_team_name(name))
+    norm_name = normalize_team_name(name)
+    direct = norm_map.get(norm_name)
+    if direct:
+        return direct
+    return _mascot_prefix_match(norm_name, norm_map)

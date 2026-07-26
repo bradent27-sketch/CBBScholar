@@ -75,6 +75,19 @@ def render_setup_status_sidebar():
             clear_league_wide_caches()
             st.success("Cleared — next tab visit re-pulls current league-wide data.")
 
+        # Rough, session-local CBBD call counter - not a real quota readout
+        # (CBBD's free tier is 1,000 calls/MONTH, this only counts calls
+        # made THIS session, and cached calls from earlier sessions/disk
+        # persistence don't show up here at all), but enough to make quota
+        # risk visible at a glance for the most quota-sensitive feature
+        # (Matchup Analyzer's positional matchup defense CBBD fallback can
+        # cost ~1+2N calls per team - see DATA_SOURCES.md's API budget
+        # section) - same spirit as Live Odds' "requests remaining"
+        # caption, which reads a real header CBBD doesn't expose.
+        cbbd_calls = st.session_state.get('cbbd_calls_this_session', 0)
+        if cbbd_calls:
+            st.caption(f"CBBD API calls made this session: {cbbd_calls} (free tier: 1,000/month — see DATA_SOURCES.md).")
+
 
 def render_team_banner(team_name, subtitle="", team_color=None):
     """Team identity banner (Player Search etc): name over a team-color
