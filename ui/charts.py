@@ -438,12 +438,21 @@ def render_efficiency_scatter(df, x_col, y_col, color_map, invert_y=False,
     svg = _build_efficiency_scatter_svg(
         data, x_col, y_col, color_map, invert_y,
         tuple(sorted(highlight or [])), x_label, y_label,
+        st.session_state.get('theme_mode', 'dark'),
     )
     st.markdown(svg, unsafe_allow_html=True)
 
 
 @st.cache_data(show_spinner=False)
-def _build_efficiency_scatter_svg(data, x_col, y_col, color_map, invert_y, highlight, x_label, y_label):
+def _build_efficiency_scatter_svg(data, x_col, y_col, color_map, invert_y, highlight, x_label, y_label, _theme_mode):
+    """`_theme_mode` isn't read below directly (this function already reads
+    the live C[...] dict, which config.apply_theme_mode has already
+    updated for the current mode by the time this runs) - it exists purely
+    so st.cache_data's key includes the active theme. Without it, this
+    cache is keyed only on (data, params), so switching light/dark
+    wouldn't bust a cached SVG built under the other mode and this chart
+    would keep showing stale colors until the underlying data itself
+    changed."""
     W, H = 860, 420
     ML, MR, MT, MB = 52, 18, 16, 40
     plot_w, plot_h = W - ML - MR, H - MT - MB
@@ -499,11 +508,11 @@ def _build_efficiency_scatter_svg(data, x_col, y_col, color_map, invert_y, highl
         color = color_map.get(team) or C['primary']
         x, yv = px(row[x_col]), py(row[y_col])
         parts.append(
-            f"<circle class='hz-dot' cx='{x:.1f}' cy='{yv:.1f}' r='7' fill='{color}' stroke='#ffffff' stroke-width='1.6'>"
+            f"<circle class='hz-dot' cx='{x:.1f}' cy='{yv:.1f}' r='7' fill='{color}' stroke='{C['on_surface']}' stroke-width='1.6'>"
             f"<title>{_esc(team)} — {x_col}: {row[x_col]:.1f}, {y_col}: {row[y_col]:.1f}</title></circle>"
         )
         parts.append(
-            f"<text x='{x + 10:.1f}' y='{yv + 4:.1f}' font-size='11.5' font-weight='700' fill='#ffffff' "
+            f"<text x='{x + 10:.1f}' y='{yv + 4:.1f}' font-size='11.5' font-weight='700' fill='{C['on_surface']}' "
             f"style='paint-order:stroke; stroke:{C['surface']}; stroke-width:3px;'>{_esc(team)}</text>"
         )
     parts.append("</svg>")
@@ -566,6 +575,87 @@ def render_relative_bars(rows):
         )
         y += ROW_H
     parts.append("</svg>")
+    st.markdown("".join(parts), unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
+# Dumbbell / gap chart (two-entity, per-stat delta - Player Compare's
+# head-to-head section)
+# ---------------------------------------------------------------------------
+
+def render_dumbbell_chart(rows, name_a, name_b, color_a=None, color_b=None):
+    """
+    One horizontal number-line per stat, each entity marked with its own
+    colored dot at its TRUE value (not just a bar-length proxy) and the two
+    dots joined by a connecting line whose length directly reads as the
+    size of the gap - replaces Player Compare's old plain delta table.
+    `rows`: [{'label', 'help' (optional), 'value_a', 'value_b',
+    'value_str_a', 'value_str_b'}]. Each row is scaled independently to
+    its own two values (plus headroom), same "every axis gets its own
+    peak" convention render_radar already uses - these stats span wildly
+    different ranges (PPG up near 30, percentages up near 100) so a single
+    shared x-axis across rows would flatten the smaller-scale ones.
+    """
+    if not rows:
+        return
+    color_a = color_a or C['primary']
+    color_b = color_b or C['secondary']
+    W, ROW_H, LABEL_W, VAL_W = 860, 34, 108, 132
+    track_w = W - LABEL_W - VAL_W - 16
+    H = ROW_H * len(rows) + 10
+    parts = [
+        f"<svg viewBox='0 0 {W} {H}' xmlns='http://www.w3.org/2000/svg' "
+        f"style='width:100%; height:auto; font-family:{_BODY_FONT};'>"
+    ]
+    y = 6
+    for r in rows:
+        cy = y + ROW_H / 2
+        x0 = LABEL_W
+        va, vb = r.get('value_a'), r.get('value_b')
+        label, help_text = r['label'], r.get('help', '')
+        parts.append(
+            f"<text x='{LABEL_W - 10}' y='{cy + 4:.1f}' text-anchor='end' font-size='11.5' font-weight='700' "
+            f"fill='{C['on_surface']}'>{_esc(label)}<title>{_esc(help_text)}</title></text>"
+        )
+        parts.append(f"<line x1='{x0}' y1='{cy:.1f}' x2='{x0 + track_w}' y2='{cy:.1f}' stroke='{C['surface_container_high']}' stroke-width='3' stroke-linecap='round'/>")
+        if va is not None and vb is not None and pd.notna(va) and pd.notna(vb):
+            peak = max(float(va), float(vb), 1e-9) * 1.15
+
+            def xpos(v):
+                return x0 + track_w * max(0.0, min(1.0, float(v) / peak))
+
+            xa, xb = xpos(va), xpos(vb)
+            denom = (abs(va) + abs(vb)) / 2
+            rel = ((va - vb) / denom * 100) if denom else 0.0
+            leader = name_a if va > vb else (name_b if vb > va else None)
+            gap_title = f"{_esc(leader)} leads by {abs(rel):.1f}%" if leader else "Even"
+            parts.append(
+                f"<line x1='{min(xa, xb):.1f}' y1='{cy:.1f}' x2='{max(xa, xb):.1f}' y2='{cy:.1f}' "
+                f"stroke='{C['outline']}' stroke-width='2.5'><title>{gap_title}</title></line>"
+            )
+            parts.append(
+                f"<circle class='hz-dot' cx='{xa:.1f}' cy='{cy:.1f}' r='6.5' fill='{color_a}' stroke='{C['surface']}' stroke-width='1.5'>"
+                f"<title>{_esc(name_a)} — {_esc(label)}: {_esc(r.get('value_str_a', ''))}</title></circle>"
+            )
+            parts.append(
+                f"<circle class='hz-dot' cx='{xb:.1f}' cy='{cy:.1f}' r='6.5' fill='{color_b}' stroke='{C['surface']}' stroke-width='1.5'>"
+                f"<title>{_esc(name_b)} — {_esc(label)}: {_esc(r.get('value_str_b', ''))}</title></circle>"
+            )
+        val_x = LABEL_W + track_w + 14
+        parts.append(
+            f"<text x='{val_x}' y='{cy + 4:.1f}' font-size='12' font-family='{_MONO_FONT}' font-weight='700'>"
+            f"<tspan fill='{color_a}'>{_esc(r.get('value_str_a', '--'))}</tspan>"
+            f"<tspan fill='{C['on_surface_variant']}' font-weight='400'>  vs  </tspan>"
+            f"<tspan fill='{color_b}'>{_esc(r.get('value_str_b', '--'))}</tspan>"
+            f"</text>"
+        )
+        y += ROW_H
+    parts.append("</svg>")
+    parts.append(
+        f"<div style='display:flex; gap:16px; margin-top:4px; font-size:12px; font-weight:700;'>"
+        f"<span style='color:{color_a};'>● {_esc(name_a)}</span>"
+        f"<span style='color:{color_b};'>● {_esc(name_b)}</span></div>"
+    )
     st.markdown("".join(parts), unsafe_allow_html=True)
 
 

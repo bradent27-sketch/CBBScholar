@@ -18,7 +18,7 @@ def render_header():
         f"<div style='display:flex; align-items:center; gap:12px; margin-top:0;'>"
         f"<div style='font-size:30px; line-height:1;'>🏀</div>"
         f"<div>"
-        f"<div style='font-family:{F['display']}; font-size:21px; font-weight:800; letter-spacing:-0.02em; line-height:1.05; color:#ffffff;'>"
+        f"<div style='font-family:{F['display']}; font-size:21px; font-weight:800; letter-spacing:-0.02em; line-height:1.05; color:{C['on_surface']};'>"
         f"CBB <span style='color:{C['primary']};'>SCHOLAR</span></div>"
         f"<div style='font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.14em; color:{C['on_surface_variant']}; margin-top:1px;'>"
         f"College Basketball Analytics &amp; Matchup Intelligence</div>"
@@ -57,6 +57,21 @@ def render_setup_status_sidebar():
     left to do from DATA_SOURCES.md. No PFF check here - not applicable."""
     with st.sidebar:
         st.markdown("<div class='custom-section-header'>SETUP STATUS</div>", unsafe_allow_html=True)
+
+        st.markdown("**Appearance**")
+        # key='theme_mode' directly (no separate widget-state key to keep in
+        # sync) - config.apply_theme_mode reads this exact
+        # st.session_state key, called from the very top of
+        # ui.styling.inject_theme() on every rerun, before anything else
+        # reads a color. 'dark' stays the default so a first-ever visit
+        # renders exactly what this app always has - opting into light mode
+        # is something a visitor does, not something forced on them.
+        st.radio(
+            "Theme", options=['dark', 'light'], format_func=str.capitalize,
+            key='theme_mode', horizontal=True, label_visibility='collapsed',
+        )
+        st.markdown("---")
+
         cbbd_key = _get_secret("cbbd_api_key")
         odds_key = _get_secret("odds_api_key")
 
@@ -110,7 +125,7 @@ def render_bio_strip(fields):
         cells.append(
             f"<div class='bio-cell' style='flex:1; background:{C['surface_container']}; text-align:center; padding:10px 6px;'>"
             f"<div style='font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.08em; color:{C['on_surface_variant']};'>{label}</div>"
-            f"<div style='font-family:{F['mono']}; font-size:18px; font-weight:600; color:#ffffff; margin-top:2px;'>{value}</div>"
+            f"<div style='font-family:{F['mono']}; font-size:18px; font-weight:600; color:{C['on_surface']}; margin-top:2px;'>{value}</div>"
             f"</div>"
         )
     st.markdown(

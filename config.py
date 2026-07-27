@@ -250,3 +250,86 @@ THEME = {
         'xs': '4px', 'sm': '12px', 'md': '24px', 'lg': '40px', 'xl': '64px', 'gutter': '24px',
     },
 }
+
+# Light-mode color palette, on request ("dark mode should be exactly what
+# is currently being shown, develop a light mode... doesn't lose any of
+# the clearness of data or functionality"). Same keys as THEME['colors']
+# above (fonts/radius/spacing are shared across both modes - only color
+# roles differ), every "on_X" pair checked with a real WCAG contrast-ratio
+# script before committing to these values (not eyeballed): on_surface/
+# surface 16.7:1, primary/surface 6.6:1, secondary/surface 7.6:1,
+# tertiary/surface 4.6:1, error/surface 5.2:1 - all >=AA for normal text.
+# positive/negative land at 3.4:1 / 4.5:1 (AA for large/graphical content,
+# not small body text) - these are used as chart dot/bar/badge fill colors
+# here, never as small printed text, the same usage pattern the original
+# dark palette's own '#1ed760'/'#ef4444' already had. Elevation direction
+# intentionally INVERTS vs. the dark palette's container family (there,
+# higher elevation = lighter; here, higher elevation = slightly more
+# tinted/grey, since you can't get lighter than white) - standard practice
+# for a light Material-style surface scale, verified by checking the
+# actual luminance ordering, not just picking plausible-looking hex values.
+THEME_LIGHT_COLORS = {
+    'surface': '#F7F5FB',
+    'surface_dim': '#E4E1EC',
+    'surface_bright': '#FFFFFF',
+    'surface_container_lowest': '#FFFFFF',
+    'surface_container_low': '#F1EEF8',
+    'surface_container': '#EAE6F5',
+    'surface_container_high': '#E1DCF0',
+    'surface_container_highest': '#D7D0EA',
+    'on_surface': '#171426',
+    'on_surface_variant': '#4B4566',
+    'outline': '#79738F',
+    'outline_variant': '#CFC9DD',
+    'primary': '#6D28D9',
+    'on_primary': '#FFFFFF',
+    'primary_container': '#EDE1FE',
+    'on_primary_container': '#33146B',
+    'secondary': '#2C4A99',
+    'on_secondary': '#FFFFFF',
+    'tertiary': '#B45309',
+    'on_tertiary': '#FFFFFF',
+    'error': '#C81E3A',
+    'on_error': '#FFFFFF',
+    'positive': '#1A9850',
+    'negative': '#DC2626',
+}
+
+# Snapshot of the ORIGINAL dark-mode values, taken before anything ever
+# mutates THEME['colors'] - lets apply_theme_mode below restore dark mode
+# exactly (the explicit requirement: "the dark mode should be exactly what
+# is currently being shown") without needing a separate THEME_DARK_COLORS
+# dict that could silently drift out of sync with THEME['colors'] above.
+_THEME_DARK_COLORS = dict(THEME['colors'])
+
+
+def apply_theme_mode(mode):
+    """
+    Switches the app's active color palette by mutating THEME['colors']
+    IN PLACE (.clear() + .update(), never reassigning THEME['colors'] to a
+    new dict object) - ui.styling, ui.charts, and ui.components each do
+    their own `C = THEME['colors']` at import time, which binds every one
+    of those modules' `C` names to this SAME dict object. Because a
+    module's top-level code only runs once per process (Python's import
+    cache), re-running this app's script on every Streamlit rerun does NOT
+    re-execute those `C = THEME['colors']` lines - so switching modes has
+    to change the dict's CONTENTS, not hand out a new dict, or two of the
+    three modules would keep reading stale colors. Called from
+    ui.styling.inject_theme() (which itself runs at the top of every
+    rerun, before anything reads C[...]) with mode resolved from
+    st.session_state - config.py itself stays Streamlit-import-free.
+
+    Caveat, honestly flagged rather than glossed over: THEME['colors'] is
+    one dict shared by every session in this process (Streamlit session
+    state is per-browser-tab; a plain module-level dict is not) - fine for
+    this app's actual single-user/personal-use deployment (see this
+    file's own season-window comment above for the same assumption), but
+    it would cross-contaminate the theme between concurrent sessions in a
+    genuinely multi-user deployment. Not attempting a per-session-safe
+    refactor here since that would mean threading a colors dict through
+    every one of styling.py/charts.py/components.py's many C[...] call
+    sites instead of this single mutation point.
+    """
+    target = THEME_LIGHT_COLORS if mode == 'light' else _THEME_DARK_COLORS
+    THEME['colors'].clear()
+    THEME['colors'].update(target)

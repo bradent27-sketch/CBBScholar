@@ -5,8 +5,82 @@ Sibling app to NFL Scholar (`C:\FantasyF`) and CFB Scholar
 college basketball. This doc follows NFL Scholar's own HANDOFF.md section
 structure on purpose, so all three stay easy to cross-reference.
 
-**Pace stat, conference colors, and L10/L5/L3 form badges (this doc's most
-recent update):**
+**Player Compare dumbbell chart, light mode, and a Net Rating cleanup (this
+doc's most recent update):**
+
+1. **Player Compare's head-to-head delta.** The old plain diverging-color
+   table is gone. `ui.charts.render_dumbbell_chart` (new) draws one
+   number-line per shared stat, each player's TRUE value marked by a dot
+   in their own team color and joined by a connecting line whose length
+   reads as the size of the gap - user picked this over two other
+   brainstormed options (mirrored bidirectional bars, a broadcast-style
+   stat-card grid). Also dropped the `Net Rating` row from both the stat
+   tiles and this section - that stat was removed from the app earlier
+   and had been left behind here.
+2. **Light mode.** New sidebar toggle (Setup Status → Appearance,
+   `st.radio(key='theme_mode')`, default `'dark'` so nothing changes
+   unless a visitor opts in). Dark mode is untouched by construction, not
+   just by care: `config.apply_theme_mode(mode)` mutates `THEME['colors']`
+   IN PLACE rather than swapping in a new dict, and the dark branch of
+   every mode-dependent value in this pass is the literal pre-existing
+   constant, byte-for-byte - "switch to dark" can only ever restore
+   exactly what was already there.
+   - `config.THEME_LIGHT_COLORS`: a full light palette, same keys as
+     `THEME['colors']`, contrast-checked with a real WCAG ratio script
+     before committing (not eyeballed) - see the comment above that dict
+     for the actual numbers.
+   - Mutating `THEME['colors']` in place (instead of reassigning it) matters
+     because `ui.styling`/`ui.charts`/`ui.components` each independently do
+     `C = THEME['colors']` at import time, and Python only runs a module's
+     top-level code once per process - reassignment would leave two of the
+     three modules holding a stale reference. `apply_theme_mode` is called
+     at the top of `inject_theme()` on every rerun, before any of those `C`
+     reads happen. One honest caveat, not glossed over: this is a single
+     shared dict across the whole process, fine for this app's actual
+     single-user use (same assumption this file's own season-window
+     comment already makes) but not safe for concurrent multi-session
+     deployments.
+   - A handful of CSS rules were hand-tuned literal `rgba(...)` triplets
+     rather than `{C['x']}` lookups (glow/tint effects) and don't follow
+     `C`'s mutation automatically - each got an explicit light-mode branch
+     in `inject_theme()` (header chrome, tab-hover tint, alert/card/
+     expander tints, input backgrounds), with the dark branch copied
+     verbatim from what was already there.
+   - One `@st.cache_data`-decorated chart builder
+     (`_build_efficiency_scatter_svg`) reads theme colors internally but
+     was keyed only on its data args - switching modes wouldn't have
+     busted its cache, so it would've kept showing the OTHER mode's colors
+     until the underlying data changed. Fixed by threading
+     `st.session_state['theme_mode']` through as an explicit (otherwise
+     unused) cache-key argument.
+   - Three real bugs found only by live inspection (Chrome DevTools
+     Protocol matched-styles, not code-reading): the sidebar `<section>`
+     itself carries an explicit native text color that sits BELOW (closer
+     to the leaf than) `.stApp`'s color rule in the inheritance chain, so
+     setting color only on `.stApp` left every plain sidebar text white
+     regardless of mode; a radio option's inner wrapper and the sidebar's
+     collapse-icon button each independently re-assert Streamlit's native
+     color the same way; and `st.text_input`/`st.checkbox`'s underlying
+     wrapper elements carry Streamlit's own hardcoded
+     `secondaryBackgroundColor` fill (`.streamlit/config.toml`) with no
+     stable testid on the checkbox's own indicator box, requiring a
+     `:has()` selector anchored off the widget label that always follows
+     it instead of an emotion-hash class.
+   - One thing deliberately NOT fixed, because it can't be: `st.dataframe`'s
+     own grid chrome (header row, borders) is drawn to a `<canvas>` by
+     Streamlit's own JS using colors resolved once from
+     `.streamlit/config.toml` at process start - confirmed live (no `:root`
+     CSS custom properties exist to override, and the canvas is opaque to
+     CSS entirely, same limitation already documented elsewhere in this
+     file). The header row stays visually dark in light mode; the actual
+     data cells (this app's own Styler-applied colors) correctly follow
+     the toggle. Not visible at all on mobile, where the responsive-table
+     pattern hides the desktop grid in favor of the (fully theme-aware)
+     card view.
+
+---
+
+**Pace stat, conference colors, and L10/L5/L3 form badges:**
 
 1. **Pace in Team Efficiency.** `data.transforms.four_factors_percentile_grid`
    now prepends a `Pace` column (higher-is-better) whenever the caller's

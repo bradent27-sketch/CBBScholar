@@ -92,7 +92,6 @@ def _render_player_column(col, team, row, colors, stats):
             {'label': 'APG', 'value_str': _per_game(stats.get('assists'), games)},
             {'label': 'FG%', 'value_str': _pct(fg.get('pct'))},
             {'label': '3P%', 'value_str': _pct(three.get('pct'))},
-            {'label': 'Net Rating', 'value_str': str(stats.get('netRating', '--'))},
         ]
         render_stat_tiles(entries)
 
@@ -133,7 +132,7 @@ def render():
     _render_player_column(col_a2, team_a, row_a, colors, stats_a)
     _render_player_column(col_b2, team_b, row_b, colors, stats_b)
 
-    _render_delta_table(row_a, row_b, stats_a, stats_b)
+    _render_delta_table(team_a, team_b, row_a, row_b, colors, stats_a, stats_b)
     _render_radar_section(team_a, team_b, row_a, row_b, colors, stats_a, stats_b)
     sources = {source_a, source_b}
     if sources == {'espn'}:
@@ -185,47 +184,40 @@ def _numeric_stat_map(stats):
     direct('FT%', ft.get('pct'))
     direct('eFG%', stats.get('effectiveFieldGoalPct'))
     direct('Usage %', stats.get('usage'))
-    direct('Net Rating', stats.get('netRating'))
     return out
 
 
-def _render_delta_table(row_a, row_b, stats_a, stats_b):
-    """The head-to-head delta table (formerly parked): every stat both
-    players share, with a diverging-color relative-edge column (green =
-    Player A leads). `stats_a`/`stats_b` are the raw profile dicts
-    render() already resolved via get_player_season_profile - if one
-    source is 'espn' (no Net Rating key) and the other 'cbbd', that stat
-    simply won't be in `common` below, same as any other stat one side is
-    missing."""
+_PCT_STAT_LABELS = {'FG%', '3P%', 'FT%', 'eFG%', 'Usage %'}
+
+
+def _render_delta_table(team_a, team_b, row_a, row_b, colors, stats_a, stats_b):
+    """The head-to-head delta section: every stat both players share, as a
+    dumbbell/gap chart (ui.charts.render_dumbbell_chart) instead of a plain
+    table - one number-line per stat with each player's own true value
+    marked by a team-colored dot, the connecting line's length reading as
+    the size of the gap at a glance. `stats_a`/`stats_b` are the raw
+    profile dicts render() already resolved via get_player_season_profile -
+    if one source is missing a stat the other has, that stat simply won't
+    be in `common` below."""
     stats_a = _numeric_stat_map(stats_a)
     stats_b = _numeric_stat_map(stats_b)
     common = [k for k in stats_a if k in stats_b]
     if not common:
         return
     st.markdown("<div class='custom-section-header'>HEAD-TO-HEAD DELTA</div>", unsafe_allow_html=True)
+    from ui.charts import render_dumbbell_chart
     rows = []
     for k in common:
         va, vb = stats_a[k], stats_b[k]
-        edge = va - vb
-        # Relative edge (% of the pair's mean) so the shared color scale
-        # isn't dominated by whichever stat has the biggest raw numbers.
-        denom = (abs(va) + abs(vb)) / 2
-        rel = (edge / denom * 100) if denom else 0.0
+        suffix = '%' if k in _PCT_STAT_LABELS else ''
         rows.append({
-            'Stat': k,
-            row_a['name']: round(va, 1),
-            row_b['name']: round(vb, 1),
-            'Edge %': round(rel, 1),
+            'label': k,
+            'value_a': va,
+            'value_b': vb,
+            'value_str_a': f"{va:.1f}{suffix}",
+            'value_str_b': f"{vb:.1f}{suffix}",
         })
-    import pandas as pd
-    from ui.styling import df_auto_height, render_responsive_table
-    df = pd.DataFrame(rows).set_index('Stat')
-    max_abs = df['Edge %'].abs().max() or 1
-    render_responsive_table(
-        f"compare_delta_{row_a['name']}_{row_b['name']}", df, primary_col=None,
-        diverging_cols={'Edge %': max_abs}, height=df_auto_height(len(df)),
-    )
-    st.caption(f"Green = {row_a['name']} leads, red = {row_b['name']} leads.")
+    render_dumbbell_chart(rows, row_a['name'], row_b['name'], color_a=colors.get(team_a), color_b=colors.get(team_b))
 
 
 _RADAR_AXES = ['PPG', 'RPG', 'APG', 'FG%', '3P%', 'Usage %']

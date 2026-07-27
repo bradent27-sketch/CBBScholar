@@ -14,7 +14,7 @@ import re
 import pandas as pd
 import streamlit as st
 
-from config import THEME, TEAM_CONFIG, CONFERENCE_COLORS
+from config import THEME, TEAM_CONFIG, CONFERENCE_COLORS, apply_theme_mode
 from data.utils import (
     normalize_team_name as _normalize_team_name,
     expand_team_name_aliases as _expand_with_aliases,
@@ -65,8 +65,12 @@ def _hex_to_rgb_str(hex_color):
     return f"{int(h[0:2], 16)}, {int(h[2:4], 16)}, {int(h[4:6], 16)}"
 
 
-_PRIMARY_RGB = _hex_to_rgb_str(C['primary'])
-_SECONDARY_RGB = _hex_to_rgb_str(C['secondary'])
+# NOT cached as module-level constants (unlike the rest of this file's
+# ported-as-is structure) - C['primary']/C['secondary'] change contents
+# in place when apply_theme_mode() switches modes (see config.py), and a
+# frozen string computed once at import time would go stale on the very
+# first light/dark toggle. _hex_to_rgb_str(C['primary']) is called fresh
+# at every use site below instead.
 
 
 @st.cache_data
@@ -114,14 +118,37 @@ def build_column_help_config(df, pinned_cols=None, meter_cols=None):
 
 
 def inject_theme():
+    apply_theme_mode(st.session_state.get('theme_mode', 'dark'))
+    is_light = st.session_state.get('theme_mode', 'dark') == 'light'
+    # A handful of rules below were originally hand-tuned as literal rgba()
+    # triplets rather than derived from C[...] (glow/tint effects where a
+    # bare hex wouldn't give the right alpha blend) - those don't
+    # automatically follow C's mutation the way every `{C['x']}` spot in
+    # this file does, so each needs its own explicit light-mode value here.
+    # Dark-mode strings are copied byte-for-byte from what was already
+    # here before light mode existed, so toggling to 'dark' can never
+    # change dark mode's actual output - only the light branch is new.
+    _header_bg = 'rgba(247, 245, 251, 0.72)' if is_light else 'rgba(5, 9, 33, 0.72)'
+    _header_border = 'rgba(207, 201, 221, 0.6)' if is_light else 'rgba(44, 50, 96, 0.6)'
+    _tab_hover_tint = 'rgba(23, 20, 38, 0.05)' if is_light else 'rgba(255, 255, 255, 0.05)'
+    _panel_tint = 'rgba(234, 230, 245, 0.85)' if is_light else 'rgba(19, 27, 56, 0.55)'
+    _card_tint = 'rgba(234, 230, 245, 0.7)' if is_light else 'rgba(19, 27, 56, 0.4)'
+    _input_bg = 'rgba(0, 0, 0, 0.04)' if is_light else 'rgba(0, 0, 0, 0.25)'
+    # Streamlit's own unchecked-checkbox box has no stable testid of its
+    # own to target (confirmed live: it's an unnamed emotion-hashed div,
+    # a sibling of the real <input>, not a descendant of any [role] or
+    # data-testid wrapper) - rgb(7, 12, 44) is its literal current dark-
+    # mode fill, copied byte-for-byte so toggling to 'dark' can't change
+    # it; only the light branch is new.
+    _checkbox_box_bg = C['surface_container_high'] if is_light else 'rgb(7, 12, 44)'
     st.markdown(f"""
         <style>
         {_font_face_css()}
 
         .stApp {{
             background:
-                radial-gradient(1100px 420px at 18% -8%, rgba({_SECONDARY_RGB}, 0.16) 0%, rgba({_SECONDARY_RGB}, 0) 60%),
-                radial-gradient(900px 380px at 85% -12%, rgba({_PRIMARY_RGB}, 0.07) 0%, rgba({_PRIMARY_RGB}, 0) 55%),
+                radial-gradient(1100px 420px at 18% -8%, rgba({_hex_to_rgb_str(C['secondary'])}, 0.16) 0%, rgba({_hex_to_rgb_str(C['secondary'])}, 0) 60%),
+                radial-gradient(900px 380px at 85% -12%, rgba({_hex_to_rgb_str(C['primary'])}, 0.07) 0%, rgba({_hex_to_rgb_str(C['primary'])}, 0) 55%),
                 linear-gradient(180deg, {C['surface']} 0%, {C['surface_dim']} 100%) !important;
             color: {C['on_surface']} !important;
             font-family: {F['body']} !important;
@@ -129,9 +156,9 @@ def inject_theme():
         }}
 
         header[data-testid="stHeader"] {{
-            background: rgba(5, 9, 33, 0.72) !important;
+            background: {_header_bg} !important;
             backdrop-filter: blur(8px);
-            border-bottom: 1px solid rgba(44, 50, 96, 0.6);
+            border-bottom: 1px solid {_header_border};
         }}
         [data-testid="stAppDeployButton"], .stDeployButton, footer {{ display: none !important; }}
 
@@ -173,7 +200,7 @@ def inject_theme():
             height: 14px;
             border-radius: 2px;
             background: {C['primary']};
-            box-shadow: 0 0 8px rgba({_PRIMARY_RGB}, 0.5);
+            box-shadow: 0 0 8px rgba({_hex_to_rgb_str(C['primary'])}, 0.5);
             flex: 0 0 auto;
         }}
 
@@ -190,7 +217,7 @@ def inject_theme():
             cursor: pointer;
         }}
         [data-testid="stTab"]:hover, div[data-testid="stTabs"] button[data-baseweb="tab"]:hover {{
-            background-color: rgba(255, 255, 255, 0.05) !important;
+            background-color: {_tab_hover_tint} !important;
         }}
         [data-testid="stTab"] p, button[data-baseweb="tab"] p {{
             color: {C['on_surface_variant']} !important;
@@ -200,7 +227,7 @@ def inject_theme():
             letter-spacing: 0.02em;
         }}
         [data-testid="stTab"][aria-selected="true"], button[data-baseweb="tab"][aria-selected="true"] {{
-            background-color: rgba({_PRIMARY_RGB}, 0.10) !important;
+            background-color: rgba({_hex_to_rgb_str(C['primary'])}, 0.10) !important;
         }}
         [data-testid="stTab"][aria-selected="true"] p, button[data-baseweb="tab"][aria-selected="true"] p {{
             color: {C['primary']} !important;
@@ -228,7 +255,7 @@ def inject_theme():
         }}
 
         div[data-testid="stAlert"] {{
-            background: rgba(19, 27, 56, 0.55) !important;
+            background: {_panel_tint} !important;
             border: 1px solid {C['outline_variant']} !important;
             border-radius: {R['md']} !important;
             backdrop-filter: blur(6px);
@@ -239,6 +266,22 @@ def inject_theme():
         section[data-testid="stSidebar"] {{
             background: {C['surface_dim']} !important;
             border-right: 1px solid {C['outline_variant']};
+            color: {C['on_surface']} !important;
+        }}
+        /* Two spots inside the sidebar re-assert Streamlit's own native
+           text color on a wrapper BELOW the section-level override above
+           (confirmed live via Chrome DevTools Protocol matched-styles, not
+           guessed) instead of inheriting it: a radio/checkbox/select
+           option's own inner wrapper, and the sidebar's collapse-icon
+           button. Both needed their own explicit override - the section-
+           level `color` above never reaches either. */
+        [data-testid="stRadioOption"] p, [data-testid="stCheckbox"] p,
+        [data-testid="stSelectbox"] p, [data-testid="stWidgetLabel"] p {{
+            color: {C['on_surface']} !important;
+        }}
+        [data-testid="stSidebarCollapseButton"] svg, [data-testid="stSidebarCollapseButton"] span {{
+            color: {C['on_surface_variant']} !important;
+            fill: {C['on_surface_variant']} !important;
         }}
 
         ::-webkit-scrollbar {{ width: 10px; height: 10px; }}
@@ -344,7 +387,7 @@ def inject_theme():
         /* "Coming soon" placeholder card (see ui.components.render_coming_soon) -
            one shared empty-state treatment for every not-yet-wired tab. */
         .coming-soon-card {{
-            background: rgba(19, 27, 56, 0.4);
+            background: {_card_tint};
             border: 1px dashed {C['outline_variant']};
             border-radius: {R['lg']};
             padding: 28px 30px;
@@ -382,7 +425,7 @@ def inject_theme():
         }}
 
         div[data-testid="stExpander"] {{
-            background: rgba(19, 27, 56, 0.4) !important;
+            background: {_card_tint} !important;
             border: 1px solid {C['outline_variant']} !important;
             border-radius: {R['md']} !important;
             backdrop-filter: blur(8px);
@@ -404,7 +447,7 @@ def inject_theme():
         .stButton button:hover, .stDownloadButton button:hover {{
             border-color: {C['primary']} !important;
             color: {C['primary']} !important;
-            background-color: rgba({_PRIMARY_RGB}, 0.06) !important;
+            background-color: rgba({_hex_to_rgb_str(C['primary'])}, 0.06) !important;
         }}
         .stButton button[kind="primary"] {{
             background-color: {C['primary']} !important;
@@ -414,22 +457,33 @@ def inject_theme():
 
         .stSelectbox [role="group"], .stMultiSelect [role="group"],
         .stNumberInput [role="group"], .stDateInput [role="group"],
-        div[data-baseweb="select"] > div, .stTextInput input, .stTextArea textarea, .stNumberInput input {{
-            background-color: rgba(0, 0, 0, 0.25) !important;
+        div[data-baseweb="select"] > div,
+        [data-testid="stTextInputRootElement"], [data-testid="stTextAreaRootElement"],
+        [data-testid="stNumberInputContainer"] {{
+            background-color: {_input_bg} !important;
             border-radius: {R['default']} !important;
             border: 1px solid {C['outline_variant']} !important;
             color: {C['on_surface']} !important;
         }}
-        .stSelectbox [role="group"] input, .stMultiSelect [role="group"] input, .stNumberInput [role="group"] input {{
+        .stSelectbox [role="group"] input, .stMultiSelect [role="group"] input, .stNumberInput [role="group"] input,
+        .stTextInput input, .stTextArea textarea, .stNumberInput input {{
             background-color: transparent !important;
             border: none !important;
             color: {C['on_surface']} !important;
+        }}
+        /* The checkbox glyph box itself: a sibling of the real (visually
+           hidden) <input type="checkbox">, not reachable by any stable
+           testid/role - :has() lets this anchor off the one stable thing
+           nearby (the [data-testid="stWidgetLabel"] that always follows
+           it) instead of an emotion-hash class. */
+        [data-testid="stCheckbox"] div:has(+ [data-testid="stWidgetLabel"]) {{
+            background-color: {_checkbox_box_bg} !important;
         }}
         .stSelectbox [role="group"]:focus-within, .stMultiSelect [role="group"]:focus-within,
         .stNumberInput [role="group"]:focus-within, .stDateInput [role="group"]:focus-within,
         div[data-baseweb="select"] > div:focus-within, .stTextInput input:focus, .stTextArea textarea:focus {{
             border-color: {C['primary']} !important;
-            box-shadow: 0 0 0 2px rgba({_PRIMARY_RGB}, 0.15) !important;
+            box-shadow: 0 0 0 2px rgba({_hex_to_rgb_str(C['primary'])}, 0.15) !important;
         }}
         .stSelectbox [role="group"]:hover, .stMultiSelect [role="group"]:hover,
         .stNumberInput [role="group"]:hover, .stDateInput [role="group"]:hover,
@@ -467,8 +521,8 @@ def inject_theme():
             transition: transform 140ms ease-out, border-color 140ms ease-out, box-shadow 140ms ease-out;
         }}
         .stat-tile:hover, .hero-tile:hover {{
-            border-color: rgba({_PRIMARY_RGB}, 0.55);
-            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 10px 22px -10px rgba({_PRIMARY_RGB}, 0.3) !important;
+            border-color: rgba({_hex_to_rgb_str(C['primary'])}, 0.55);
+            box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 10px 22px -10px rgba({_hex_to_rgb_str(C['primary'])}, 0.3) !important;
             transform: translateY(-1px);
         }}
 
@@ -507,7 +561,7 @@ def inject_theme():
             cursor: pointer;
         }}
         svg .hz-dot:hover {{
-            filter: brightness(1.35) drop-shadow(0 0 5px rgba({_PRIMARY_RGB}, 0.75));
+            filter: brightness(1.35) drop-shadow(0 0 5px rgba({_hex_to_rgb_str(C['primary'])}, 0.75));
             transform: scale(1.45);
         }}
         svg .hz-line {{
@@ -1045,7 +1099,7 @@ def render_sticky_footer_table(df, footer, numeric_cols=None, team_color_map=Non
     st.markdown(
         f"<div class='sft-wrap' style='max-height:{height}px; overflow:auto; border:1px solid {C['outline_variant']}; "
         f"border-radius:{R['sm']}; background:{C['surface_container']};'>"
-        f"<style>.sft-row:hover td {{ background:rgba({_PRIMARY_RGB}, 0.06); }} {mobile_instance_css}</style>"
+        f"<style>.sft-row:hover td {{ background:rgba({_hex_to_rgb_str(C['primary'])}, 0.06); }} {mobile_instance_css}</style>"
         f"<table class='sft-table' style='width:100%; border-collapse:collapse; font-family:{F['mono']}; "
         f"font-size:12px; color:{C['on_surface']};'>"
         f"<thead><tr>{header_html}</tr></thead>"
