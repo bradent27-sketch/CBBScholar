@@ -205,12 +205,60 @@ TEAM_NAME_ALIASES = [
 ]
 
 
-def expand_team_name_aliases(norm_map):
-    """Adds each TEAM_NAME_ALIASES pair's other spelling to `norm_map`
-    (pointing at the same value) whenever exactly one side is already
-    present - never overwrites a real direct hit with a guessed one."""
+# Common short-name/full-name aliases for the same CONFERENCE across
+# sources (CBBD's own values appear to already be short forms like 'ACC'/
+# 'Big Ten' - see config.TEAM_CONFIG's existing 'conference' values - but
+# ESPN and ncaa.com's scrape are reasoned, not live-verified, to possibly
+# use full names or different abbreviations - same standing network-
+# blocked caveat as everywhere else in this file). Same normalized-string
+# shape as TEAM_NAME_ALIASES, passed to resolve_team_name's `aliases`
+# param when resolving a CONFERENCE name instead of a team name - see
+# config.CONFERENCE_COLORS, the caller this was built for.
+CONFERENCE_NAME_ALIASES = [
+    ('acc', 'atlantic coast conference'),
+    ('big ten', 'b1g'),
+    ('big 12', 'b12'),
+    ('sec', 'southeastern conference'),
+    ('big east', 'big east conference'),
+    ('american', 'american athletic conference'),
+    ('american', 'aac'),
+    ('atlantic 10', 'a10'),
+    ('mountain west', 'mwc'),
+    ('wcc', 'west coast conference'),
+    ('missouri valley', 'mvc'),
+    ('conference usa', 'cusa'),
+    ('sun belt', 'sun belt conference'),
+    ('ivy league', 'ivy'),
+    ('caa', 'colonial athletic association'),
+    ('maac', 'metro atlantic athletic conference'),
+    ('horizon league', 'horizon'),
+    ('mac', 'mid american conference'),
+    ('socon', 'southern conference'),
+    ('big sky', 'big sky conference'),
+    ('big south', 'big south conference'),
+    ('asun', 'atlantic sun'),
+    ('america east', 'aec'),
+    ('patriot league', 'patriot'),
+    ('nec', 'northeast conference'),
+    ('ovc', 'ohio valley conference'),
+    ('summit league', 'the summit league'),
+    ('southland', 'southland conference'),
+    ('wac', 'western athletic conference'),
+    ('big west', 'big west conference'),
+    ('meac', 'mid eastern athletic conference'),
+    ('swac', 'southwestern athletic conference'),
+]
+
+
+def expand_team_name_aliases(norm_map, aliases=None):
+    """Adds each alias pair's other spelling to `norm_map` (pointing at the
+    same value) whenever exactly one side is already present - never
+    overwrites a real direct hit with a guessed one. `aliases` defaults to
+    TEAM_NAME_ALIASES; pass CONFERENCE_NAME_ALIASES to expand a conference-
+    name map instead - same mechanism, different alias source."""
+    aliases = aliases if aliases is not None else TEAM_NAME_ALIASES
     expanded = dict(norm_map)
-    for a, b in TEAM_NAME_ALIASES:
+    for a, b in aliases:
         if a in norm_map and b not in expanded:
             expanded[b] = norm_map[a]
         if b in norm_map and a not in expanded:
@@ -258,20 +306,24 @@ def _mascot_prefix_match(norm_name, norm_map):
     return norm_map.get(best_key) if best_key else None
 
 
-def resolve_team_name(name, canonical_names):
+def resolve_team_name(name, canonical_names, aliases=None):
     """
-    Resolves a team name from a foreign source (ESPN/SportsDataverse,
-    ncaa.com scrape, etc.) to its matching entry in `canonical_names`
-    (e.g. CBBD's own team list) - exact match first, then normalized +
-    alias match, then a mascot-stripping word-prefix match (see
-    _mascot_prefix_match) as a last resort. Returns None if nothing
-    resolves, so callers can drop or flag an unattributable row instead of
-    silently mis-joining it to the wrong team.
+    Resolves a team (or, with `aliases=CONFERENCE_NAME_ALIASES`, a
+    CONFERENCE) name from a foreign source (ESPN/SportsDataverse, ncaa.com
+    scrape, etc.) to its matching entry in `canonical_names` (e.g. CBBD's
+    own team list, or config.CONFERENCE_COLORS' keys) - exact match first,
+    then normalized + alias match, then a mascot-stripping word-prefix
+    match (see _mascot_prefix_match) as a last resort - harmless no-op for
+    conference names (no mascots to strip), just an unused extra tier.
+    Returns None if nothing resolves, so callers can drop or flag an
+    unattributable row instead of silently mis-joining it to the wrong
+    team/conference. `aliases` defaults to TEAM_NAME_ALIASES (unchanged
+    behavior for every existing team-name caller).
     """
     canonical_names = list(canonical_names)
     if name in canonical_names:
         return name
-    norm_map = expand_team_name_aliases({normalize_team_name(c): c for c in canonical_names})
+    norm_map = expand_team_name_aliases({normalize_team_name(c): c for c in canonical_names}, aliases=aliases)
     norm_name = normalize_team_name(name)
     direct = norm_map.get(norm_name)
     if direct:

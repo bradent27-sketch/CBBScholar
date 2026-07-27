@@ -5,7 +5,54 @@ Sibling app to NFL Scholar (`C:\FantasyF`) and CFB Scholar
 college basketball. This doc follows NFL Scholar's own HANDOFF.md section
 structure on purpose, so all three stay easy to cross-reference.
 
-**Mobile responsiveness overhaul (this doc's most recent update):** every
+**Pace stat, conference colors, and L10/L5/L3 form badges (this doc's most
+recent update):**
+
+1. **Pace in Team Efficiency.** `data.transforms.four_factors_percentile_grid`
+   now prepends a `Pace` column (higher-is-better) whenever the caller's
+   `stats_df` has one, so the Four Factors table picks it up automatically
+   with no call-site change. The Rankings subtab didn't have Pace in its
+   frame at all, so `_render_rankings_subtab` now merges it in from
+   `load_all_team_season_stats(season)` (same source Matchup Analyzer
+   already used) and orders it right after Rank/Team/Conference.
+2. **Conference colors.** ESPN and CBBD were checked directly (curl/WebFetch)
+   for conference branding data and both are unreachable from this
+   environment - consistent with this doc's standing network limitation, so
+   this is NOT pulled live. `config.CONFERENCE_COLORS` is a hand-curated,
+   one-time dict (32 entries) instead, explicitly NOT verified against any
+   live source - flagged as such in a comment at its definition. Per
+   explicit instruction, every value is deliberately unique (checked with a
+   `len(set(...))` script before committing) even where real branding
+   clusters multiple conferences around the same navy/blue/red families, so
+   no two conferences are ever visually indistinguishable in this app. Reused
+   the existing `TEAM_NAME_ALIASES` / `resolve_team_name` machinery for the
+   lookup: `data.utils.expand_team_name_aliases` and `resolve_team_name` both
+   grew an optional `aliases=` param (default preserves old behavior exactly)
+   so a new `CONFERENCE_NAME_ALIASES` list (ACC/"Atlantic Coast Conference",
+   Big Ten/B1G, etc.) can drive conference-name matching the same way team
+   names already do. `ui.styling._conference_color` looks up exact name
+   first, then falls back through the alias-normalized map. Wired into the
+   existing `Conference` column path in both `style_plain_dataframe` (desktop
+   Styler) and `_mobile_cell_bg` (mobile cards) alongside the pre-existing
+   `Team` coloring branch.
+3. **L10/L5/L3 form badges on Matchup Analyzer trend charts.** New
+   `data.transforms.last_n_form_deltas(values, baseline, ns=(10,5,3))`
+   computes the last-N-game average and whether it's >= the season/period
+   baseline for each N. `ui.charts.render_trend_line` grew an optional
+   `corner_stats` param that draws small colored badges (green = at/above
+   baseline, red = below) in the chart's top-right corner, each with a
+   `<title>` tooltip spelling out the comparison - reusing existing SVG
+   text/rect drawing in that module, no new rendering path. Wired into both
+   `_render_player_trend` (player stat graphs, baseline = season average)
+   and `_render_positional_defense` (team-defense-allowed graphs, baseline =
+   the same window's average, since there's no single "season average" for
+   an opponent-position bucket). Verified via AppTest with synthetic data on
+   both call sites, inspecting actual rendered SVG markup for correct color
+   and tooltip text, not just absence of exceptions.
+
+---
+
+**Mobile responsiveness overhaul:** every
 wide data table now gets a real mobile card layout below 768px, with the
 desktop `st.dataframe`/table code paths left completely untouched (verified
 live, not just by reading the code - see below). Two different mechanisms

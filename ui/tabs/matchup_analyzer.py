@@ -59,7 +59,7 @@ from data.loaders import (
 from data.transforms import (
     position_bucket, positional_defense_summary, positional_defense_trend,
     player_percentile_rows, player_trend_series, team_defense_profile_rows,
-    espn_player_season_stats_for_teams,
+    espn_player_season_stats_for_teams, last_n_form_deltas,
 )
 from data.utils import match_player_name, resolve_team_name
 from ui.components import render_coming_soon
@@ -319,7 +319,19 @@ def _render_player_trend(season, ctx):
         dates, values, avg = player_trend_series(mine, stat, n=10)
         st.markdown(f"_{stat} — last {len(values)} games_")
         if len(values) >= 2:
-            render_trend_line(dates, values, avg=avg, avg_label='season avg', y_suffix=suffix, height=150)
+            # Corner badges: last-10/5/3-game average vs the player's own
+            # season average (the SAME `avg` already driving the dashed
+            # reference line and per-dot coloring below) - green when the
+            # recent window is running above season average, red when
+            # below, matching this chart's own existing per-dot rule.
+            corner_stats = [
+                (label, f"{avg_n:.1f}{suffix}", is_above)
+                for label, avg_n, is_above in last_n_form_deltas(values, avg)
+            ]
+            render_trend_line(
+                dates, values, avg=avg, avg_label='season avg', y_suffix=suffix, height=150,
+                corner_stats=corner_stats,
+            )
         else:
             st.caption("Not enough games yet for a trend.")
 
@@ -441,6 +453,20 @@ def _render_positional_defense(team, season):
         dates, values = positional_defense_trend(matchup_df, pos_map, selected_bucket, stat)
         st.markdown(f"_{selected_bucket}s — {stat.lower()} allowed, over time_")
         if len(values) >= 2:
-            render_trend_line(dates, values, avg=sum(values) / len(values), avg_label='avg', height=150)
+            # Same corner-badge treatment as the PLAYER trend charts above -
+            # last-10/5/3-game average vs this chart's own baseline (the
+            # mean of however many games are actually loaded here, capped
+            # by the "games to include" slider above - there's no broader
+            # "season" figure available beyond that window for this CBBD/
+            # ESPN-fallback data source, same baseline the dashed reference
+            # line already uses). Green = recent average running above that
+            # baseline, red = below - flat rule, not "fewer points allowed
+            # is better" - matching this chart's own existing per-dot rule.
+            baseline = sum(values) / len(values)
+            corner_stats = [
+                (label, f"{avg_n:.1f}", is_above)
+                for label, avg_n, is_above in last_n_form_deltas(values, baseline)
+            ]
+            render_trend_line(dates, values, avg=baseline, avg_label='avg', height=150, corner_stats=corner_stats)
         else:
             st.caption("Not enough games yet for a trend.")

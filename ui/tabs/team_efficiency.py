@@ -61,13 +61,13 @@ def render():
     )
     if sub_rankings.open:
         with sub_rankings:
-            _render_rankings_subtab(df, colors, ranked)
+            _render_rankings_subtab(df, colors, ranked, season)
     if sub_four_factors.open:
         with sub_four_factors:
             _render_four_factors_subtab(df, ranked, season)
 
 
-def _render_rankings_subtab(df, colors, ranked):
+def _render_rankings_subtab(df, colors, ranked, season):
     # Efficiency landscape: offense (x, right = better) vs defense
     # (y, inverted so up = better since a LOWER defensive rating is better).
     st.markdown("<div class='custom-section-header'>EFFICIENCY LANDSCAPE</div>", unsafe_allow_html=True)
@@ -87,9 +87,22 @@ def _render_rankings_subtab(df, colors, ranked):
     # team_color_map - see style_plain_dataframe's docstring. 'Rank' is
     # still pinned via column_config, no index needed for that.
     display_df = df.sort_values('Rank').reset_index(drop=True)
+    # Pace isn't part of /ratings/adjusted (this table's own source) - merged
+    # in from /stats/team/season on request, the SAME 'Pace' column Four
+    # Factors Tiering and Matchup Analyzer's team defense profile already
+    # use. Cached weekly like every other full-league pull in this app, so
+    # this only costs a real API call on a cold cache - same cost Four
+    # Factors Tiering would already trigger if that sub-tab gets opened.
+    team_stats = load_all_team_season_stats(season)
+    if not team_stats.empty and 'Pace' in team_stats.columns:
+        display_df = display_df.merge(team_stats[['Team', 'Pace']], on='Team', how='left')
+        display_df = display_df[['Rank', 'Team', 'Conference', 'Pace'] + [
+            c for c in display_df.columns if c not in ('Rank', 'Team', 'Conference', 'Pace')
+        ]]
     # In-table meters: Net and Off ratings scale higher-is-better. Def
-    # Rating is deliberately left numeric (lower = better there - a meter
-    # would visually reward the worst defenses).
+    # Rating and Pace are deliberately left numeric (Def Rating: lower is
+    # better there; Pace: neither direction is "better," just tempo - a
+    # meter would visually imply one end is superior for both).
     meter_cols = {}
     for col in ('Net Rating', 'Off Rating'):
         vals = df[col].dropna()

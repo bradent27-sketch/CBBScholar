@@ -296,7 +296,7 @@ def render_game_log_bars(values, tooltips, breakout, avg=None, avg_label="season
 # transforms.player_trend_series).
 # ---------------------------------------------------------------------------
 
-def render_trend_line(dates, values, avg=None, avg_label="season avg", y_suffix='', color=None, height=170):
+def render_trend_line(dates, values, avg=None, avg_label="season avg", y_suffix='', color=None, height=170, corner_stats=None):
     """
     Per-point trend line, oldest-to-newest, with an optional flat dashed
     reference line (season/baseline average) so "trending up" or "trending
@@ -304,10 +304,26 @@ def render_trend_line(dates, values, avg=None, avg_label="season avg", y_suffix=
     Points above the reference render green, below render red (no
     reference line: neutral accent color throughout). Hover any point for
     the exact date/value/delta-from-reference.
+
+    `corner_stats`: optional list of `(label, value_str, is_above)` tuples
+    (see data.transforms.last_n_form_deltas) rendered as small colored
+    badges in the chart's top-right corner - e.g. Matchup Analyzer's L10/
+    L5/L3-vs-season-average readout. `value_str` is the CALLER's fully
+    formatted display string (decimals/suffix already applied - this
+    function stays formatting-agnostic, same as `avg`/`y_suffix` already
+    are for the reference line). `is_above` True renders green, False red,
+    None neutral gray - this function doesn't decide what "above" means
+    for a given stat, it just renders the caller's own verdict, so the
+    exact same badge code works for both "higher is trending up" (player
+    stats) and "higher is trending up" (points allowed - deliberately the
+    SAME flat direction, not stat-aware, per last_n_form_deltas' docstring).
+    Adds a little extra top margin to make room, only when actually used -
+    every existing caller without `corner_stats` renders byte-identical to
+    before.
     """
     if not values:
         return
-    W, MB, MT, ML, MR = 860, 26, 16, 8, 8
+    W, MB, MT, ML, MR = 860, 26, (30 if corner_stats else 16), 8, 8
     H = height
     plot_w = W - ML - MR
     plot_h = H - MT - MB
@@ -366,6 +382,30 @@ def render_trend_line(dates, values, avg=None, avg_label="season avg", y_suffix=
             f"<text x='{px(i):.1f}' y='{H - 6}' text-anchor='middle' font-size='9.5' font-family='{_MONO_FONT}' "
             f"fill='{C['on_surface_variant']}'>{_esc(label)}</text>"
         )
+    if corner_stats:
+        # Fixed position (not data-dependent, unlike the avg-line label
+        # above) - a compact row of small badges tucked in the top-right
+        # corner, drawn last so they sit above the polyline/dots if the
+        # plot area ever comes close (the extra MT margin above should
+        # prevent real overlap, but z-order is a free, harmless safety net).
+        badge_w, badge_h, gap = 42, 16, 4
+        n_badges = len(corner_stats)
+        total_w = n_badges * badge_w + (n_badges - 1) * gap
+        start_x = W - MR - total_w
+        for i, (label, value_str, is_above) in enumerate(corner_stats):
+            bx = start_x + i * (badge_w + gap)
+            by = 2
+            badge_color = C['positive'] if is_above else (C['negative'] if is_above is False else C['surface_container_high'])
+            verdict = 'above' if is_above else ('below' if is_above is False else 'n/a vs')
+            parts.append(
+                f"<rect x='{bx:.1f}' y='{by}' width='{badge_w}' height='{badge_h}' rx='3' "
+                f"fill='{badge_color}' opacity='0.88'>"
+                f"<title>{_esc(label)}: {_esc(value_str)} ({verdict} {_esc(avg_label)})</title></rect>"
+            )
+            parts.append(
+                f"<text x='{bx + badge_w / 2:.1f}' y='{by + badge_h / 2 + 3:.1f}' text-anchor='middle' "
+                f"font-size='8' font-weight='700' font-family='{_MONO_FONT}' fill='#ffffff'>{_esc(label)} {_esc(value_str)}</text>"
+            )
     parts.append("</svg>")
     st.markdown("".join(parts), unsafe_allow_html=True)
 

@@ -14,16 +14,37 @@ import re
 import pandas as pd
 import streamlit as st
 
-from config import THEME, TEAM_CONFIG
+from config import THEME, TEAM_CONFIG, CONFERENCE_COLORS
 from data.utils import (
     normalize_team_name as _normalize_team_name,
     expand_team_name_aliases as _expand_with_aliases,
+    CONFERENCE_NAME_ALIASES,
 )
 
 C = THEME['colors']
 F = THEME['fonts']
 R = THEME['radius']
 S = THEME['spacing']
+
+# Precomputed once (CONFERENCE_COLORS is static, not live/per-season data) -
+# normalized + alias-expanded so 'ACC', 'Atlantic Coast Conference', and any
+# other spelling a source emits all resolve to the same color. Same "exact
+# match first, normalized fallback second" pattern style_plain_dataframe's
+# own _lookup already uses for Team/Opponent - see _conference_color below.
+_CONFERENCE_NORM_MAP = _expand_with_aliases(
+    {_normalize_team_name(k): v for k, v in CONFERENCE_COLORS.items()}, aliases=CONFERENCE_NAME_ALIASES,
+)
+
+
+def _conference_color(name):
+    """Resolves any spelling of a conference name to its config.
+    CONFERENCE_COLORS hex value, or None if unrecognized - shared by
+    style_plain_dataframe's Styler (desktop) and render_responsive_table's
+    _mobile_cell_bg (mobile cards) so both color a 'Conference' column
+    identically."""
+    if name is None:
+        return None
+    return CONFERENCE_COLORS.get(str(name)) or _CONFERENCE_NORM_MAP.get(_normalize_team_name(str(name)))
 
 _FONT_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'assets', 'fonts')
 _FONT_FACES = [
@@ -71,6 +92,7 @@ COLUMN_HELP = {
     'PCT': "Win percentage",
     'Streak': "Current win/loss streak (e.g. W3, L2)",
     'Overall': "Overall season record",
+    'Pace': "Adjusted possessions per 40 minutes — tempo, not a quality claim. A fast team just plays more possessions per game, for better or worse.",
 }
 
 
@@ -785,6 +807,10 @@ def style_plain_dataframe(df, numeric_pct_cols=None, diverging_cols=None, matchu
     ESPN), and an exact-only lookup silently renders no color on a mismatch
     rather than erroring, which is easy to miss.
 
+    A 'Conference' column (if present) is always colored too, via config.
+    CONFERENCE_COLORS - same exact-then-normalized-alias lookup as 'Team'
+    (see _conference_color), not something callers opt into or configure.
+
     IMPORTANT: 'Team' must be an actual COLUMN of `df`, not the DataFrame's
     index (i.e. don't call this on a `df.set_index('Team')` result if you
     want it colored) - confirmed live (not just by reading the code) that
@@ -842,6 +868,12 @@ def style_plain_dataframe(df, numeric_pct_cols=None, diverging_cols=None, matchu
                 team_color = _lookup(row[col], team_color_map, norm_team_map)
                 if team_color:
                     styles.append(f"background-color:{team_color}; color:#ffffff; font-weight:bold;")
+                else:
+                    styles.append(f"background-color:{C['surface_container']}; color:{C['on_surface']};")
+            elif col == 'Conference':
+                conf_color = _conference_color(row[col])
+                if conf_color:
+                    styles.append(f"background-color:{conf_color}; color:#ffffff; font-weight:bold;")
                 else:
                     styles.append(f"background-color:{C['surface_container']}; color:{C['on_surface']};")
             elif opponent_col and col == opponent_col:
@@ -1031,10 +1063,13 @@ def _mobile_cell_bg(row, pos, col, diverging_cols, pct_arrays, matchup_arrays,
     render_responsive_table's mobile card list - (None, None, None) means
     "no special tint, just the card's own default text color."
 
-    Deliberately a SEPARATE, self-contained implementation of the same five
+    Deliberately a SEPARATE, self-contained implementation of the same
     color rules `style_plain_dataframe`'s `style_row` already applies
-    (diverging -> matchup -> percentile -> Team -> opponent -> win/loss),
-    NOT a refactor of that function's internals - this app's mobile
+    (diverging -> matchup -> percentile -> Team -> Conference -> opponent ->
+    win/loss - Conference reuses the shared `_conference_color` helper
+    directly, same as this function and the Styler already both share
+    get_diverging_color/get_matchup_color/get_grade_color), NOT a refactor
+    of style_plain_dataframe's own internals - this app's mobile
     overhaul is explicitly required to leave the proven, already-live
     desktop rendering untouched, and the safest way to guarantee that is to
     never modify the function desktop already depends on. A small amount
@@ -1050,6 +1085,11 @@ def _mobile_cell_bg(row, pos, col, diverging_cols, pct_arrays, matchup_arrays,
         team_color = team_color_map.get(str(row[col])) or norm_team_map.get(_normalize_team_name(str(row[col])))
         if team_color:
             return team_color, '#ffffff', '700'
+        return None, None, None
+    if col == 'Conference':
+        conf_color = _conference_color(row[col])
+        if conf_color:
+            return conf_color, '#ffffff', '700'
         return None, None, None
     if opponent_col and col == opponent_col:
         opp_color = opponent_color_map.get(str(row[col])) or norm_opp_map.get(_normalize_team_name(str(row[col])))

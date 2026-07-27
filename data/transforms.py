@@ -122,10 +122,20 @@ FOUR_FACTORS = [
 def four_factors_percentile_grid(stats_df, teams=None):
     """
     Team x Four-Factors D-I percentile grid (offense AND defense side of
-    each factor - 8 columns), for a league-wide tiering heatmap. Reuses
-    FOUR_FACTORS' own column/direction mapping so this can't silently drift
-    from the underlying stat definitions. teams=None keeps every team in
+    each factor, plus Pace as a leading context column - 9 columns total),
+    for a league-wide tiering heatmap. Reuses FOUR_FACTORS' own column/
+    direction mapping so the four-factor columns can't silently drift from
+    the underlying stat definitions. teams=None keeps every team in
     stats_df; pass a list to scope to one conference or group.
+
+    Pace is prepended (not one of the four factors - it's tempo, not a
+    quality claim) when `stats_df` has a 'Pace' column, same "higher_is_
+    better=True tracks the raw value for bar direction, not a claim that
+    fast is better" convention Matchup Analyzer's own team_defense_profile_
+    rows already uses for this exact column - kept consistent here rather
+    than inventing a second interpretation of the same stat. Silently
+    omitted if 'Pace' isn't present (older/partial stats_df), same
+    graceful-degradation style as every other optional column in this file.
 
     Returns (pct_df, raw_df, cols): both DataFrames share a 'Team' column
     plus the same ordered `cols` list - pct_df's cells are 0-100 D-I
@@ -138,6 +148,9 @@ def four_factors_percentile_grid(stats_df, teams=None):
     if work.empty:
         return pd.DataFrame(), pd.DataFrame(), []
     cols, higher_is_better = [], {}
+    if 'Pace' in stats_df.columns:
+        cols.append('Pace')
+        higher_is_better['Pace'] = True
     for _, off_col, def_col, off_hib, def_hib, _help in FOUR_FACTORS:
         cols += [off_col, def_col]
         higher_is_better[off_col], higher_is_better[def_col] = off_hib, def_hib
@@ -231,6 +244,39 @@ def player_trend_series(player_games, col, n=10):
     season_avg = float(s[col].mean())
     tail = s.tail(n)
     return tail['Date'].tolist(), tail[col].tolist(), season_avg
+
+
+def last_n_form_deltas(values, baseline, ns=(10, 5, 3)):
+    """
+    [(label, avg_value, is_above)] for the last N=10/5/3 entries of
+    `values` (chronological, oldest-first - the exact shape both
+    player_trend_series and positional_defense_trend already return) vs
+    `baseline` - the compact "L10/L5/L3 average" corner readout for
+    Matchup Analyzer's trend charts (ui.charts.render_trend_line's
+    `corner_stats` param). One flat rule for every caller, PLAYER stats and
+    TEAM DEFENSE allowed stats alike: higher than baseline is always
+    "above" (renders green), lower is always "below" (renders red) - no
+    stat-specific "lower is better" interpretation (e.g. fewer turnovers,
+    fewer points allowed). This matches this exact chart's own pre-existing
+    per-dot coloring rule (`dot_color = positive if v >= avg else
+    negative`) rather than inventing a second, different convention for
+    the same chart.
+
+    `n` beyond `len(values)` just uses everything available (plain Python
+    slice semantics) - a player with 6 games logged still gets a real, if
+    noisier, "L10" entry (mean of all 6) instead of a missing one. Skips
+    an `n` entirely only if `values` itself is empty. `is_above` is None
+    (renders neutral) only when `baseline` is None.
+    """
+    out = []
+    for n in ns:
+        window = values[-n:] if n else values
+        if not window:
+            continue
+        avg_n = sum(window) / len(window)
+        is_above = None if baseline is None else avg_n >= baseline
+        out.append((f'L{n}', avg_n, is_above))
+    return out
 
 
 # ---------------------------------------------------------------------------

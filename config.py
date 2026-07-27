@@ -104,6 +104,64 @@ TEAM_CONFIG = {
 MASTER_TEAMS_LIST = sorted(list(TEAM_CONFIG.keys()))
 CONFERENCES = sorted(set(t['conference'] for t in TEAM_CONFIG.values()))
 
+# Conference brand colors, keyed by the SHORT conference name (matching
+# TEAM_CONFIG's own 'conference' values above - 'ACC', 'Big Ten', etc.),
+# for coloring any 'Conference' column the same way TEAM_CONFIG already
+# colors 'Team' cells (see ui.styling.style_plain_dataframe/
+# render_responsive_table). Hand-curated from each conference's own public
+# branding on request - checked both ESPN's standings endpoint and CBBD's
+# API directly first for a real conference-level color field to pull from
+# instead of guessing; both are unreachable from this sandbox's network
+# policy, the same standing limitation this app's whole build history has
+# hit on every ESPN/CBBD touchpoint (see HANDOFF.md). These are therefore
+# best-effort, publicly-known branding colors, NOT independently verified
+# live - spot-check the power-conference shades in particular before fully
+# trusting them, same discipline as every other unverified-but-reasoned
+# value in this app.
+#
+# Every value below is deliberately distinct (checked programmatically,
+# zero exact duplicates) and nudged apart in hue/lightness from its
+# closest neighbors on request - real conference branding clusters heavily
+# around navy/blue and red/crimson (ACC, Big Ten, SEC, Big East, Big 12,
+# American all lean blue-ish or red-ish), so several entries here are
+# shifted from their most literal real-world shade specifically so no two
+# conferences ever render as the same color at a glance, even side by side
+# in the same table.
+CONFERENCE_COLORS = {
+    'ACC': '#1D5DBF',
+    'Big Ten': '#0B1F4D',
+    'Big 12': '#D0103A',
+    'SEC': '#2F4B7C',
+    'Big East': '#8A1538',
+    'American': '#C24914',
+    'Atlantic 10': '#046A38',
+    'Mountain West': '#F2A900',
+    'WCC': '#1B998B',
+    'Missouri Valley': '#3A7CA5',
+    'Conference USA': '#5B2A86',
+    'Sun Belt': '#D4A017',
+    'Ivy League': '#B5495B',
+    'CAA': '#6B8E23',
+    'MAAC': '#5C6BC0',
+    'Horizon League': '#3E92CC',
+    'MAC': '#6F4E37',
+    'SoCon': '#5C6B73',
+    'Big Sky': '#1D7874',
+    'Big South': '#00A9A5',
+    'ASUN': '#E8734A',
+    'America East': '#264E70',
+    'Patriot League': '#7C1D3F',
+    'NEC': '#7B2D8E',
+    'OVC': '#2E5339',
+    'Summit League': '#C9812D',
+    'Southland': '#0D5C63',
+    'WAC': '#B5541A',
+    'Big West': '#1E6091',
+    'MEAC': '#6B2B3A',
+    'SWAC': '#3E2472',
+    'Independent': '#6B7280',
+}
+
 # Season depth - trimmed to 2023+ on request (personal use only needs
 # recent seasons usable/visible; older seasons dropped from every season
 # dropdown app-wide rather than left in as dead weight). Both this app's
