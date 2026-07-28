@@ -883,109 +883,86 @@ def render_prop_line_shop(rows):
 
 
 # ---------------------------------------------------------------------------
-# Probability/range band (Predictive Analytics' "Dynamic Probability Curve" -
-# a matchup-adjusted floor/median/ceiling projection over a player's own
-# real game-to-game spread, see data.transforms.matchup_projection_band)
+# Game-script curve (Close/Comfortable/Blowout production, see
+# data.transforms.game_script_sensitivity)
 # ---------------------------------------------------------------------------
 
-def render_probability_band(band, stat_label='Points', height=200):
+def render_game_script_curve(result, height=190):
     """
-    Floor/median/ceiling range projection for one stat. `band`: data.
-    transforms.matchup_projection_band's own return dict (floor/median/
-    ceiling/season_avg/multiplier/raw_values/n_games). Draws this player's
-    own actual per-game values this season as a light dot strip along the
-    value axis (context: how spread out their real games already are)
-    above a shaded band spanning the matchup-adjusted floor-to-ceiling
-    range, with a bold median marker and a dashed season-average reference
-    line through both. Deliberately NOT a smooth bell-curve/violin shape -
-    that would imply a precision (a fitted continuous distribution) this
-    heuristic projection doesn't actually have. A band drawn over the real
-    dots reads honestly as "here's the real game-to-game spread, adjusted
-    for this matchup," not a statistical model's output. No-ops if `band`
-    is empty/missing its core three values.
+    Line/area chart across a player's Close/Comfortable/Blowout game-script
+    tiers (`result`: data.transforms.game_script_sensitivity's own return
+    dict). Straight segments connect each tier's mean `stat` value -
+    deliberately NOT a smoothed/splined curve, since only up to 3 discrete
+    tiers exist and implying more statistical smoothness than that would
+    misrepresent the data - with a light area fill under the line for
+    visual weight, a dashed season-average reference line, and each
+    point's own game count labeled directly so a small-sample tier still
+    reads honestly rather than being hidden. No-ops if `result` has fewer
+    than 2 plotted tiers (a single point can't draw a line).
     """
-    floor, median, ceiling = band.get('floor'), band.get('median'), band.get('ceiling')
-    if floor is None or median is None or ceiling is None:
+    tiers = (result or {}).get('tiers') or []
+    if len(tiers) < 2:
         return
-    raw_values = band.get('raw_values') or []
-    season_avg = band.get('season_avg')
+    season_avg = (result or {}).get('season_mean')
+    stat_label = (result or {}).get('stat', '')
 
     W, H = 860, height
-    ML, MR = 44, 44
-    plot_w = W - ML - MR
-    all_vals = [v for v in (list(raw_values) + [floor, ceiling, season_avg]) if v is not None]
-    v_min, v_max = min(all_vals), max(all_vals)
-    pad = (v_max - v_min) * 0.12 or 1.0
+    ML, MR, MT, MB = 56, 24, 30, 48
+    plot_w, plot_h = W - ML - MR, H - MT - MB
+    values = [t['mean'] for t in tiers]
+    bounds = values + ([season_avg] if season_avg is not None else [])
+    v_min, v_max = min(bounds), max(bounds)
+    pad = (v_max - v_min) * 0.3 or 1.0
     v_min, v_max = max(0.0, v_min - pad), v_max + pad
 
-    def px(v):
-        return ML + plot_w / 2 if v_max == v_min else ML + plot_w * (v - v_min) / (v_max - v_min)
+    n = len(tiers)
 
-    dots_y = 40
-    band_y = H - 70
-    band_h = 30
+    def px(i):
+        return ML if n == 1 else ML + plot_w * i / (n - 1)
+
+    def py(v):
+        return MT + plot_h * (1 - (v - v_min) / (v_max - v_min))
 
     parts = [
         f"<svg viewBox='0 0 {W} {H}' xmlns='http://www.w3.org/2000/svg' "
         f"style='width:100%; max-width:{W}px; height:auto; font-family:{_BODY_FONT}; display:block; margin:0 auto;'>"
     ]
-    parts.append(
-        f"<line x1='{ML}' y1='{band_y + band_h / 2:.1f}' x2='{ML + plot_w}' y2='{band_y + band_h / 2:.1f}' "
-        f"stroke='{C['outline_variant']}' stroke-width='1'/>"
-    )
-
-    if raw_values:
-        parts.append(
-            f"<text x='{ML}' y='{dots_y - 16}' font-size='10.5' font-weight='700' letter-spacing='0.04em' "
-            f"fill='{C['on_surface_variant']}'>THIS SEASON — {len(raw_values)} GAMES</text>"
-        )
-        for v in raw_values:
-            x = px(v)
-            parts.append(
-                f"<circle class='hz-dot' cx='{x:.1f}' cy='{dots_y:.1f}' r='3.4' fill='{C['secondary']}' opacity='0.55'>"
-                f"<title>{_esc(stat_label)}: {v:.1f}</title></circle>"
-            )
 
     if season_avg is not None:
-        sx = px(season_avg)
+        say = py(season_avg)
         parts.append(
-            f"<line x1='{sx:.1f}' y1='{dots_y - 10}' x2='{sx:.1f}' y2='{band_y + band_h + 14}' "
-            f"stroke='{C['on_surface_variant']}' stroke-width='1.4' stroke-dasharray='4,3'>"
-            f"<title>Season average {_esc(stat_label)}: {season_avg:.1f}</title></line>"
+            f"<line x1='{ML}' y1='{say:.1f}' x2='{ML + plot_w}' y2='{say:.1f}' stroke='{C['on_surface_variant']}' "
+            f"stroke-width='1.2' stroke-dasharray='4,3'><title>Season average {_esc(stat_label)}: {season_avg:.1f}</title></line>"
         )
         parts.append(
-            f"<text x='{sx:.1f}' y='{band_y + band_h + 28}' text-anchor='middle' font-size='10' "
+            f"<text x='{ML + plot_w}' y='{say - 6:.1f}' text-anchor='end' font-size='10' "
             f"fill='{C['on_surface_variant']}'>season avg {season_avg:.1f}</text>"
         )
 
-    fx, cx = px(floor), px(ceiling)
+    pts = [(px(i), py(t['mean'])) for i, t in enumerate(tiers)]
+    baseline_y = MT + plot_h
+    area_path = f"{pts[0][0]:.1f},{baseline_y:.1f} " + " ".join(f"{x:.1f},{y:.1f}" for x, y in pts) + f" {pts[-1][0]:.1f},{baseline_y:.1f}"
+    parts.append(f"<polygon points='{area_path}' fill='{C['primary']}' opacity='0.14'/>")
     parts.append(
-        f"<rect x='{fx:.1f}' y='{band_y:.1f}' width='{max(2.0, cx - fx):.1f}' height='{band_h}' rx='{band_h / 2:.1f}' "
-        f"fill='{C['primary']}' opacity='0.22'><title>Projected range: {floor:.1f} – {ceiling:.1f}</title></rect>"
+        "<polyline points='" + " ".join(f"{x:.1f},{y:.1f}" for x, y in pts) +
+        f"' fill='none' stroke='{C['primary']}' stroke-width='2.4' stroke-linejoin='round'/>"
     )
-    for v, x, anchor in ((floor, fx, 'end'), (ceiling, cx, 'start')):
+    for t, (x, y) in zip(tiers, pts):
         parts.append(
-            f"<line x1='{x:.1f}' y1='{band_y - 4}' x2='{x:.1f}' y2='{band_y + band_h + 4}' "
-            f"stroke='{C['primary']}' stroke-width='1.6'/>"
+            f"<circle class='hz-dot' cx='{x:.1f}' cy='{y:.1f}' r='5.5' fill='{C['primary']}' stroke='{C['surface']}' "
+            f"stroke-width='2'><title>{_esc(t['label'])}: {t['mean']:.1f} {_esc(stat_label)} ({t['games']} games)</title></circle>"
         )
-        dx = -8 if anchor == 'end' else 8
         parts.append(
-            f"<text x='{x + dx:.1f}' y='{band_y + band_h / 2 + 4:.1f}' text-anchor='{anchor}' font-size='12' "
-            f"font-weight='700' font-family='{_MONO_FONT}' fill='{C['on_surface']}'>{v:.1f}</text>"
+            f"<text x='{x:.1f}' y='{y - 14:.1f}' text-anchor='middle' font-size='12.5' font-weight='800' "
+            f"font-family='{_MONO_FONT}' fill='{C['on_surface']}'>{t['mean']:.1f}</text>"
         )
-
-    mx = px(median)
-    parts.append(
-        f"<circle cx='{mx:.1f}' cy='{band_y + band_h / 2:.1f}' r='7' fill='{C['tertiary']}' stroke='{C['surface']}' "
-        f"stroke-width='2'><title>Projected median {_esc(stat_label)}: {median:.1f}</title></circle>"
-    )
-    parts.append(
-        f"<text x='{mx:.1f}' y='{band_y - 12}' text-anchor='middle' font-size='13' font-weight='800' "
-        f"font-family='{_MONO_FONT}' fill='{C['tertiary']}'>{median:.1f}</text>"
-    )
-    parts.append(
-        f"<text x='{mx:.1f}' y='{band_y - 26}' text-anchor='middle' font-size='9.5' font-weight='700' "
-        f"letter-spacing='0.04em' fill='{C['on_surface_variant']}'>PROJECTED MEDIAN</text>"
-    )
+        parts.append(
+            f"<text x='{x:.1f}' y='{MT + plot_h + 22:.1f}' text-anchor='middle' font-size='11' font-weight='700' "
+            f"fill='{C['on_surface_variant']}'>{_esc(t['label'])}</text>"
+        )
+        parts.append(
+            f"<text x='{x:.1f}' y='{MT + plot_h + 36:.1f}' text-anchor='middle' font-size='9.5' "
+            f"fill='{C['on_surface_variant']}'>{t['games']}g</text>"
+        )
     parts.append("</svg>")
     st.markdown("".join(parts), unsafe_allow_html=True)

@@ -42,15 +42,23 @@ efficiency ratings, rankings — without the bot-wall problem.
 ## Per-tab source map
 
 **Correction:** this table previously listed Bracketology and Fantasy &
-Pools as their own rows. Neither exists as a tab anymore, and — as of the
-Predictive Analytics pass below — `app.py` now wires 8 top-level tabs
-(Player Search, Team Efficiency, Rankings, Matchup Analyzer, Predictive
-Analytics, Live Odds, Player Compare, Transfer Portal), with NET &
+Pools as their own rows. Neither exists as a tab anymore — `app.py` wires
+exactly 7 top-level tabs (Player Search, Team Efficiency, Rankings,
+Matchup Analyzer, Live Odds, Player Compare, Transfer Portal), with NET &
 Resume and Conference Standings as sub-tabs under Rankings, not separate
 top-level tabs — and no `ui/tabs/bracketology.py` or
 `ui/tabs/fantasy_pools.py` file exists in the repo. HANDOFF.md's §3 still
 describes both systems in present tense from when they existed; this is a
 documentation-drift correction, not a claim that removing them was wrong.
+
+**Second correction, same spirit:** a "Predictive Analytics" 8th tab briefly
+existed in this table too, then was retired based on in-app usage feedback
+- its useful parts were redistributed INTO the Matchup Analyzer row below
+(Positional Vulnerability Ranking, Rim Pressure/Perimeter Openness Allowed,
+Efficiency Elasticity, Game-Script Sensitivity) rather than living behind a
+separate tab. See HANDOFF.md for the full before/after write-up. Removed
+from this table rather than left as a stale row, same as the Bracketology/
+Fantasy correction above.
 
 | Tab | Source | Status |
 |---|---|---|
@@ -59,8 +67,7 @@ documentation-drift correction, not a claim that removing them was wrong.
 | Rankings → NET & Resume | ncaa.com (manual fetch — see below) + CollegeBasketballData.com API `/rankings` (AP/Coaches poll) | **Live** |
 | Rankings → Conference Standings | ESPN public standings endpoint | **Live**, no key needed |
 | Transfer Portal | CollegeBasketballData.com API `/recruiting/players`, `/recruiting/portal` | **Live** |
-| Matchup Analyzer | PLAYER panel: ESPN's own endpoints + the ESPN-native SportsDataverse season file (same architecture as Player Search), falling back to CollegeBasketballData.com only if ESPN's own roster/box-file lookup comes up empty for that player. TEAM DEFENSE: CollegeBasketballData.com `/stats/team/season` for the defensive profile, plus a SEPARATE CBBD-name-resolved ESPN file for the positional breakdown (falls back to CBBD scoped to opponents actually played on staleness). `/teams/roster` powers the player picker on both, either way | **Live** — a two-column player-vs-team-defense prep tool (not a team-vs-team projection anymore; `/ratings/adjusted` is no longer used here). See HANDOFF.md for why PLAYER's fallback logic changed from a date-freshness heuristic to "does ESPN's own data actually have this player" — the freshness heuristic was tripping constantly due to a team-name-resolution mismatch, not real staleness |
-| Predictive Analytics | Zero new external sources — reuses `get_player_season_profile` (same as Matchup Analyzer PLAYER/Player Compare), `load_positional_matchup_data` (same as Matchup Analyzer TEAM DEFENSE), plus `/stats/team/season` and `/ratings/adjusted` (same as Team Efficiency/Matchup Analyzer). All six metrics are pure local compute in `data.transforms` over data this app already fetches | **Live** — see HANDOFF.md for the full metric list, formulas, and the honest "proxy, not play-by-play" caveat. Costs exactly what Matchup Analyzer's positional-defense fallback already costs (same slider, same CBBD-fallback discipline) — no additional API surface |
+| Matchup Analyzer | PLAYER panel: ESPN's own endpoints + the ESPN-native SportsDataverse season file (same architecture as Player Search), falling back to CollegeBasketballData.com only if ESPN's own roster/box-file lookup comes up empty for that player. TEAM DEFENSE: CollegeBasketballData.com `/stats/team/season` for the defensive profile, plus a SEPARATE CBBD-name-resolved ESPN file for the positional breakdown (falls back to CBBD scoped to opponents actually played on staleness). `/teams/roster` powers the player picker on both, either way | **Live** — a two-column player-vs-team-defense prep tool (not a team-vs-team projection anymore; `/ratings/adjusted` is no longer used here). See HANDOFF.md for why PLAYER's fallback logic changed from a date-freshness heuristic to "does ESPN's own data actually have this player" — the freshness heuristic was tripping constantly due to a team-name-resolution mismatch, not real staleness. Also now carries a deeper predictive layer (Positional Vulnerability Ranking, Rim Pressure/Perimeter Openness Allowed, Efficiency Elasticity, Game-Script Sensitivity) — see HANDOFF.md, zero new sources, pure local compute over the same data this row already describes |
 | Live Odds | The Odds API `basketball_ncaab` | **Live** (shows "no games" in the off-season — correct behavior) |
 | Player Compare | ESPN's own endpoints + the ESPN-native SportsDataverse season file (same architecture as Player Search), falling back to CollegeBasketballData.com only if ESPN's own roster/box-file lookup comes up empty for that player. `/teams/roster` powers the player picker either way | **Live** — both players' season-stat profiles resolve independently via `data.loaders.get_player_season_profile`, so one player can come from the free file while the other falls back to CBBD if only one player isn't found in ESPN's own data yet |
 
@@ -179,7 +186,7 @@ file download, cached weekly, covers every team/matchup at once):
 | Positional Matchup Defense, a full two-team matchup, first time | up to ~2×(1+2N) calls, LESS if the teams share opponents | In-conference matchups share most of their schedule, so real cost is usually well below the worst case |
 | Positional Matchup Defense, any REPEAT view this week (same team) | 0 calls | Full cache hit |
 | Player Trends' conference comparison group | ~8-18 calls, once/week, shared across every player looked up | Full D-I opt-in is ~360 calls, same weekly-shared caching |
-| Predictive Analytics, one matchup | Same as "Positional Matchup Defense, ONE team" above (its opponent picker calls the exact same `load_positional_matchup_data`) + the already-shared baseline | No separate cost line — this tab computes everything else (Scheme Fingerprint, Efficiency Elasticity, Composite Score, etc.) as pure local math over data the app already fetched for Matchup Analyzer/Team Efficiency. Gated behind the same "Run matchup analytics" button + games-per-team slider pattern as Matchup Analyzer's positional defense, for the same quota-visibility reason |
+| Matchup Analyzer's deeper predictive layer (Positional Vulnerability Ranking, Rim Pressure/Perimeter Openness Allowed, Efficiency Elasticity, Game-Script Sensitivity) | 0 additional calls | Pure local math over data this same page already loaded (positional defense summary, `/stats/team/season`, `/ratings/adjusted`, the player's own game log) — no separate fetch, no separate cost line |
 
 **The realistic risk**: checking Positional Matchup Defense for ~5 "watch
 list" teams every week, cap=20, non-overlapping schedules, is

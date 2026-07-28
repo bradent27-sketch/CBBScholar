@@ -11,8 +11,7 @@ from config import TAB_LABELS
 from ui.styling import inject_theme
 from ui.components import render_setup_status_sidebar, render_header
 from ui.tabs import (
-    player_search, team_efficiency, rankings, transfer_portal, matchup_analyzer, predictive_analytics,
-    live_odds, compare,
+    player_search, team_efficiency, rankings, transfer_portal, matchup_analyzer, live_odds, compare,
 )
 
 
@@ -42,12 +41,12 @@ render_header()
 # actually runs on any given rerun - see NFL Scholar's app.py for why this
 # matters for perceived performance as more tabs go from placeholder to
 # real (potentially expensive) data pipelines.
-tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs(TAB_LABELS, key="active_tab", on_change="rerun")
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(TAB_LABELS, key="active_tab", on_change="rerun")
 
 _tab_modules = [
-    player_search, team_efficiency, rankings, matchup_analyzer, predictive_analytics, live_odds, compare, transfer_portal,
+    player_search, team_efficiency, rankings, matchup_analyzer, live_odds, compare, transfer_portal,
 ]
-_tabs = [tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8]
+_tabs = [tab1, tab2, tab3, tab4, tab5, tab6, tab7]
 for _tab, _module, _label in zip(_tabs, _tab_modules, TAB_LABELS):
     if _tab.open:
         with _tab:

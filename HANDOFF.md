@@ -5,8 +5,149 @@ Sibling app to NFL Scholar (`C:\FantasyF`) and CFB Scholar
 college basketball. This doc follows NFL Scholar's own HANDOFF.md section
 structure on purpose, so all three stay easy to cross-reference.
 
+**Predictive Analytics tab retired, redistributed into Matchup Analyzer
+(this doc's most recent update):**
+
+The standalone Predictive Analytics tab described in the entry directly
+below this one was walked through in real usage and reworked based on that
+feedback, point by point:
+
+1. **Positional Leverage kept, but reworked to not require picking a
+   player/position first.** The old `positional_leverage` needed a pre-
+   selected player bucket (from `scheme_fingerprint`'s blended per-bucket
+   score) before it could rank anything. Real positions are often fluid (a
+   listed guard who also plays some forward, etc.), so forcing that choice
+   up front was the wrong shape. New `data.transforms.
+   positional_vulnerability_ranking(positional_summary_df)` instead ranks
+   ALL of a team's Guard/Forward/Center buckets at once, purely from each
+   bucket's own 'Points Delta' (`score = clip(50 + delta*4, 0, 100)`,
+   unchanged formula, just no longer blended with team-wide rim/perimeter
+   stats - see #2), letting the viewer apply their own judgment about
+   which bucket actually matches whoever they're scouting. **Moved** into
+   Matchup Analyzer's TEAM DEFENSE panel, `_render_positional_defense`,
+   rendered via `render_relative_bars` right above the "Position group"
+   trend-chart picker (i.e. between the existing positional-defense
+   summary table and the per-bucket trend charts) - not gated behind any
+   pre-selected player, loads for the whole opponent team at once.
+
+2. **Rim Pressure / Perimeter Openness Allowed un-bundled from positional
+   scoring - these aren't actually position-specific in this app's data.**
+   The old `scheme_fingerprint` blended these two team-wide percentiles
+   (Def 2P%/Def FT Rate/Opp Paint Pts% for rim pressure; Def 3PA Rate/Def
+   3P% for perimeter openness) into EVERY position bucket's score
+   identically, which added noise without adding real positional signal.
+   New `data.transforms.defensive_tendency_rows(team_stats_df, team)`
+   computes the exact same two percentiles but returns them as two
+   standalone rows (unchanged formulas), listed ONCE per team. **Moved**
+   into Matchup Analyzer's TEAM DEFENSE panel, `_render_defensive_profile`
+   - appended directly onto `team_defense_profile_rows`' existing bar list
+   (`profile_rows = team_defense_profile_rows(...) + defensive_tendency_rows(...)`),
+   so they read as part of the team's overall defensive shape alongside
+   Pace/eFG%/TO Ratio/etc., not a separate section.
+
+3. **Efficiency Elasticity Curve kept - genuinely useful, presentation was
+   the problem.** `data.transforms.efficiency_elasticity` is UNCHANGED
+   (same regression, same TS%/eFG% fallback logic, same docstring) - only
+   how it's surfaced changed. The old tab gave it a whole expander with
+   slopes, both bucket means, and a projected-adjustment line. **Moved**
+   into Matchup Analyzer's PLAYER side, `_render_player_trend` (new
+   `_render_efficiency_elasticity_note` helper), condensed to ONE caption
+   line under the existing per-stat trend charts - season average, a
+   quick weaker-D-vs-top-tier-D comparison, and the projected number
+   against whichever opponent is selected in TEAM DEFENSE, all in one
+   sentence, no header/expander/chart. Needs `defense_team` (the TEAM
+   DEFENSE side's selected team, now used as "tonight's opponent" for the
+   projection) threaded into `_render_player_trend`, which didn't
+   previously need it - `render()`'s call site updated accordingly. Reuses
+   `mine` (the per-game log `_render_player_trend` already loads/filters
+   for its own trend charts) rather than fetching a second copy.
+
+4. **Rim-Pressure & Foul-Leverage Exploitation Score scrapped entirely -
+   redundant.** It blended a player's own FT Rate/2PT Rate with the
+   opponent's Def FT Rate allowed into one composite score, but FT Rate
+   and FT Rate Allowed are both ALREADY shown directly elsewhere (the
+   player's tendency profile bars; the team's defensive profile bars) -
+   the composite added a number without adding information. `data.
+   transforms.rim_foul_leverage_score` deleted outright, not left as dead
+   code.
+
+5. **Game-Script Sensitivity kept, redefined as three tiers with a real
+   curve instead of a two-bucket text summary.** Old version: two buckets
+   (Close: |margin|<=8, Decided: everything else) and a single "Sensitivity
+   Index" number. New `data.transforms.game_script_sensitivity` (reworked,
+   same Date-only join to the team's own schedule margins as before) now
+   buckets into three tiers - Close (|margin|<=8), Comfortable (8 to 14),
+   Blowout (>14) - and returns each tier's mean + game count in order
+   rather than one collapsed index number. No per-tier minimum-games gate
+   (every tier with >=1 game is included, with its real count, so a small
+   sample reads honestly instead of being hidden - same "show the real
+   count" convention as `last_n_form_deltas`) - only the TOTAL game count
+   is gated. New chart, `ui.charts.render_game_script_curve` (replaces the
+   old `render_probability_band`, deleted) - straight line segments
+   connecting the up-to-3 tier means with a light area fill and a dashed
+   season-average reference, deliberately NOT smoothed/splined (only 3
+   discrete tiers exist; implying more statistical smoothness would
+   misrepresent the data). **Moved** into Matchup Analyzer's PLAYER side,
+   `_render_player_trend` (new `_render_game_script_curve` helper),
+   hardcoded to Points (no new stat selector - keeps the panel simple)
+   right after the elasticity caption.
+
+6. **Scheme Fingerprint heatmap scrapped entirely - "too bulky, don't get
+   much out of it."** The whole `scheme_fingerprint` function (the
+   composite that blended rim/perimeter percentiles with per-bucket
+   points-delta into one "vulnerability" score) and its Scheme-Alignment
+   Heatmap visualization are gone. Its two genuinely useful parts survive
+   in simpler, un-blended form: the rim/perimeter percentiles as
+   `defensive_tendency_rows` (#2 above) and the per-bucket delta ranking
+   as `positional_vulnerability_ranking` (#1 above) - not blended together
+   anymore, since blending them was exactly what made the old version feel
+   bulky without adding clarity.
+
+**Also removed, since nothing survived to justify keeping it**: the
+Composite Matchup Advantage Score (`composite_matchup_advantage`) and its
+Matchup Advantage Radar visualization. The composite's formula fundamentally
+needed one pre-picked player position (item #1's exact complaint) and one
+of its four inputs (rim/foul leverage) was being scrapped outright (item
+#4) - there was nothing coherent left to compose into a single score. The
+entire standalone tab (`ui/tabs/predictive_analytics.py`, its `app.py`/
+`config.py` wiring, `tests/test_predictive_analytics.py`) was deleted
+rather than kept around half-empty; every function that's still used lives
+directly in Matchup Analyzer now. Confirmed via `git status`/grep before
+deleting that nothing else in the app referenced any of the removed names.
+
+**New test file**: `tests/test_matchup_analytics.py` replaces
+`tests/test_predictive_analytics.py` (deleted), covering
+`positional_vulnerability_ranking`, `defensive_tendency_rows`, the
+unchanged `efficiency_elasticity` (same test cases as before, just moved),
+and the reworked 3-tier `game_script_sensitivity` - 15 tests, all with
+hand-checked synthetic values (e.g. a synthetic 6-game season with margins
+spanning all three tiers, confirming the exact Close/Comfortable/Blowout
+means and season average). Full suite (36 tests across the repo) passing.
+Also verified with a live `streamlit.testing.v1.AppTest` run of the
+reworked Matchup Analyzer tab end-to-end (pick player, pick opponent team,
+click "Load positional matchup defense") confirming all four relocated/
+redesigned pieces actually render (ranking, rim/perimeter rows, elasticity
+caption, game-script curve) AND that the retired concepts (Scheme
+Fingerprint, Rim/Foul Leverage) are genuinely absent from the rendered
+output, not just removed from the source - plus a full `app.py` boot
+confirming exactly 7 tabs again with Predictive Analytics gone. `python3
+-m py_compile` across every `.py` file in the repo also passing.
+
+**Verification caveat, same standing discipline as every pass in this
+doc**: not run against live CBBD/ESPN data (this sandbox still can't reach
+those APIs - see DATA_SOURCES.md). Verified via synthetic-but-realistically-
+shaped data (built via the real `espn_player_season_stats_for_teams`
+transform, not hand-typed dicts) through unit tests and the AppTest run
+above. **Before trusting the actual numbers**: run `streamlit run app.py`
+for real once live API access is available and sanity-check the new
+Matchup Analyzer sections against a team/player/opponent you know.
+
+---
+
 **New tab: Predictive Analytics — six composite matchup-advantage metrics
-plus three visualizations (this doc's most recent update):**
+plus three visualizations (retired in the pass above - kept here as
+historical record only, per this doc's "correct forward, don't rewrite
+history" convention):**
 
 Built per explicit request, following an earlier brainstorm-only pass in
 this same session that proposed six advanced predictive-metric concepts
@@ -329,16 +470,16 @@ key CSS selector above) - both fixed before this entry was written.
 ---
 
 
-**Status as of this writing: 8 of 8 tabs live with real data** (Player
-Search, Team Efficiency, Rankings, Matchup Analyzer, Predictive Analytics,
-Live Odds, Player Compare, Transfer Portal - NET & Resume and Conference
-Standings are sub-tabs under Rankings, not separate top-level tabs) via
+**Status as of this writing: 7 of 7 tabs live with real data** (Player
+Search, Team Efficiency, Rankings, Matchup Analyzer, Live Odds, Player
+Compare, Transfer Portal - NET & Resume and Conference Standings are
+sub-tabs under Rankings, not separate top-level tabs) via
 CollegeBasketballData.com (free key, configured), ESPN's public endpoints
-(no key), and The Odds API (free key, configured). Predictive Analytics
-(added most recently, see this doc's top entry) is the one tab that adds
-zero new external sources - purely derived math over what the other tabs
-already fetch. No PFF-equivalent subsystem exists for this app at all —
-there's no PFF product for college basketball.
+(no key), and The Odds API (free key, configured). A short-lived 8th
+Predictive Analytics tab (see this doc's top two entries) was retired and
+redistributed into Matchup Analyzer based on in-app usage feedback - back
+to 7. No PFF-equivalent subsystem exists for this app at all — there's no
+PFF product for college basketball.
 
 **CORRECTION (doc-drift fix, this pass): this line previously said "10 of
 10 tabs."** Bracketology and Fantasy & Pools, both still described in

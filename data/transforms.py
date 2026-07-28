@@ -723,13 +723,11 @@ def team_defense_profile_rows(stats_df, team):
 
 
 # ---------------------------------------------------------------------------
-# Predictive Analytics: Matchup Advantage engine.
-#
-# Six composite metrics - Scheme Fingerprint, Efficiency Elasticity Curve,
-# Composite Matchup Advantage Score, Rim-Pressure & Foul-Leverage
-# Exploitation, Game-Script Sensitivity, and Positional Leverage - built
-# entirely from data this app already loads: team-level shooting/Four-
-# Factors profile allowed rates (load_all_team_season_stats), adjusted
+# Matchup Analyzer's deeper predictive layer: Positional Vulnerability
+# Ranking, standalone Rim Pressure/Perimeter Openness defensive-tendency
+# stats, the Efficiency Elasticity Curve, and Game-Script Sensitivity - all
+# built entirely from data this app already loads: team-level shooting/
+# Four-Factors profile allowed rates (load_all_team_season_stats), adjusted
 # efficiency ratings (load_efficiency_ratings), the existing positional-
 # matchup-defense breakdown (positional_defense_summary, just above), and a
 # player's own season stats/game log (get_player_season_profile).
@@ -741,75 +739,104 @@ def team_defense_profile_rows(stats_df, team):
 # explicitly-labeled PROXY inferred from aggregate allowed-rate stats and a
 # player's own game-to-game variance - each function's docstring spells out
 # the exact formula so a reader can see what assumption produced a given
-# number, not just trust an opaque score. Weights throughout are a
-# transparent, documented design choice, NOT fit/tuned against historical
-# matchup outcomes - no such labeled dataset exists to fit against (a real,
-# named limitation, not glossed over).
+# number, not just trust an opaque score.
 #
 # Every function here is pure local compute over already-loaded DataFrames/
 # dicts (same layering discipline as the rest of this file) - no loader/API
 # calls happen anywhere below.
+#
+# This section previously also computed a standalone "Predictive Analytics"
+# tab's Scheme Fingerprint (a per-position blend of these same rim/perimeter
+# stats with each bucket's own scoring delta), a Rim-Pressure & Foul-Leverage
+# Exploitation Score, a Usage-Weighted Efficiency percentile, and a Composite
+# Matchup Advantage Score built from all of the above. Reworked on request,
+# in-app usage feedback: the per-position blend forced picking one player
+# position up front (positions are often fluid - a listed guard can play
+# forward, etc.), rim pressure/perimeter openness aren't actually position-
+# specific in this app's data so blending them per-bucket added noise rather
+# than signal, and the foul-leverage score was redundant with FT Rate/FT
+# Rate Allowed, both already shown directly elsewhere. All of that - plus
+# the tab itself - was removed rather than kept as unused dead code; see
+# HANDOFF.md for the full before/after writeup.
 # ---------------------------------------------------------------------------
 
 _POSITION_BUCKETS = ('Guard', 'Forward', 'Center')
 
-_MATCHUP_TIER_THRESHOLDS = (
-    (70, 'Strong Edge'), (55, 'Slight Edge'), (45, 'Neutral'),
-    (30, 'Slight Disadvantage'), (0, 'Tough Matchup'),
-)
 
-
-def _matchup_tier_label(score):
-    for threshold, label in _MATCHUP_TIER_THRESHOLDS:
-        if score >= threshold:
-            return label
-    return _MATCHUP_TIER_THRESHOLDS[-1][1]
-
-
-def scheme_fingerprint(team_stats_df, team, positional_summary_df):
+def positional_vulnerability_ranking(positional_summary_df):
     """
-    Metric 1 - Scheme Fingerprint (positional vulnerability index).
+    Ranks a team's Guard/Forward/Center position-defense buckets (data.
+    transforms.positional_defense_summary's own output for that team) by
+    how much each bucket has outscored ITS OWN season average against this
+    team specifically - "which position is actually worth targeting,"
+    shown as a straight ranking rather than requiring a pre-picked player
+    position. Positions are often fluid in practice (a listed guard who
+    also plays some forward, etc.) - this ranks all three buckets and lets
+    the viewer apply their own judgment about which one actually matches
+    the player they're scouting, instead of this app guessing for them.
 
-    Infers a defense's shot-profile "tendency" from two D-I-wide percentiles
-    computed off team_stats_df (data.loaders.load_all_team_season_stats):
-      - rim_pressure_pct: mean D-I percentile of Def 2P% allowed, Def FT
-        Rate allowed, and Opp Paint Pts % allowed (higher = this defense
-        concedes MORE interior/rim scoring than a typical D-I defense - a
-        proxy for a defense that sags/drops rather than pressuring at the
-        level of a ball screen, NOT a literal coverage classification we
-        can actually observe without play-by-play).
-      - perimeter_openness_pct: mean D-I percentile of Def 3PA Rate allowed
-        and Def 3P% allowed (higher = concedes more/better three-point
-        volume than typical - a proxy for over-helping or switch/closeout
-        breakdowns, again inferred, not observed).
+        score = clip(50 + Points Delta * 4, 0, 100)
 
-    Then, per position bucket present in positional_summary_df (Guard/
-    Forward/Center - this function's sibling positional_defense_summary's
-    own output, already scoped to THIS opponent team), blends those two
-    team-wide tendencies with the bucket-specific 'Points Delta' (how much
-    that bucket has outscored ITS OWN season average specifically against
-    this team) into one 0-100 Vulnerability Score:
-        delta_score   = clip(50 + Points Delta * 4, 0, 100)
-        vulnerability = 0.45*delta_score + 0.30*rim_pressure_pct
-                       + 0.25*perimeter_openness_pct
-    (renormalized over whichever of the three components are available -
-    e.g. a bucket with no Points Delta yet still gets a score from the two
-    team-wide components alone). `delta_score`'s "+4 pts per point of
-    delta, centered at 50" is a deliberately simple, transparent linear
-    transform - not a real D-I-wide percentile of positional deltas, which
-    would require computing this same breakdown for all 360+ teams (out of
-    scope/cost - CBBD's positional data is already the expensive part of
-    this app, see DATA_SOURCES.md's API budget section).
+    A deliberately simple, transparent linear transform centered at 50 (no
+    over/under-performance) - not a D-I-wide percentile of positional
+    deltas, which would require computing this same breakdown for every
+    team (out of scope/cost - CBBD's positional data is already the
+    expensive part of this app, see DATA_SOURCES.md's API budget section).
 
-    Returns {} if `team` isn't in team_stats_df. `buckets` is {} (not
-    missing) if positional_summary_df has no usable rows - the two team-
-    wide percentiles are still returned on their own in that case.
+    Returns a list of {'label', 'help', 'value_str', 'pct'} rows - the
+    exact shape ui.charts.render_relative_bars expects - sorted most-
+    exploitable bucket first. [] if positional_summary_df is empty or has
+    no usable Points Delta values.
+    """
+    if positional_summary_df is None or positional_summary_df.empty:
+        return []
+    rows = []
+    for _, r in positional_summary_df.iterrows():
+        bucket = r.get('Bucket')
+        if bucket not in _POSITION_BUCKETS:
+            continue
+        delta = r.get('Points Delta')
+        if pd.isna(delta):
+            continue
+        delta = float(delta)
+        score = max(0.0, min(100.0, 50 + delta * 4))
+        direction = "outscoring" if delta >= 0 else "undershooting"
+        rows.append({
+            'label': bucket,
+            'help': f"{bucket}s are {direction} their own season average by {abs(delta):.1f} pts/game against this team.",
+            'value_str': f"{delta:+.1f} pts vs own avg",
+            'pct': round(score, 1),
+        })
+    rows.sort(key=lambda r: r['pct'], reverse=True)
+    return rows
+
+
+def defensive_tendency_rows(team_stats_df, team):
+    """
+    Two team-wide (not position-specific) defensive-tendency percentiles,
+    ready for ui.charts.render_relative_bars, meant to be appended onto
+    team_defense_profile_rows' own output in Matchup Analyzer's TEAM
+    DEFENSE panel:
+      - Rim Pressure Allowed: mean D-I percentile of Def 2P% allowed, Def
+        FT Rate allowed, and Opp Paint Pts % allowed - how much interior/
+        rim scoring this defense concedes relative to a typical D-I
+        defense (a proxy for a defense that sags/drops rather than
+        pressuring at the level of a ball screen, NOT a literal coverage
+        classification observable without play-by-play).
+      - Perimeter Openness Allowed: mean D-I percentile of Def 3PA Rate
+        allowed and Def 3P% allowed - how much three-point volume/
+        efficiency this defense concedes relative to typical.
+    Deliberately team-wide only, not broken out by position bucket - this
+    app's data doesn't actually support attributing rim/perimeter shot
+    profile to a specific position bucket (see this section's own header
+    comment for why an earlier per-bucket blend was reworked). Returns []
+    if `team` isn't found in team_stats_df.
     """
     if team_stats_df is None or team_stats_df.empty:
-        return {}
+        return []
     row = team_stats_df[team_stats_df['Team'] == team]
     if row.empty:
-        return {}
+        return []
     row = row.iloc[0]
 
     def _team_pct(col):
@@ -819,155 +846,20 @@ def scheme_fingerprint(team_stats_df, team, positional_summary_df):
 
     rim_components = [c for c in (_team_pct('Def 2P%'), _team_pct('Def FT Rate'), _team_pct('Opp Paint Pts %')) if c is not None]
     perim_components = [c for c in (_team_pct('Def 3PA Rate'), _team_pct('Def 3P%')) if c is not None]
-    rim_pressure_pct = (sum(rim_components) / len(rim_components)) if rim_components else None
-    perimeter_openness_pct = (sum(perim_components) / len(perim_components)) if perim_components else None
-
-    buckets = {}
-    if positional_summary_df is not None and not positional_summary_df.empty:
-        for _, r in positional_summary_df.iterrows():
-            bucket = r.get('Bucket')
-            if bucket not in _POSITION_BUCKETS:
-                continue
-            delta = r.get('Points Delta')
-            delta_score = None
-            if pd.notna(delta):
-                delta_score = max(0.0, min(100.0, 50 + float(delta) * 4))
-            parts, weights = [], []
-            if delta_score is not None:
-                parts.append(delta_score); weights.append(0.45)
-            if rim_pressure_pct is not None:
-                parts.append(rim_pressure_pct); weights.append(0.30)
-            if perimeter_openness_pct is not None:
-                parts.append(perimeter_openness_pct); weights.append(0.25)
-            vulnerability = (sum(p * w for p, w in zip(parts, weights)) / sum(weights)) if parts else None
-            buckets[bucket] = {
-                'vulnerability': round(vulnerability, 1) if vulnerability is not None else None,
-                'points_delta': round(float(delta), 1) if pd.notna(delta) else None,
-                'delta_score': round(delta_score, 1) if delta_score is not None else None,
-                'games': int(r['Games']) if pd.notna(r.get('Games')) else None,
-                'points_allowed': round(float(r['Points Allowed']), 1) if pd.notna(r.get('Points Allowed')) else None,
-            }
-    return {
-        'team': team,
-        'rim_pressure_pct': round(rim_pressure_pct, 1) if rim_pressure_pct is not None else None,
-        'perimeter_openness_pct': round(perimeter_openness_pct, 1) if perimeter_openness_pct is not None else None,
-        'buckets': buckets,
-    }
-
-
-def positional_leverage(fingerprint, player_bucket):
-    """
-    Metric 6 - Positional Leverage / Mismatch Hunting Score.
-
-    Ranks the opponent's position-bucket Vulnerability Scores
-    (scheme_fingerprint's 'buckets') from most to least exploitable, and
-    reports where the selected player's OWN bucket falls in that ranking,
-    plus how much more (or less) vulnerable it is than the other buckets'
-    average - "is this matchup actually pointed at the defense's real weak
-    spot, or somewhere it's fine." Returns {} if the fingerprint has no
-    scored buckets or the player's own bucket isn't one of them (e.g. an
-    'Unknown' position that positional_defense_summary already excludes).
-    """
-    buckets = (fingerprint or {}).get('buckets') or {}
-    scored = {b: v['vulnerability'] for b, v in buckets.items() if v.get('vulnerability') is not None}
-    if not scored or player_bucket not in scored:
-        return {}
-    ranked = sorted(scored.items(), key=lambda kv: kv[1], reverse=True)
-    rank = next(i for i, (b, _v) in enumerate(ranked, start=1) if b == player_bucket)
-    others = [v for b, v in scored.items() if b != player_bucket]
-    avg_other = (sum(others) / len(others)) if others else None
-    edge_vs_avg = (scored[player_bucket] - avg_other) if avg_other is not None else None
-    return {
-        'player_bucket': player_bucket,
-        'rank': rank,
-        'of': len(ranked),
-        'weakest_bucket': ranked[0][0],
-        'weakest_score': ranked[0][1],
-        'edge_vs_avg': round(edge_vs_avg, 1) if edge_vs_avg is not None else None,
-        'ranked': ranked,
-        'is_weakest': rank == 1,
-    }
-
-
-def usage_weighted_efficiency(player_values, group_rate_df):
-    """
-    Composite Matchup Advantage Score input - Usage-Weighted Efficiency.
-
-    A player's TS% edge over the comparison group's average, scaled by how
-    large a share of their team's possessions they command:
-        edge = (player TS% - group mean TS%) * (player Usage% / 100)
-    A modest efficiency edge at a high usage rate counts for more than the
-    same edge at a low usage rate (it touches more of the offense) - the
-    same intuition as a points-produced-above-average rate, without needing
-    play-by-play on/off tracking to compute it. Percentile-ranked against
-    the SAME edge computed for every player in group_rate_df (data.
-    transforms.player_rate_stats' output - not raw TS% alone), so what
-    actually gets ranked is "how much value is this player creating with
-    the possessions they're given," not efficiency in isolation.
-
-    Returns {} if TS%/Usage% aren't available for the player, or the group
-    is empty/missing those columns.
-    """
-    if not player_values or group_rate_df is None or group_rate_df.empty:
-        return {}
-    ts = player_values.get('TS%')
-    usage = player_values.get('Usage %')
-    if ts is None or usage is None or pd.isna(ts) or pd.isna(usage):
-        return {}
-    if 'TS%' not in group_rate_df.columns or 'Usage %' not in group_rate_df.columns:
-        return {}
-    group_ts = pd.to_numeric(group_rate_df['TS%'], errors='coerce')
-    group_usage = pd.to_numeric(group_rate_df['Usage %'], errors='coerce')
-    group_mean_ts = group_ts.mean()
-    if pd.isna(group_mean_ts):
-        return {}
-    edge = (float(ts) - float(group_mean_ts)) * (float(usage) / 100.0)
-    group_edge = (group_ts - group_mean_ts) * (group_usage / 100.0)
-    pct = pct_rank(group_edge.dropna(), edge, higher_is_better=True)
-    return {'edge': round(edge, 2), 'pct': pct, 'group_mean_ts': round(float(group_mean_ts), 1)}
-
-
-def rim_foul_leverage_score(player_values, group_rate_df, team_stats_df, opponent_team):
-    """
-    Metric 4 - Rim-Pressure & Foul-Leverage Exploitation Score.
-
-    Blends the player's own FT Rate and 2PT Rate percentiles (within
-    group_rate_df - how often they get to the line relative to their own
-    field goal attempts, and how much of their own shot diet is two-point/
-    interior) with the opponent's Def FT Rate ALLOWED percentile (how
-    foul-prone this defense is D-I-wide - higher means more free trips to
-    the line against them, independent of who's shooting):
-        score = 0.35 * player FT Rate pctl
-              + 0.25 * player 2PT Rate pctl
-              + 0.40 * opponent Def FT Rate allowed pctl
-    (renormalized over whichever components are actually available).
-    Returns {} if none of the three components can be computed.
-    """
-    components, weights, detail = [], [], {}
-    if player_values and group_rate_df is not None and not group_rate_df.empty and 'FT Rate' in group_rate_df.columns:
-        ft_rate = player_values.get('FT Rate')
-        if ft_rate is not None and pd.notna(ft_rate):
-            pct = pct_rank(group_rate_df['FT Rate'], ft_rate, higher_is_better=True)
-            if pct is not None:
-                components.append(pct); weights.append(0.35); detail['player_ft_rate_pct'] = round(pct, 1)
-    if player_values and group_rate_df is not None and not group_rate_df.empty and '2PT Rate' in group_rate_df.columns:
-        two_rate = player_values.get('2PT Rate')
-        if two_rate is not None and pd.notna(two_rate):
-            pct = pct_rank(group_rate_df['2PT Rate'], two_rate, higher_is_better=True)
-            if pct is not None:
-                components.append(pct); weights.append(0.25); detail['player_2pt_rate_pct'] = round(pct, 1)
-    if team_stats_df is not None and not team_stats_df.empty and 'Def FT Rate' in team_stats_df.columns:
-        opp_row = team_stats_df[team_stats_df['Team'] == opponent_team]
-        if not opp_row.empty:
-            opp_ft = opp_row.iloc[0].get('Def FT Rate')
-            pct = pct_rank(team_stats_df['Def FT Rate'], opp_ft, higher_is_better=True)
-            if pct is not None:
-                components.append(pct); weights.append(0.40); detail['opponent_def_ft_rate_pct'] = round(pct, 1)
-    if not components:
-        return {}
-    score = sum(c * w for c, w in zip(components, weights)) / sum(weights)
-    detail['score'] = round(score, 1)
-    return detail
+    rows = []
+    if rim_components:
+        pct = sum(rim_components) / len(rim_components)
+        rows.append({
+            'label': 'Rim Pressure Allowed', 'pct': round(pct, 1), 'value_str': f"{pct:.0f}th pctl",
+            'help': "How much interior/rim scoring this defense concedes vs. a typical D-I defense (blend of Def 2P%, Def FT Rate, and paint points allowed) - higher means more rim pressure conceded.",
+        })
+    if perim_components:
+        pct = sum(perim_components) / len(perim_components)
+        rows.append({
+            'label': 'Perimeter Openness Allowed', 'pct': round(pct, 1), 'value_str': f"{pct:.0f}th pctl",
+            'help': "How much three-point volume/efficiency this defense concedes vs. a typical D-I defense (blend of Def 3PA Rate and Def 3P% allowed) - higher means more perimeter openness conceded.",
+        })
+    return rows
 
 
 def efficiency_elasticity(player_games, eff_ratings_df, team_stats_df, opponent_team, min_games=5):
@@ -1095,30 +987,37 @@ def efficiency_elasticity(player_games, eff_ratings_df, team_stats_df, opponent_
     }
 
 
-def game_script_sensitivity(player_games, team_games, stat_col='Points', close_margin=8, min_games=3):
+_GAME_SCRIPT_TIER_ORDER = ('Close', 'Comfortable', 'Blowout')
+
+
+def game_script_sensitivity(player_games, team_games, stat_col='Points', close_margin=8, blowout_margin=14, min_games=3):
     """
-    Metric 5 - Game-Script Sensitivity Index.
+    Game-Script Sensitivity.
 
     A coarser proxy than true live win-probability/score-by-time tracking,
-    which this app doesn't have (no play-by-play source - see this
-    feature's own brainstorm caveat): buckets a player's games by their
-    TEAM's final margin (Close: |Margin| <= close_margin; Decided:
-    everything else, win or loss) via a join on Date ALONE - deliberately
-    not Opponent name, since team_games (CBBD-spelled) and player_games
-    (which can be ESPN-spelled) don't always agree on spelling, but a team
-    plays at most one game per date, so Date is an unambiguous, source-
-    agnostic join key.
+    which this app doesn't have (no play-by-play source): buckets a
+    player's games into three tiers by their TEAM's final margin, via a
+    join on Date ALONE - deliberately not Opponent name, since team_games
+    (CBBD-spelled) and player_games (which can be ESPN-spelled) don't
+    always agree on spelling, but a team plays at most one game per date,
+    so Date is an unambiguous, source-agnostic join key:
+        Close:       |Margin| <= close_margin        (default 8)
+        Comfortable: close_margin < |Margin| <= blowout_margin (default 14)
+        Blowout:     |Margin| > blowout_margin
 
-    Reports the mean of `stat_col` in each bucket and a Sensitivity Index:
-        (close_game_mean - decided_game_mean) / season_mean * 100
-    Positive = produces MORE in close games relative to decided ones
-    ("tightens up" when it matters); negative = the reverse (production
-    leans on already-decided game time - garbage-time-compiler territory).
+    Reports each tier's mean `stat_col` and game count, in that fixed
+    Close -> Comfortable -> Blowout order (so a caller can plot it as a
+    real left-to-right curve), plus the season mean as a flat reference.
+    No per-tier minimum-games gate - every tier with at least one game is
+    included, WITH its real game count, so a viewer can judge sample-size
+    confidence directly rather than this function silently hiding a small-
+    sample tier (same "show the real count, don't hide behind a threshold"
+    convention as data.transforms.last_n_form_deltas). Only the TOTAL
+    (all-tiers) game count is gated by `min_games` - a 1-2 game season
+    isn't worth bucketing at all.
 
-    Requires at least `min_games` games in EACH bucket to compute a real
-    index; returns {'insufficient_sample': True, ...} with the raw counts
-    instead of a misleadingly precise index from a tiny sample. Returns {}
-    only if there's no usable data to bucket at all.
+    Returns {} if there's nothing usable to bucket, or fewer than
+    `min_games` total resolvable games.
     """
     if player_games is None or player_games.empty or team_games is None or team_games.empty:
         return {}
@@ -1129,155 +1028,25 @@ def game_script_sensitivity(player_games, team_games, stat_col='Points', close_m
     work['_margin'] = pd.to_numeric(work['Date'].map(margin_by_date), errors='coerce')
     work[stat_col] = pd.to_numeric(work[stat_col], errors='coerce')
     work = work.dropna(subset=['_margin', stat_col])
-    if work.empty:
+    if len(work) < min_games:
         return {}
-    close = work[work['_margin'].abs() <= close_margin]
-    decided = work[work['_margin'].abs() > close_margin]
-    if len(close) < min_games or len(decided) < min_games:
-        return {'insufficient_sample': True, 'n_close': int(len(close)), 'n_decided': int(len(decided))}
+
+    def _tier(margin):
+        m = abs(margin)
+        if m <= close_margin:
+            return 'Close'
+        if m <= blowout_margin:
+            return 'Comfortable'
+        return 'Blowout'
+
+    work['_tier'] = work['_margin'].apply(_tier)
     season_mean = float(work[stat_col].mean())
-    close_mean = float(close[stat_col].mean())
-    decided_mean = float(decided[stat_col].mean())
-    index = ((close_mean - decided_mean) / season_mean * 100) if season_mean else None
+    tiers = []
+    for label in _GAME_SCRIPT_TIER_ORDER:
+        sub = work.loc[work['_tier'] == label, stat_col]
+        if len(sub):
+            tiers.append({'label': label, 'mean': round(float(sub.mean()), 1), 'games': int(len(sub))})
     return {
-        'stat': stat_col, 'season_mean': round(season_mean, 1),
-        'close_mean': round(close_mean, 1), 'decided_mean': round(decided_mean, 1),
-        'n_close': int(len(close)), 'n_decided': int(len(decided)),
-        'sensitivity_index': round(index, 1) if index is not None else None,
-    }
-
-
-def composite_matchup_advantage(usage_weighted_pct, positional_vulnerability_pct, rim_foul_pct, pace_pct):
-    """
-    Metric 3 - Composite Matchup Advantage Score.
-
-    Single 0-100 score (plus a plain-language tier label) blending four
-    already-computed percentiles/scores for this specific player-vs-team
-    matchup:
-        35% Usage-Weighted Efficiency percentile (usage_weighted_efficiency)
-        30% Positional Vulnerability score at the player's own bucket
-            (scheme_fingerprint's per-bucket 'vulnerability')
-        20% Rim-Pressure & Foul-Leverage score (rim_foul_leverage_score)
-        15% Opponent Pace percentile (more possessions -> more chances for
-            whatever edge exists above to actually show up in a box score)
-    Missing components are dropped and the remaining weights renormalized
-    (e.g. a player with no resolvable elasticity/game-log history still
-    gets a composite score from the other three) - only returns {} if
-    every single component is missing. Weights are a documented,
-    transparent design choice, NOT fit/tuned against historical matchup
-    outcomes (no such labeled dataset exists) - shown in the UI's radar
-    chart broken out by component so nothing here is a black box.
-    """
-    components = {
-        'usage_weighted_pct': (usage_weighted_pct, 0.35),
-        'positional_vulnerability_pct': (positional_vulnerability_pct, 0.30),
-        'rim_foul_pct': (rim_foul_pct, 0.20),
-        'pace_pct': (pace_pct, 0.15),
-    }
-    parts = [(v, w) for v, w in components.values() if v is not None and pd.notna(v)]
-    if not parts:
-        return {}
-    score = max(0.0, min(100.0, sum(v * w for v, w in parts) / sum(w for _v, w in parts)))
-    return {
-        'score': round(score, 1),
-        'tier': _matchup_tier_label(score),
-        'components': {k: (round(v, 1) if v is not None and pd.notna(v) else None) for k, (v, _w) in components.items()},
-    }
-
-
-def matchup_projection_band(values, composite_score, pace_pctile, effect_size=0.20, pace_effect=0.08, min_games=3):
-    """
-    Range-of-outcomes projection powering the 'Dynamic Probability Curve'
-    visualization. NOT a trained statistical model - there is no historical
-    matchup-outcome dataset to fit against (same caveat as
-    composite_matchup_advantage) - this is a transparent heuristic that
-    scales a player's OWN empirical game-to-game distribution this season
-    by how favorable this specific matchup grades out:
-        floor / median / ceiling = this player's own 10th / 50th / 90th
-        percentile game value this season, each multiplied by:
-            (1 + (composite_score - 50)/50 * effect_size)   -- matchup edge
-          * (1 + (pace_pctile   - 50)/50 * pace_effect)      -- pace/volume
-    A composite score of 100 (max edge) scales the projection up by
-    `effect_size` above the player's own empirical shape; a composite of 0
-    scales it down by the same amount. Both multipliers default to modest,
-    explicitly-labeled swings (20%/8%) since this is a heuristic dial, not
-    a fitted model - and the combined multiplier is clamped to [0.5, 1.75]
-    as a sanity bound against a degenerate combination of extremes.
-
-    Requires at least `min_games` values; returns {} otherwise.
-    """
-    vals = pd.to_numeric(pd.Series(values), errors='coerce').dropna()
-    if len(vals) < min_games:
-        return {}
-    p10, p50, p90 = (float(x) for x in vals.quantile([0.10, 0.50, 0.90]))
-    season_avg = float(vals.mean())
-    matchup_mult = 1.0
-    if composite_score is not None and pd.notna(composite_score):
-        matchup_mult = 1 + ((float(composite_score) - 50) / 50) * effect_size
-    pace_mult = 1.0
-    if pace_pctile is not None and pd.notna(pace_pctile):
-        pace_mult = 1 + ((float(pace_pctile) - 50) / 50) * pace_effect
-    total_mult = max(0.5, min(1.75, matchup_mult * pace_mult))
-    return {
-        'floor': round(max(0.0, p10 * total_mult), 1),
-        'median': round(max(0.0, p50 * total_mult), 1),
-        'ceiling': round(max(0.0, p90 * total_mult), 1),
-        'season_avg': round(season_avg, 1),
-        'multiplier': round(total_mult, 3),
-        'raw_values': [float(v) for v in vals.tolist()],
-        'n_games': int(len(vals)),
-    }
-
-
-def build_matchup_advantage_report(
-    player_bucket, player_values, group_rate_df, player_games, team_games,
-    opponent_team, team_stats_df, eff_ratings_df, positional_summary_df,
-    stat_col='Points',
-):
-    """
-    Orchestrates all six Predictive Analytics metrics (plus the probability-
-    band projection) into one report dict for ui.tabs.predictive_analytics
-    to render. Pure local compute over already-loaded DataFrames/dicts, same
-    layering discipline as every other function in this file - no loader/API
-    calls happen here. See each individual metric function's own docstring
-    for its formula and caveats; this just resolves the couple of shared
-    inputs they all need (the opponent's Pace percentile, the player's own
-    bucket's Vulnerability Score) and assembles the results.
-    """
-    fingerprint = scheme_fingerprint(team_stats_df, opponent_team, positional_summary_df)
-    leverage = positional_leverage(fingerprint, player_bucket)
-    usage_eff = usage_weighted_efficiency(player_values, group_rate_df)
-    rim_foul = rim_foul_leverage_score(player_values, group_rate_df, team_stats_df, opponent_team)
-    elasticity = efficiency_elasticity(player_games, eff_ratings_df, team_stats_df, opponent_team)
-    game_script = game_script_sensitivity(player_games, team_games, stat_col=stat_col)
-
-    pace_pct = None
-    if team_stats_df is not None and not team_stats_df.empty and 'Pace' in team_stats_df.columns:
-        opp_row = team_stats_df[team_stats_df['Team'] == opponent_team]
-        if not opp_row.empty:
-            pace_pct = pct_rank(team_stats_df['Pace'], opp_row.iloc[0].get('Pace'), higher_is_better=True)
-
-    bucket_vuln = (fingerprint.get('buckets') or {}).get(player_bucket, {}).get('vulnerability')
-    composite = composite_matchup_advantage(usage_eff.get('pct'), bucket_vuln, rim_foul.get('score'), pace_pct)
-
-    band = {}
-    if player_games is not None and not player_games.empty and stat_col in player_games.columns:
-        band = matchup_projection_band(
-            pd.to_numeric(player_games[stat_col], errors='coerce').dropna().tolist(),
-            composite.get('score'), pace_pct,
-        )
-
-    return {
-        'scheme_fingerprint': fingerprint,
-        'positional_leverage': leverage,
-        'usage_weighted_efficiency': usage_eff,
-        'rim_foul_leverage': rim_foul,
-        'efficiency_elasticity': elasticity,
-        'game_script_sensitivity': game_script,
-        'pace_pct': round(pace_pct, 1) if pace_pct is not None else None,
-        'composite': composite,
-        'projection_band': band,
-        'player_bucket': player_bucket,
-        'opponent_team': opponent_team,
-        'stat_col': stat_col,
+        'stat': stat_col, 'season_mean': round(season_mean, 1), 'n_games': int(len(work)),
+        'close_margin': close_margin, 'blowout_margin': blowout_margin, 'tiers': tiers,
     }

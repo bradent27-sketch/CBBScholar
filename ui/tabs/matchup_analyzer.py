@@ -54,16 +54,18 @@ from data.loaders import (
     current_cbb_season, load_all_team_season_stats, load_team_roster, load_positional_matchup_data,
     get_player_season_profile, load_player_game_logs, load_conference_player_season_stats,
     load_all_player_season_stats, load_teams, load_espn_teams, load_espn_di_player_stats,
-    load_espn_season_player_box_native,
+    load_espn_season_player_box_native, load_efficiency_ratings, load_team_games,
 )
 from data.transforms import (
     position_bucket, positional_defense_summary, positional_defense_trend,
     player_percentile_rows, player_trend_series, team_defense_profile_rows,
     espn_player_season_stats_for_teams, last_n_form_deltas,
+    positional_vulnerability_ranking, defensive_tendency_rows,
+    efficiency_elasticity, game_script_sensitivity,
 )
 from data.utils import match_player_name, resolve_team_name
 from ui.components import render_coming_soon
-from ui.charts import render_trend_line, render_relative_bars
+from ui.charts import render_trend_line, render_relative_bars, render_game_script_curve
 from ui.styling import df_auto_height, render_responsive_table
 
 _PLAYER_TREND_STATS = [('Points', ''), ('Assists', ''), ('Rebounds', ''), ('Minutes', ''), ('3P%', '%')]
@@ -125,7 +127,7 @@ def render():
     col_c, col_d = st.columns(2)
     with col_c:
         if player_ctx:
-            _render_player_trend(season, player_ctx)
+            _render_player_trend(season, player_ctx, defense_team)
     with col_d:
         if defense_team:
             _render_positional_defense(defense_team, season)
@@ -275,7 +277,7 @@ def _render_tendency_profile(season, ctx):
     st.caption("Source: free ESPN/SportsDataverse box file." if source == 'espn' else "Source: CollegeBasketballData.com.")
 
 
-def _render_player_trend(season, ctx):
+def _render_player_trend(season, ctx, defense_team=None):
     team_choice, sel_row, stats, source, box_df, athlete_source_id = (
         ctx['team_choice'], ctx['sel_row'], ctx['stats'], ctx['source'], ctx['box_df'], ctx['athlete_source_id']
     )
@@ -335,6 +337,54 @@ def _render_player_trend(season, ctx):
         else:
             st.caption("Not enough games yet for a trend.")
 
+    if defense_team:
+        _render_efficiency_elasticity_note(mine, defense_team, season)
+    _render_game_script_curve(mine, team_choice, season)
+
+
+def _render_efficiency_elasticity_note(mine, defense_team, season):
+    """
+    Efficiency Elasticity Curve (data.transforms.efficiency_elasticity) -
+    genuinely useful for analysis (how this player's own shooting
+    efficiency responds to tougher/faster matchups, fit from their real
+    game log) but included quietly as a single caption line rather than
+    its own chart/section/expander, per explicit request. Uses `mine`
+    (this panel's own already-loaded per-game log, same rows the trend
+    charts above just rendered) so no extra game-log fetch is needed -
+    only team_stats_df/eff_ratings_df (both already weekly-cached
+    league-wide pulls shared with the rest of this tab) get loaded here.
+    """
+    team_stats_df = load_all_team_season_stats(season)
+    eff_ratings_df = load_efficiency_ratings(season)
+    result = efficiency_elasticity(mine, eff_ratings_df, team_stats_df, defense_team)
+    if not result:
+        return
+    bits = [f"**Efficiency Elasticity** ({result['efficiency_label']}): season avg {result['season_avg_eff']:.1f}%"]
+    bucket_means = result.get('bucket_means') or {}
+    weaker, top = bucket_means.get('vs Weaker Defenses'), bucket_means.get('vs Top-Tier Defenses')
+    if weaker and top:
+        bits.append(f"— {weaker['mean']:.1f}% vs weaker D, {top['mean']:.1f}% vs top-tier D")
+    if result.get('projected_eff') is not None:
+        bits.append(f"→ projected **{result['projected_eff']:.1f}%** vs {defense_team} ({result['projected_adjustment']:+.1f} pts, {result['n_games']} games)")
+    st.caption(" ".join(bits))
+
+
+def _render_game_script_curve(mine, team_choice, season):
+    """
+    Game-Script Sensitivity (data.transforms.game_script_sensitivity) -
+    Close (|margin| <= 8) / Comfortable (8-14) / Blowout (>14) production,
+    shown as a small curve rather than plain text, per explicit request.
+    `mine` is this panel's own already-loaded per-game log; only the
+    player's team schedule (for game margins) needs a fresh load here.
+    """
+    with st.spinner(f"Loading {team_choice}'s schedule..."):
+        team_games = load_team_games(team_choice, season)
+    result = game_script_sensitivity(mine, team_games, stat_col='Points')
+    if not result or len(result.get('tiers') or []) < 2:
+        return
+    st.markdown("_Points by game script — Close (±8) / Comfortable (8–14) / Blowout (>14)_")
+    render_game_script_curve(result)
+
 
 def _position_map_for_matchup(matchup_df, season):
     """{athleteSourceId(str): position_bucket} for every opposing player in
@@ -380,7 +430,13 @@ def _render_defensive_profile(team, season):
     # percentile bar inline with the rest of the defensive stats, not a
     # separate st.metric, per explicit request: a bare number doesn't show
     # whether that pace is fast or slow relative to D-I the way a bar does.
-    profile_rows = team_defense_profile_rows(team_stats, team)
+    # Rim Pressure/Perimeter Openness Allowed (data.transforms.
+    # defensive_tendency_rows) append onto the SAME bar list - these are
+    # team-wide tendency reads, not position-specific (see that function's
+    # docstring for why an earlier per-position version of this was
+    # reworked), so they belong here alongside the rest of the team's
+    # overall defensive shape rather than under Positional Matchup Defense.
+    profile_rows = team_defense_profile_rows(team_stats, team) + defensive_tendency_rows(team_stats, team)
     if profile_rows:
         st.markdown(f"**{team} — defensive profile (vs D-I)**")
         render_relative_bars(profile_rows)
@@ -436,6 +492,19 @@ def _render_positional_defense(team, season):
         },
         height=df_auto_height(len(display)),
     )
+
+    # Positional Vulnerability Ranking - which of this team's Guard/
+    # Forward/Center buckets is actually worth targeting, ranked most-
+    # exploitable first (data.transforms.positional_vulnerability_ranking).
+    # Deliberately NOT gated on picking a player/position first - real
+    # positions are often fluid (a listed guard who also plays some
+    # forward, etc.), so this shows all three buckets and lets the viewer
+    # apply their own judgment about which one actually matches whoever
+    # they're scouting, rather than this app guessing for them.
+    ranking_rows = positional_vulnerability_ranking(summary)
+    if ranking_rows:
+        st.markdown(f"**{team} — positional vulnerability ranking**")
+        render_relative_bars(ranking_rows)
 
     # Position-group picker + all three stats for whichever bucket is
     # selected, rather than every bucket's Points-only trend stacked at
