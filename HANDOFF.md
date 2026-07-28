@@ -5,8 +5,132 @@ Sibling app to NFL Scholar (`C:\FantasyF`) and CFB Scholar
 college basketball. This doc follows NFL Scholar's own HANDOFF.md section
 structure on purpose, so all three stay easy to cross-reference.
 
-**Player Compare dumbbell chart, light mode, and a Net Rating cleanup (this
-doc's most recent update):**
+**New tab: Predictive Analytics — six composite matchup-advantage metrics
+plus three visualizations (this doc's most recent update):**
+
+Built per explicit request, following an earlier brainstorm-only pass in
+this same session that proposed six advanced predictive-metric concepts
+and three visualization concepts, then got approval to fully implement all
+of them (not narrowed down to a subset). New 8th top-level tab,
+`ui/tabs/predictive_analytics.py`, sitting after Matchup Analyzer in tab
+order (`config.TAB_LABELS`/`app.py`'s `_tab_modules`, kept in lockstep as
+always).
+
+**Zero new external data sources** — every metric is pure local compute in
+a new `data/transforms.py` section ("Predictive Analytics: Matchup
+Advantage engine") over data this app already fetches: `get_player_season_profile`
+(same ESPN-first/CBBD-fallback pipeline Matchup Analyzer's PLAYER panel and
+Player Compare already use), `load_positional_matchup_data` (same source as
+Matchup Analyzer's TEAM DEFENSE positional breakdown), `load_all_team_season_stats`,
+and `load_efficiency_ratings` (both already power Team Efficiency/Matchup
+Analyzer). The tab reuses Matchup Analyzer's exact player-picker logic
+(roster UNIONED with the ESPN box file, same bug-fixed pattern) and its
+opponent's positional-matchup-defense loading (same "Run" button + games-
+per-team slider + free-ESPN/CBBD-fallback source caption) — duplicated
+locally into the new tab file rather than cross-imported, matching this
+app's established convention of small per-tab duplication over cross-tab
+coupling (see `_mobile_cell_bg`'s docstring elsewhere in this file for the
+same reasoning applied before).
+
+**The six metrics** (full formulas in each function's own docstring in
+`data/transforms.py` — not restated here to avoid drift between the two):
+1. **Scheme Fingerprint** (`scheme_fingerprint`) — infers a defense's paint-
+   sag/perimeter-openness tendency from D-I percentiles of its allowed
+   shooting-profile rates (Def 2P%, Def FT Rate, Opp Paint Pts %, Def 3PA
+   Rate, Def 3P%), blended per position bucket with that bucket's own
+   scoring delta against this specific team (reusing `positional_defense_summary`,
+   already built for Matchup Analyzer).
+2. **Efficiency Elasticity Curve** (`efficiency_elasticity`) — a real
+   `numpy.polyfit` least-squares line fit over the player's own game log:
+   efficiency (TS%, or eFG% when the game log has no free-throw split —
+   true for CBBD's `/games/players`, only the ESPN-native box file carries
+   FTA/FTM) vs. opponent defensive-rating and pace percentile, then
+   projects an adjustment for tonight's specific opponent.
+3. **Composite Matchup Advantage Score** (`composite_matchup_advantage`) —
+   0-100 blend (35/30/20/15) of usage-weighted efficiency, positional
+   vulnerability, rim/foul leverage, and opponent pace, with graceful
+   weight-renormalization over missing components and a plain-language tier
+   label.
+4. **Rim-Pressure & Foul-Leverage Exploitation Score** (`rim_foul_leverage_score`).
+5. **Game-Script Sensitivity Index** (`game_script_sensitivity`) — close-
+   game vs. decided-game production split, joined to the team's own
+   schedule margins by DATE ALONE (deliberately not opponent name — a team
+   plays at most one game per date, sidestepping any ESPN-vs-CBBD team-
+   name-spelling mismatch entirely).
+6. **Positional Leverage / Mismatch Hunting Score** (`positional_leverage`)
+   — ranks the opponent's three position-bucket vulnerability scores and
+   reports where the selected player's own bucket falls.
+
+Every one of these is an explicitly-labeled PROXY, not a literal defensive-
+coverage read — this app has no play-by-play, shot-location, or lineup/
+on-off tracking data (see DATA_SOURCES.md), so nothing claims to detect an
+actual "drop coverage on a ball screen" the way possession-level tracking
+data would. This limitation is stated up front in the tab's own header
+caption and again in an in-app "Methodology" expander at the bottom of the
+report, not buried only in this doc. Composite/projection weights (35/30/
+20/15, the ±20%/±8% projection-band effect sizes) are a documented,
+transparent design choice — NOT fit or tuned against any historical
+matchup-outcome dataset, because no such labeled dataset exists in this
+app's data sources. Flagged honestly rather than presented as calibrated.
+
+**Three visualizations**, all reusing/extending existing chart primitives
+rather than adding a new charting dependency (same hand-rolled inline-SVG
+discipline as every other chart in this app):
+- **Matchup Advantage Radar** — reuses `ui.charts.render_radar` UNCHANGED,
+  overlaying the four composite components against a flat 50th-percentile
+  "league-average matchup" baseline. Missing components are substituted
+  with 50 (neutral), not the render_radar default of 0 — 0 would visually
+  read as "worst possible," which is wrong for "no data," so this tab
+  fills that gap explicitly before calling the shared primitive rather
+  than changing that primitive's own missing-value convention (other
+  callers, e.g. Player Compare, still get 0-as-missing unchanged).
+- **Scheme-Alignment Heatmap** — reuses `ui.charts.render_percentile_heatmap`
+  UNCHANGED, rows = Guard/Forward/Center (the player's own bucket prefixed
+  with "→"), columns = the Scheme Fingerprint's decomposed scores. Passes
+  the same DataFrame as both the `pct_df` and `raw_df` arguments — these
+  scores are already 0-100 by construction, so they double as both the
+  color-driving percentile AND the printed raw value with no separate
+  distribution needed.
+- **Dynamic Probability Curve** (`ui.charts.render_probability_band`, NEW
+  chart primitive, same file/style as every other hand-rolled SVG chart
+  here) — a floor/median/ceiling band drawn over the player's own real
+  per-game dot strip this season, not a smooth bell-curve/violin shape
+  (deliberately — a fitted continuous distribution would imply a precision
+  this heuristic doesn't have; a band over real dots reads honestly as "the
+  real spread, adjusted for this matchup").
+
+**Testing**: `tests/test_predictive_analytics.py` (new, 13 test classes/33
+assertions) unit-tests all six metric functions plus the orchestrating
+`build_matchup_advantage_report` with hand-checked synthetic values (not
+just "doesn't crash" — e.g. confirms the exact renormalized score when a
+component is missing, confirms `efficiency_elasticity`'s regression slope
+comes back negative when constructed data shows worse shooting against
+tougher defenses). Also verified with a live `streamlit.testing.v1.AppTest`
+run (this sandbox has real `pandas`/`numpy`/`streamlit` installed for
+testing purposes, unlike some earlier passes in this doc — see this
+section's own verification note below) driving the actual widget tree
+end-to-end: season → player team/player pickers → opponent picker → "Run
+matchup analytics" button → full report render (radar, heatmap, probability
+curve, all four detail expanders, methodology expander) → switching the
+stat selector to Rebounds and re-rendering, all with zero exceptions. Also
+ran the full existing `tests/` suite (48 tests total, all passing) and
+`python3 -m py_compile` across every `.py` file in the repo.
+
+**Verification caveat, same standing discipline as every other pass in this
+doc**: this was NOT run against live CBBD/ESPN data (this sandbox still
+cannot reach those APIs directly — see DATA_SOURCES.md's standing network
+caveat) — the AppTest run above used monkeypatched loader functions
+returning synthetic-but-realistically-shaped data (built via the REAL
+`espn_player_season_stats_for_teams` transform, not hand-typed CBBD-shape
+dicts, to avoid drifting from the real shape). **Before trusting the actual
+numbers this tab produces**: run `streamlit run app.py` for real once live
+API access is available, pick a team/player/opponent you know, and sanity-
+check the Composite Score and its component breakdown against what you'd
+expect — same discipline as every other pass in this file.
+
+---
+
+**Player Compare dumbbell chart, light mode, and a Net Rating cleanup:**
 
 1. **Player Compare's head-to-head delta.** The old plain diverging-color
    table is gone. `ui.charts.render_dumbbell_chart` (new) draws one
@@ -205,14 +329,16 @@ key CSS selector above) - both fixed before this entry was written.
 ---
 
 
-**Status as of this writing: 7 of 7 tabs live with real data** (Player
-Search, Team Efficiency, Rankings, Matchup Analyzer, Live Odds, Player
-Compare, Transfer Portal - NET & Resume and Conference Standings are
-sub-tabs under Rankings, not separate top-level tabs) via
+**Status as of this writing: 8 of 8 tabs live with real data** (Player
+Search, Team Efficiency, Rankings, Matchup Analyzer, Predictive Analytics,
+Live Odds, Player Compare, Transfer Portal - NET & Resume and Conference
+Standings are sub-tabs under Rankings, not separate top-level tabs) via
 CollegeBasketballData.com (free key, configured), ESPN's public endpoints
-(no key), and The Odds API (free key, configured). No PFF-equivalent
-subsystem exists for this app at all — there's no PFF product for college
-basketball.
+(no key), and The Odds API (free key, configured). Predictive Analytics
+(added most recently, see this doc's top entry) is the one tab that adds
+zero new external sources - purely derived math over what the other tabs
+already fetch. No PFF-equivalent subsystem exists for this app at all —
+there's no PFF product for college basketball.
 
 **CORRECTION (doc-drift fix, this pass): this line previously said "10 of
 10 tabs."** Bracketology and Fantasy & Pools, both still described in
