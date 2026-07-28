@@ -65,7 +65,7 @@ from data.transforms import (
 )
 from data.utils import match_player_name, resolve_team_name
 from ui.components import render_coming_soon
-from ui.charts import render_trend_line, render_relative_bars, render_game_script_curve
+from ui.charts import render_trend_line, render_relative_bars, render_game_script_curve, render_efficiency_elasticity_curve
 from ui.styling import df_auto_height, render_responsive_table
 
 _PLAYER_TREND_STATS = [('Points', ''), ('Assists', ''), ('Rebounds', ''), ('Minutes', ''), ('3P%', '%')]
@@ -338,35 +338,31 @@ def _render_player_trend(season, ctx, defense_team=None):
             st.caption("Not enough games yet for a trend.")
 
     if defense_team:
-        _render_efficiency_elasticity_note(mine, defense_team, season)
+        _render_efficiency_elasticity_chart(mine, defense_team, season)
     _render_game_script_curve(mine, team_choice, season)
 
 
-def _render_efficiency_elasticity_note(mine, defense_team, season):
+def _render_efficiency_elasticity_chart(mine, defense_team, season):
     """
     Efficiency Elasticity Curve (data.transforms.efficiency_elasticity) -
-    genuinely useful for analysis (how this player's own shooting
-    efficiency responds to tougher/faster matchups, fit from their real
-    game log) but included quietly as a single caption line rather than
-    its own chart/section/expander, per explicit request. Uses `mine`
-    (this panel's own already-loaded per-game log, same rows the trend
-    charts above just rendered) so no extra game-log fetch is needed -
-    only team_stats_df/eff_ratings_df (both already weekly-cached
-    league-wide pulls shared with the rest of this tab) get loaded here.
+    how this player's own shooting efficiency actually moves against
+    tougher/faster opponents this season, fit from their real game log.
+    Rendered as a real chart (ui.charts.render_efficiency_elasticity_curve)
+    - the tier-mean curve plus tonight's specific opponent highlighted on
+    it - positioned right after the per-stat game-log trend charts above
+    and before the Game-Script curve below. Uses `mine` (this panel's own
+    already-loaded per-game log, same rows the trend charts above just
+    rendered) so no extra game-log fetch is needed - only team_stats_df/
+    eff_ratings_df (both already weekly-cached league-wide pulls shared
+    with the rest of this tab) get loaded here.
     """
     team_stats_df = load_all_team_season_stats(season)
     eff_ratings_df = load_efficiency_ratings(season)
     result = efficiency_elasticity(mine, eff_ratings_df, team_stats_df, defense_team)
-    if not result:
+    if not result or len(result.get('bucket_means') or {}) < 2:
         return
-    bits = [f"**Efficiency Elasticity** ({result['efficiency_label']}): season avg {result['season_avg_eff']:.1f}%"]
-    bucket_means = result.get('bucket_means') or {}
-    weaker, top = bucket_means.get('vs Weaker Defenses'), bucket_means.get('vs Top-Tier Defenses')
-    if weaker and top:
-        bits.append(f"— {weaker['mean']:.1f}% vs weaker D, {top['mean']:.1f}% vs top-tier D")
-    if result.get('projected_eff') is not None:
-        bits.append(f"→ projected **{result['projected_eff']:.1f}%** vs {defense_team} ({result['projected_adjustment']:+.1f} pts, {result['n_games']} games)")
-    st.caption(" ".join(bits))
+    st.markdown(f"_Efficiency ({result['efficiency_label']}) vs. opponent defensive strength — {result['n_games']} games_")
+    render_efficiency_elasticity_curve(result, opponent_team=defense_team)
 
 
 def _render_game_script_curve(mine, team_choice, season):
@@ -419,6 +415,65 @@ def _position_map_for_matchup(matchup_df, season):
     return pos_map
 
 
+_POS_VULN_BUCKETS = ('Guard', 'Forward', 'Center')
+
+
+def _positional_vulnerability_rows(team, season):
+    """
+    Positional Vulnerability Ranking (data.transforms.
+    positional_vulnerability_ranking), shaped for appending onto the
+    BOTTOM of _render_defensive_profile's own bar list, right below the
+    rest of the team's defensive shape - which of this team's Guard/
+    Forward/Center buckets is actually worth targeting, ranked most-
+    exploitable first. Deliberately not gated on picking a player/position
+    first - real positions are often fluid (a listed guard who also plays
+    some forward, etc.), so this shows all three buckets and lets the
+    viewer apply their own judgment about which one actually matches
+    whoever they're scouting.
+
+    Reads the SAME "games to include" slider and load-trigger session_state
+    keys _render_positional_defense's own widgets set (key='ma_pos_defense_
+    window', trigger_key built the identical way) - safe to read here even
+    though those widgets are declared LATER in render()'s Row 2 (this
+    function runs as part of Row 1): Streamlit syncs every widget's current
+    value into st.session_state BEFORE the script body runs at all on any
+    given rerun, so a keyed widget's value is already available from
+    session_state regardless of where in the script it's actually
+    instantiated. _render_positional_defense's button handler calls
+    st.rerun() immediately after setting the trigger flag specifically so
+    this picks up the fresh state on the SAME click, not one interaction
+    later.
+
+    Before that button has ever been clicked (for the current games-cap
+    value), returns three grey/placeholder rows (pct=None -
+    ui.charts.render_relative_bars draws an empty track with no colored
+    fill for a None pct, which is exactly the "grey/transparent before
+    loading" look with no special styling needed). After it's been
+    clicked, fetches the SAME positional matchup data _render_positional_
+    defense itself fetches - a cache hit against load_positional_matchup_
+    data's own already-`@st.cache_data`-decorated inner calls, so this
+    costs no extra CBBD/ESPN fetch, just a second cheap local DataFrame
+    pass - and returns the real ranking rows, relabeled "<Bucket>
+    Vulnerability" so they read clearly sitting among the other stat rows.
+    """
+    recent_games_cap = st.session_state.get('ma_pos_defense_window', 20)
+    trigger_key = f"ma_pos_defense_loaded_{season}_{team}_{recent_games_cap}"
+    if not st.session_state.get(trigger_key, False):
+        return [
+            {
+                'label': f'{bucket} Vulnerability', 'pct': None, 'value_str': 'Not loaded',
+                'help': f'Click "Load positional matchup defense" below (up to {recent_games_cap} most recent games) to populate this.',
+            }
+            for bucket in _POS_VULN_BUCKETS
+        ]
+    matchup_df = load_positional_matchup_data(team, season, max_recent_games=recent_games_cap)
+    if matchup_df.empty:
+        return []
+    pos_map = _position_map_for_matchup(matchup_df, season)
+    summary = positional_defense_summary(matchup_df, pos_map)
+    return [{**row, 'label': f"{row['label']} Vulnerability"} for row in positional_vulnerability_ranking(summary)]
+
+
 def _render_defensive_profile(team, season):
     team_stats = load_all_team_season_stats(season)
     if team_stats.empty:
@@ -434,9 +489,15 @@ def _render_defensive_profile(team, season):
     # defensive_tendency_rows) append onto the SAME bar list - these are
     # team-wide tendency reads, not position-specific (see that function's
     # docstring for why an earlier per-position version of this was
-    # reworked), so they belong here alongside the rest of the team's
-    # overall defensive shape rather than under Positional Matchup Defense.
-    profile_rows = team_defense_profile_rows(team_stats, team) + defensive_tendency_rows(team_stats, team)
+    # reworked). The Positional Vulnerability Ranking (_positional_
+    # vulnerability_rows) appends onto the BOTTOM of this same chart too,
+    # per explicit request - grey/placeholder rows until Positional
+    # Matchup Defense below is actually loaded, real ranking after.
+    profile_rows = (
+        team_defense_profile_rows(team_stats, team)
+        + defensive_tendency_rows(team_stats, team)
+        + _positional_vulnerability_rows(team, season)
+    )
     if profile_rows:
         st.markdown(f"**{team} — defensive profile (vs D-I)**")
         render_relative_bars(profile_rows)
@@ -452,14 +513,19 @@ def _render_positional_defense(team, season):
         help="Lower = fewer CBBD calls (only matters on the fallback) and a more current read; higher = more complete.",
     )
     trigger_key = f"ma_pos_defense_loaded_{season}_{team}_{recent_games_cap}"
-    triggered = st.session_state.get(trigger_key, False)
-    if not triggered:
+    if not st.session_state.get(trigger_key, False):
         if st.button("Load positional matchup defense", key="ma_load_pos_defense"):
             st.session_state[trigger_key] = True
-            triggered = True
-        else:
-            st.info(f"Click above to pull it — free where possible, up to ~{recent_games_cap} CBBD calls otherwise.")
-            return
+            # Immediate rerun (rather than just letting this script pass
+            # continue) so _render_defensive_profile - which renders BEFORE
+            # this function in render()'s Row 1/Row 2 order - picks up the
+            # freshly-set trigger flag on this same click, instead of
+            # needing a second, unrelated interaction to "catch up" (see
+            # _positional_vulnerability_rows' docstring for the full
+            # session_state-timing explanation).
+            st.rerun()
+        st.info(f"Click above to pull it — free where possible, up to ~{recent_games_cap} CBBD calls otherwise.")
+        return
 
     with st.spinner(f"Loading {team}'s opponent game logs..."):
         matchup_df = load_positional_matchup_data(team, season, max_recent_games=recent_games_cap)
@@ -492,19 +558,6 @@ def _render_positional_defense(team, season):
         },
         height=df_auto_height(len(display)),
     )
-
-    # Positional Vulnerability Ranking - which of this team's Guard/
-    # Forward/Center buckets is actually worth targeting, ranked most-
-    # exploitable first (data.transforms.positional_vulnerability_ranking).
-    # Deliberately NOT gated on picking a player/position first - real
-    # positions are often fluid (a listed guard who also plays some
-    # forward, etc.), so this shows all three buckets and lets the viewer
-    # apply their own judgment about which one actually matches whoever
-    # they're scouting, rather than this app guessing for them.
-    ranking_rows = positional_vulnerability_ranking(summary)
-    if ranking_rows:
-        st.markdown(f"**{team} — positional vulnerability ranking**")
-        render_relative_bars(ranking_rows)
 
     # Position-group picker + all three stats for whichever bucket is
     # selected, rather than every bucket's Points-only trend stacked at

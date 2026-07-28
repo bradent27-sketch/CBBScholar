@@ -5,8 +5,123 @@ Sibling app to NFL Scholar (`C:\FantasyF`) and CFB Scholar
 college basketball. This doc follows NFL Scholar's own HANDOFF.md section
 structure on purpose, so all three stay easy to cross-reference.
 
-**Predictive Analytics tab retired, redistributed into Matchup Analyzer
-(this doc's most recent update):**
+**Positional Vulnerability Ranking relocated again, Efficiency Elasticity
+gets a real chart, plus a thorough app-wide review pass (this doc's most
+recent update):**
+
+Two follow-up placement/presentation refinements to the previous pass
+below, requested after using it, plus a full review pass across the app
+looking for bugs/dead code:
+
+1. **Positional Vulnerability Ranking moved from Positional Matchup
+   Defense to the BOTTOM of the Defensive Profile chart** (one row-pair
+   earlier - Row 1 instead of Row 2), with a genuinely new requirement:
+   show grey/placeholder rows there BEFORE "Load positional matchup
+   defense" (Row 2) has been clicked, real ranked values after - not
+   gated behind its own separate load step. New `_positional_vulnerability_rows(team, season)`
+   in `ui/tabs/matchup_analyzer.py` reads `_render_positional_defense`'s
+   OWN "games to include" slider (`key='ma_pos_defense_window'`) and
+   load-trigger (`ma_pos_defense_loaded_{season}_{team}_{games}`) session_state
+   keys directly - safe even though those widgets are declared LATER in
+   `render()`'s script order (Row 1 runs before Row 2), because Streamlit
+   syncs every keyed widget's current value into `st.session_state`
+   BEFORE the script body executes at all on any given rerun. Returns
+   three `{'label': '<Bucket> Vulnerability', 'pct': None, 'value_str':
+   'Not loaded', ...}` placeholder rows pre-load (`ui.charts.
+   render_relative_bars` already draws an empty, colorless track for a
+   `None` pct - exactly the requested "grey/transparent" look, no new
+   styling needed) and the real `positional_vulnerability_ranking` rows
+   (relabeled the same way) post-load, appended onto `_render_defensive_profile`'s
+   existing `profile_rows` list (same merged single chart as the
+   previous pass's Rim Pressure/Perimeter Openness Allowed rows).
+
+   One real timing bug fixed along the way: on the rerun where "Load
+   positional matchup defense" is actually clicked, the button's own
+   handler (in Row 2) sets the trigger flag, but Row 1 - which renders
+   EARLIER in that same script pass - would still see the OLD (pre-click)
+   session_state value and keep showing grey placeholders for one extra,
+   unrelated interaction before "catching up." Fixed by calling
+   `st.rerun()` immediately after setting the trigger flag, forcing an
+   immediate second pass where Row 1 now sees the fresh state - standard
+   Streamlit idiom for this exact "a later widget's click needs to affect
+   an earlier-rendered section on the SAME click" ordering problem.
+   Verified live via AppTest: clicking the button in one step now shows
+   real ranked values in the SAME response, not the next one.
+
+2. **Efficiency Elasticity Curve gets a real chart** - the previous pass's
+   single caption line is gone. New `ui.charts.render_efficiency_elasticity_curve`
+   plots `efficiency_elasticity`'s `bucket_means` (Weaker/Average/Top-Tier
+   defense tiers) at each tier's CENTER percentile on a real 0-100
+   "opponent defensive strength" axis (16.7/50/83.3 - NOT evenly-spaced
+   categorical slots), connected by straight segments (same "real data,
+   not a fabricated smooth fit" honesty as `render_game_script_curve`),
+   with tonight's specific opponent highlighted as a distinct marker at
+   its own exact percentile (`opponent_def_pctl`) showing the projected
+   efficiency (`projected_eff`) - and a dashed season-average reference
+   line. Kept in the EXACT same position as before (`_render_player_trend`,
+   after the last per-stat game-log trend chart, before the Game-Script
+   curve) - only the presentation changed, not the placement or the
+   underlying `efficiency_elasticity` math (unchanged).
+
+**Thorough review pass** (requested explicitly - "determine any glitches,
+imperfections, bugs, straggling unused code"):
+- Grepped the whole repo for stale references to every name removed/
+  renamed across both Predictive-Analytics-era passes (`predictive_analytics`,
+  `scheme_fingerprint`, `rim_foul_leverage_score`, `composite_matchup_advantage`,
+  `matchup_projection_band`, `build_matchup_advantage_report`,
+  `render_probability_band`, `usage_weighted_efficiency`,
+  `_render_efficiency_elasticity_note`, `TAB_PREDICTIVE`) - clean, only
+  historical mentions remain in `tests/test_matchup_analytics.py`'s own
+  docstring explaining what it supersedes.
+- Static unused-import check across `ui/tabs/matchup_analyzer.py` (all 38
+  imported names actually referenced) and a used-anywhere check for every
+  top-level function in `data/transforms.py` (all used) and `ui/charts.py`.
+- **Found, but deliberately NOT removed**: `render_mirror_bars` and
+  `render_game_log_bars` in `ui/charts.py` are unused anywhere in this
+  app's own code - but they predate everything in this doc (present since
+  the initial commit, unrelated to any Predictive-Analytics-era work) and
+  `ui/charts.py`'s own module docstring explicitly documents the file as
+  "byte-identical between CFB Scholar and CBB Scholar... keep it that
+  way" - deleting them here would break that deliberate cross-app parity
+  without being able to confirm CFB Scholar doesn't still use them (no
+  access to that sibling repo from here). Flagged here as a real, honest
+  finding rather than either silently deleting or silently ignoring it -
+  worth a conscious call from whoever CAN check the sibling app.
+- Full `python3 -m py_compile` across every `.py` file in the repo, and a
+  static import-cycle sanity check (`python3 -c "import app"`) - clean.
+- Full unit test suite (36 tests) passing.
+- Live AppTest run covering BOTH states of the ranking transition (grey
+  placeholders before load, real values after, confirming no duplicate
+  ranking section reappears under Positional Matchup Defense) AND the
+  Efficiency Elasticity chart's exact position (after the last game-log
+  trend label, before the Game-Script header) via substring-index
+  ordering checks on the rendered markdown - not just "renders without
+  exploding."
+- **Also verified with a REAL running server this time**, not just
+  AppTest's bare-mode simulation: `streamlit run app.py` + a real headless
+  Chromium (Playwright) screenshot of both Player Search and Matchup
+  Analyzer, checking the browser console for JS errors. Confirmed clean
+  chrome/theme/tab rendering and zero unexpected console errors (the only
+  console noise is Streamlit's own external usage-metrics beacon failing
+  to reach its telemetry endpoint - expected in this sandboxed environment,
+  unrelated to this app's code, present on every Streamlit app boot
+  regardless of what tab code exists). Both tabs correctly show their
+  "NEEDS SETUP" card (no CBBD API key configured in this sandbox) rather
+  than crashing - real content still could not be visually verified this
+  way (no live API access here), which is exactly why the AppTest-with-
+  synthetic-data runs above remain the actual verification for the new
+  features' real behavior.
+
+**Verification caveat, same standing discipline as every pass in this
+doc**: still not run against live CBBD/ESPN data - this sandbox can't
+reach those APIs (see DATA_SOURCES.md). **Before trusting the actual
+numbers**: run `streamlit run app.py` for real once live API access is
+available and sanity-check the new Defensive Profile ranking rows and the
+Efficiency Elasticity chart against a team/player/opponent you know.
+
+---
+
+**Predictive Analytics tab retired, redistributed into Matchup Analyzer:**
 
 The standalone Predictive Analytics tab described in the entry directly
 below this one was walked through in real usage and reworked based on that

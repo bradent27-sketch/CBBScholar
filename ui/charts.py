@@ -966,3 +966,126 @@ def render_game_script_curve(result, height=190):
         )
     parts.append("</svg>")
     st.markdown("".join(parts), unsafe_allow_html=True)
+
+
+# ---------------------------------------------------------------------------
+# Efficiency elasticity curve (efficiency vs. opponent defensive strength,
+# see data.transforms.efficiency_elasticity)
+# ---------------------------------------------------------------------------
+
+_ELASTICITY_TIER_CENTERS = {
+    'vs Weaker Defenses': 16.7, 'vs Average Defenses': 50.0, 'vs Top-Tier Defenses': 83.3,
+}
+_ELASTICITY_TIER_SHORT_LABELS = {
+    'vs Weaker Defenses': 'Weaker D', 'vs Average Defenses': 'Average D', 'vs Top-Tier Defenses': 'Top-Tier D',
+}
+
+
+def render_efficiency_elasticity_curve(result, opponent_team=None, height=210):
+    """
+    Efficiency vs. opponent-defensive-strength curve (`result`: data.
+    transforms.efficiency_elasticity's own return dict). Plots this
+    player's mean efficiency in each defensive-strength tier (bucket_means)
+    at that tier's CENTER percentile on a real 0-100 "opponent defensive
+    strength" axis - not evenly-spaced categorical slots - so tonight's
+    specific opponent can be placed at its own exact percentile
+    (opponent_def_pctl) alongside them, highlighted as a distinct marker
+    showing the projected efficiency (projected_eff) for THIS matchup.
+    Straight segments connect the tier points (same "real data, not a
+    fabricated smooth fit" honesty as render_game_script_curve) - the
+    opponent marker is a separate, visually distinct dot (not folded into
+    that connecting line), since it's a projection, not another observed
+    tier average. A dashed line marks the season average. No-ops if there
+    are fewer than 2 tier points to plot.
+    """
+    tiers = (result or {}).get('bucket_means') or {}
+    points = [
+        (_ELASTICITY_TIER_CENTERS[label], info['mean'], label, info['games'])
+        for label, info in tiers.items() if label in _ELASTICITY_TIER_CENTERS
+    ]
+    if len(points) < 2:
+        return
+    points.sort(key=lambda p: p[0])
+    season_avg = (result or {}).get('season_avg_eff')
+    stat_label = (result or {}).get('efficiency_label', '')
+    opp_x = (result or {}).get('opponent_def_pctl')
+    opp_y = (result or {}).get('projected_eff')
+    has_opp_marker = opp_x is not None and opp_y is not None and pd.notna(opp_x) and pd.notna(opp_y)
+
+    W, H = 860, height
+    ML, MR, MT, MB = 56, 24, 34, 48
+    plot_w, plot_h = W - ML - MR, H - MT - MB
+    y_values = [p[1] for p in points]
+    if season_avg is not None:
+        y_values.append(season_avg)
+    if has_opp_marker:
+        y_values.append(opp_y)
+    v_min, v_max = min(y_values), max(y_values)
+    pad = (v_max - v_min) * 0.3 or 1.0
+    v_min, v_max = max(0.0, v_min - pad), v_max + pad
+
+    def px(x_pct):
+        return ML + plot_w * max(0.0, min(100.0, x_pct)) / 100.0
+
+    def py(v):
+        return MT + plot_h * (1 - (v - v_min) / (v_max - v_min))
+
+    parts = [
+        f"<svg viewBox='0 0 {W} {H}' xmlns='http://www.w3.org/2000/svg' "
+        f"style='width:100%; max-width:{W}px; height:auto; font-family:{_BODY_FONT}; display:block; margin:0 auto;'>"
+    ]
+
+    if season_avg is not None:
+        say = py(season_avg)
+        parts.append(
+            f"<line x1='{ML}' y1='{say:.1f}' x2='{ML + plot_w}' y2='{say:.1f}' stroke='{C['on_surface_variant']}' "
+            f"stroke-width='1.2' stroke-dasharray='4,3'><title>Season average {_esc(stat_label)}: {season_avg:.1f}</title></line>"
+        )
+        parts.append(
+            f"<text x='{ML + plot_w}' y='{say - 6:.1f}' text-anchor='end' font-size='10' "
+            f"fill='{C['on_surface_variant']}'>season avg {season_avg:.1f}</text>"
+        )
+
+    line_pts = " ".join(f"{px(x):.1f},{py(y):.1f}" for x, y, _l, _g in points)
+    parts.append(f"<polyline points='{line_pts}' fill='none' stroke='{C['primary']}' stroke-width='2.4' stroke-linejoin='round'/>")
+    for x, y, label, games in points:
+        cx, cy = px(x), py(y)
+        parts.append(
+            f"<circle class='hz-dot' cx='{cx:.1f}' cy='{cy:.1f}' r='5.5' fill='{C['primary']}' stroke='{C['surface']}' "
+            f"stroke-width='2'><title>{_esc(label)}: {y:.1f} {_esc(stat_label)} ({games} games)</title></circle>"
+        )
+        parts.append(
+            f"<text x='{cx:.1f}' y='{cy - 14:.1f}' text-anchor='middle' font-size='12' font-weight='800' "
+            f"font-family='{_MONO_FONT}' fill='{C['on_surface']}'>{y:.1f}</text>"
+        )
+        parts.append(
+            f"<text x='{cx:.1f}' y='{MT + plot_h + 22:.1f}' text-anchor='middle' font-size='10.5' font-weight='700' "
+            f"fill='{C['on_surface_variant']}'>{_esc(_ELASTICITY_TIER_SHORT_LABELS.get(label, label))}</text>"
+        )
+        parts.append(
+            f"<text x='{cx:.1f}' y='{MT + plot_h + 36:.1f}' text-anchor='middle' font-size='9.5' "
+            f"fill='{C['on_surface_variant']}'>{games}g</text>"
+        )
+
+    if has_opp_marker:
+        ox, oy = px(opp_x), py(opp_y)
+        opp_label = opponent_team or "tonight's opponent"
+        parts.append(
+            f"<line x1='{ox:.1f}' y1='{MT}' x2='{ox:.1f}' y2='{MT + plot_h}' stroke='{C['tertiary']}' "
+            f"stroke-width='1' stroke-dasharray='2,3' opacity='0.6'/>"
+        )
+        parts.append(
+            f"<circle cx='{ox:.1f}' cy='{oy:.1f}' r='7.5' fill='{C['tertiary']}' stroke='{C['surface']}' stroke-width='2'>"
+            f"<title>Projected vs {_esc(opp_label)}: {oy:.1f} {_esc(stat_label)} (opponent defense percentile {opp_x:.0f})</title></circle>"
+        )
+        parts.append(
+            f"<text x='{ox:.1f}' y='{oy - 14:.1f}' text-anchor='middle' font-size='12.5' font-weight='800' "
+            f"font-family='{_MONO_FONT}' fill='{C['tertiary']}'>{oy:.1f}</text>"
+        )
+        parts.append(
+            f"<text x='{ox:.1f}' y='{MT - 12}' text-anchor='middle' font-size='9.5' font-weight='700' "
+            f"letter-spacing='0.03em' fill='{C['tertiary']}'>{_esc(opp_label.upper())}</text>"
+        )
+
+    parts.append("</svg>")
+    st.markdown("".join(parts), unsafe_allow_html=True)
