@@ -18,6 +18,7 @@ blocked. It is NOT used here. See DATA_SOURCES.md for the corrected plan
 """
 import datetime
 import io
+import re
 
 import requests
 import pandas as pd
@@ -315,6 +316,16 @@ def load_espn_teams(season=None):
 ESPN_ROSTER_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/teams/{team_id}/roster"
 
 
+def _leading_int(s):
+    """First integer in a string, e.g. '205 lbs' -> 205. None if `s` isn't
+    a string or has no leading number - used as a fallback when a bare
+    numeric field is absent but its formatted display sibling isn't."""
+    if not isinstance(s, str):
+        return None
+    m = re.match(r'\s*(\d+)', s)
+    return int(m.group(1)) if m else None
+
+
 @st.cache_data(ttl=3600)
 def load_espn_roster(team_espn_id, season=None):
     """
@@ -337,8 +348,12 @@ def load_espn_roster(team_espn_id, season=None):
     jersey, position, height (inches, if present), displayHeight
     (formatted string, e.g. "6'8\"" - preferred for display since it
     sidesteps guessing whether `height` is really inches), weight, city,
-    state, country. Empty DataFrame on any failure or a missing/falsy
-    `team_espn_id`.
+    state, country. weight/city/state/country each try one fallback key
+    (displayWeight parsed for a leading number; a top-level `hometown`
+    dict alongside `birthPlace`) in case ESPN's real NCAAB response
+    diverges from the primary key guessed here - same "confirm against a
+    real payload" caveat as the rest of this function. Empty DataFrame on
+    any failure or a missing/falsy `team_espn_id`.
 
     CORRECTION: this docstring originally claimed sourceId was "the SAME
     id namespace the season box file's athleteSourceId already uses, so
@@ -373,7 +388,10 @@ def load_espn_roster(team_espn_id, season=None):
         if not isinstance(a, dict):
             continue
         pos = a.get('position') or {}
-        birth = a.get('birthPlace') or {}
+        birth = a.get('birthPlace') or a.get('hometown') or {}
+        weight = a.get('weight')
+        if weight in (None, '', 0):
+            weight = _leading_int(a.get('displayWeight'))
         rows.append({
             'sourceId': a.get('id'),
             'name': a.get('displayName') or a.get('fullName'),
@@ -381,7 +399,7 @@ def load_espn_roster(team_espn_id, season=None):
             'position': pos.get('abbreviation') or pos.get('name'),
             'height': a.get('height'),
             'displayHeight': a.get('displayHeight'),
-            'weight': a.get('weight'),
+            'weight': weight,
             'city': birth.get('city'),
             'state': birth.get('state'),
             'country': birth.get('country'),
@@ -784,18 +802,25 @@ def list_cbb_poll_types(season):
 
 def load_latest_poll(season, poll_type='AP Top 25'):
     """Most recent week's rankings for one poll type. Returns
-    (DataFrame, week_number) - week_number is None on failure."""
+    (DataFrame, week_number) - week_number is None on failure.
+
+    Sorted by Points descending, not bare Rank - the poll response also
+    includes unranked teams still receiving votes (null `ranking`, real
+    `points`), and a rank-only sort dumps every one of those at the bottom
+    in arbitrary API order. Points is the real underlying metric a poll
+    ranks teams by in the first place, so sorting by it directly keeps the
+    Top 25 in (very nearly - a poll's exact rank/points relationship can
+    depend on the tiebreak rule) the same order while also correctly
+    ordering the "just missed the cut" teams right after #25, by how many
+    votes they actually got.
+    """
     data = _fetch_rankings_raw(season)
     rows = [r for r in data if r.get('pollType') == poll_type]
     if not rows:
         return pd.DataFrame(), None
     latest_week = max(r.get('week', 0) for r in rows)
     latest_rows = [r for r in rows if r.get('week') == latest_week]
-    # r.get('ranking', 999) alone doesn't help here - .get()'s default only
-    # applies when the KEY is missing, not when it's present but null
-    # (confirmed live: some entries have "ranking": null explicitly), which
-    # crashed this sort comparing None < int. `or 999` catches both cases.
-    latest_rows.sort(key=lambda r: r.get('ranking') or 999)
+    latest_rows.sort(key=lambda r: r.get('points') or 0, reverse=True)
     df = pd.DataFrame([{
         'Rank': r.get('ranking'),
         'Team': r.get('team'),

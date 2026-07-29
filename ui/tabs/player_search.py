@@ -105,8 +105,34 @@ def _fmt_height(inches):
 
 
 def _display_height(row):
+    # `disp or _fmt_height(...)` looks right but isn't: a genuinely-missing
+    # bio field can come back as float('nan') (pandas' missing-value fill)
+    # rather than None once it's passed through a DataFrame column, and
+    # bool(float('nan')) is True - `or` would then keep the NaN instead of
+    # falling through, rendering the literal text "nan". Same fix applied
+    # to weight/hometown below.
     disp = row.get('displayHeight') if hasattr(row, 'get') else None
-    return disp or _fmt_height(row.get('height'))
+    if isinstance(disp, str) and disp.strip():
+        return disp
+    return _fmt_height(row.get('height'))
+
+
+def _display_weight(row):
+    w = row.get('weight') if hasattr(row, 'get') else None
+    try:
+        w = float(w)
+    except (TypeError, ValueError):
+        return '--'
+    return f"{w:.0f} lbs" if w > 0 and not pd.isna(w) else '--'
+
+
+def _display_hometown(row):
+    def _clean(v):
+        return v.strip() if isinstance(v, str) and v.strip() else ''
+    city = _clean(row.get('city') if hasattr(row, 'get') else None)
+    state = _clean(row.get('state') if hasattr(row, 'get') else None)
+    combined = f"{city}, {state}".strip(', ')
+    return combined or '--'
 
 
 def _pct(v):
@@ -235,11 +261,10 @@ def render():
 
     render_team_banner(team, subtitle=f"{bio.get('position') or '?'} #{bio.get('jersey') or '?'}", team_color=colors.get(team))
 
-    hometown = f"{bio.get('city', '')}, {bio.get('state', '')}".strip(', ') if bio.get('city') else '--'
     render_bio_strip([
         ('Height', _display_height(bio)),
-        ('Weight', f"{bio.get('weight')} lbs" if bio.get('weight') else '--'),
-        ('Hometown', hometown or '--'),
+        ('Weight', _display_weight(bio)),
+        ('Hometown', _display_hometown(bio)),
     ])
 
     st.markdown(f"<div class='custom-section-header'>{season - 1}-{str(season)[2:]} SEASON STATS</div>", unsafe_allow_html=True)

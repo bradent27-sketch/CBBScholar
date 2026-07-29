@@ -638,7 +638,7 @@ def inject_theme():
             .sft-wrap {{ max-height: 65vh !important; }}
             .sft-table thead {{ display: none; }}
             .sft-table, .sft-table tbody {{ display: block; width: 100% !important; }}
-            .sft-table tr.sft-row, .sft-table tr.sft-footer-row {{
+            .sft-table tr.sft-row, .sft-table tr.sft-footer-row, .sft-table tr.sft-spacer-row {{
                 display: flex !important;
                 flex-wrap: wrap;
                 gap: 2px 14px;
@@ -649,15 +649,24 @@ def inject_theme():
                 padding: 10px 12px;
                 background: {C['surface_container']};
             }}
+            /* Spacer shares the footer's exact box model (border-top 2px,
+               extra top margin) so it reserves the SAME rendered height as
+               the real footer card on mobile too - see the spacer row's
+               own comment in render_sticky_footer_table for why this
+               reservation exists (the sticky footer/card overlapping the
+               last real row otherwise). It stays invisible (visibility:
+               hidden, set inline on the row) rather than sticky/colored. */
+            .sft-table tr.sft-footer-row, .sft-table tr.sft-spacer-row {{
+                border-top: 2px solid {C['primary']};
+                margin-top: 4px;
+            }}
             .sft-table tr.sft-footer-row {{
                 position: sticky;
                 bottom: 0;
                 border-color: {C['primary']};
-                border-top: 2px solid {C['primary']};
                 background: {C['surface_container_high']};
-                margin-top: 4px;
             }}
-            .sft-table tr.sft-row td, .sft-table tr.sft-footer-row td {{
+            .sft-table tr.sft-row td, .sft-table tr.sft-footer-row td, .sft-table tr.sft-spacer-row td {{
                 display: block !important;
                 position: static !important;
                 flex: 1 1 26%;
@@ -667,7 +676,7 @@ def inject_theme():
                 border: none !important;
                 border-radius: {R['sm']};
             }}
-            .sft-table tr.sft-row td::before, .sft-table tr.sft-footer-row td::before {{
+            .sft-table tr.sft-row td::before, .sft-table tr.sft-footer-row td::before, .sft-table tr.sft-spacer-row td::before {{
                 content: attr(data-label);
                 display: block;
                 font-size: 9px;
@@ -1077,11 +1086,31 @@ def render_sticky_footer_table(df, footer, numeric_cols=None, team_color_map=Non
         for _, row in df.iterrows()
     )
     footer_get = footer.get if hasattr(footer, 'get') else (lambda c: footer[c])
+
+    def _footer_cell_box(c):
+        return f"padding:7px 10px; font-weight:700; white-space:nowrap; text-align:{'right' if c in numeric_cols else 'left'};"
+
     footer_html = "".join(
         f"<td data-label='{html.escape(str(c))}' style='position:sticky; bottom:0; z-index:2; "
-        f"background:{C['surface_container_high']}; border-top:2px solid {C['primary']}; padding:7px 10px; "
-        f"font-weight:700; white-space:nowrap; text-align:{'right' if c in numeric_cols else 'left'};'>"
+        f"background:{C['surface_container_high']}; border-top:2px solid {C['primary']}; {_footer_cell_box(c)}'>"
         f"{_fmt(c, footer_get(c))}</td>"
+        for c in cols
+    )
+    # Invisible spacer row, same box model (padding/font-weight/content) as
+    # the real footer row above, inserted right before it. Without this,
+    # the sticky footer (position:sticky; bottom:0) pins itself to the
+    # bottom of .sft-wrap's viewport as soon as there's ANY scroll - not
+    # just once you reach the true end of the table - because it's the
+    # last row in the same scrolling flow as the body rows, so it paints
+    # over whatever body row(s) currently occupy that same bottom strip
+    # instead of only covering rows once they've genuinely scrolled past.
+    # `visibility:hidden` (not `display:none`) keeps this row's layout box
+    # so it reserves real scroll height equal to the footer's own rendered
+    # height, giving the last real game row room to clear the footer
+    # before scrolling ends - the standard fix for this sticky-footer-in-
+    # a-scroll-container overlap class of bug.
+    spacer_html = "".join(
+        f"<td data-label='{html.escape(str(c))}' style='{_footer_cell_box(c)}'>{_fmt(c, footer_get(c))}</td>"
         for c in cols
     )
     # Per-instance mobile headline-column CSS (which columns visually lead
@@ -1103,7 +1132,9 @@ def render_sticky_footer_table(df, footer, numeric_cols=None, team_color_map=Non
         f"<table class='sft-table' style='width:100%; border-collapse:collapse; font-family:{F['mono']}; "
         f"font-size:12px; color:{C['on_surface']};'>"
         f"<thead><tr>{header_html}</tr></thead>"
-        f"<tbody>{body_html}<tr class='sft-footer-row'>{footer_html}</tr></tbody>"
+        f"<tbody>{body_html}"
+        f"<tr class='sft-spacer-row' aria-hidden='true' style='visibility:hidden;'>{spacer_html}</tr>"
+        f"<tr class='sft-footer-row'>{footer_html}</tr></tbody>"
         f"</table></div>",
         unsafe_allow_html=True,
     )

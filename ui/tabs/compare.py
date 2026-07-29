@@ -26,7 +26,7 @@ from data.loaders import (
 from data.utils import match_player_name, resolve_team_name
 from ui.components import render_coming_soon, render_team_banner, render_bio_strip, render_stat_tiles
 from ui.charts import render_radar
-from ui.tabs.player_search import _fmt_height, _pct, _per_game
+from ui.tabs.player_search import _fmt_height, _display_weight, _pct, _per_game
 
 
 def _player_picker(col, label_prefix, season, teams_list, key_prefix, default_team=None):
@@ -77,7 +77,7 @@ def _render_player_column(col, team, row, colors, stats):
         render_team_banner(team, subtitle=f"{row['position'] or '?'} #{row['jersey'] or '?'}", team_color=colors.get(team))
         render_bio_strip([
             ('Height', _fmt_height(row.get('height'))),
-            ('Weight', f"{row.get('weight')} lbs" if row.get('weight') else '--'),
+            ('Weight', _display_weight(row)),
         ])
         if not stats:
             st.info("No stats recorded yet this season.")

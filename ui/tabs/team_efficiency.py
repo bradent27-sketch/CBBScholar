@@ -6,7 +6,7 @@ import streamlit as st
 
 from config import AVAILABLE_SEASONS
 from data.loaders import current_cbb_season, load_efficiency_ratings, load_all_team_season_stats, team_color_map
-from data.transforms import four_factors_percentile_grid
+from data.transforms import four_factors_percentile_grid, pct_rank
 from ui.components import render_coming_soon, render_hero_tiles
 from ui.charts import render_efficiency_scatter, render_percentile_heatmap
 from ui.styling import df_auto_height, build_column_help_config, render_responsive_table
@@ -94,15 +94,23 @@ def _render_rankings_subtab(df, colors, ranked, season):
     # this only costs a real API call on a cold cache - same cost Four
     # Factors Tiering would already trigger if that sub-tab gets opened.
     team_stats = load_all_team_season_stats(season)
+    pace_pctl = None
     if not team_stats.empty and 'Pace' in team_stats.columns:
         display_df = display_df.merge(team_stats[['Team', 'Pace']], on='Team', how='left')
         display_df = display_df[['Rank', 'Team', 'Conference', 'Pace'] + [
             c for c in display_df.columns if c not in ('Rank', 'Team', 'Conference', 'Pace')
         ]]
+        # A bare tempo number ("68.2") carries little context on its own -
+        # this D-I percentile (same higher_is_better=True "just tracks
+        # where the raw value falls, not a good/bad claim" convention Four
+        # Factors Tiering and Matchup Analyzer's defensive profile already
+        # use for this exact column) drives the same background-tint scale
+        # every other percentile column in this app uses, so a fast/slow
+        # team reads at a glance instead of needing a mental comparison.
+        pace_pctl = [pct_rank(team_stats['Pace'], v) for v in display_df['Pace']]
     # In-table meters: Net and Off ratings scale higher-is-better. Def
-    # Rating and Pace are deliberately left numeric (Def Rating: lower is
-    # better there; Pace: neither direction is "better," just tempo - a
-    # meter would visually imply one end is superior for both).
+    # Rating is deliberately left numeric (lower is better there - a meter
+    # would visually imply the wrong end is superior).
     meter_cols = {}
     for col in ('Net Rating', 'Off Rating'):
         vals = df[col].dropna()
@@ -121,6 +129,7 @@ def _render_rankings_subtab(df, colors, ranked, season):
         "team_efficiency_rankings", display_df, primary_col='Team',
         team_color_map=colors, height=df_auto_height(min(len(display_df), 30)),
         column_config=column_config, hide_index=True,
+        numeric_pct_cols={'Pace': pace_pctl} if pace_pctl is not None else None,
     )
 
 def _render_four_factors_subtab(df, ranked, season):

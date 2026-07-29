@@ -5,6 +5,81 @@ Sibling app to NFL Scholar (`C:\FantasyF`) and CFB Scholar
 college basketball. This doc follows NFL Scholar's own HANDOFF.md section
 structure on purpose, so all three stay easy to cross-reference.
 
+**Four reported bugs/requests fixed: bio fields, game-log sticky-footer
+overlap, Pace coloring, poll sort order (this doc's most recent update):**
+
+1. **Height/Weight/Hometown were blank for every player in Player Search.**
+   Root cause couldn't be 100% confirmed live (this environment's network
+   policy blocks ESPN's API directly, same standing limitation as every
+   other pass in this doc), but a real, demonstrable bug was found and
+   fixed either way: `_display_height`'s `disp or _fmt_height(...)` pattern
+   (and the inline weight/hometown checks next to it in `player_search.py`)
+   breaks when a missing bio field comes back as `float('nan')` rather than
+   `None` - which happens routinely once a value passes through a pandas
+   DataFrame column, since `bool(float('nan'))` is `True` in Python. `or`
+   then keeps the NaN instead of falling through, rendering the literal
+   text "nan" (confirmed with a synthetic mixed-roster DataFrame - see
+   commit). New `_display_height`/`_display_weight`/`_display_hometown`
+   helpers in `player_search.py` (the last two new, reused by
+   `compare.py`'s Weight cell too) type-check before formatting instead of
+   relying on truthiness. Independently, `data.loaders.load_espn_roster`
+   also gained two defensive fallbacks in case ESPN's real NCAAB roster
+   shape diverges from the primary keys this pipeline guesses at: weight
+   falls back to parsing a leading number out of `displayWeight` when the
+   bare `weight` field is absent, and birthplace tries a top-level
+   `hometown` dict alongside `birthPlace`. **Before fully trusting this**:
+   spot-check a real player once live API access is available - same
+   standing caveat as every ESPN-touchpoint in this app.
+2. **Game log's season-average footer row visibly overlapped the last
+   game row.** Root cause: `render_sticky_footer_table`'s footer is
+   `position: sticky; bottom: 0` and is the LAST row in the same scrolling
+   flow as the body rows above it - which means it pins itself to the
+   bottom of `.sft-wrap`'s viewport as soon as there's any scroll at all
+   (not just once you reach the true end), painting over whatever body
+   row currently occupies that same bottom strip. Fixed with the standard
+   technique for this sticky-footer-in-a-scroll-container overlap class of
+   bug: an invisible spacer row (`visibility:hidden`, same padding/content
+   box as the real footer) inserted directly before it, reserving real
+   scroll height equal to the footer's own rendered height so the last
+   real row can fully clear it. Applied on both the desktop table and the
+   mobile card layout (new `.sft-spacer-row` CSS mirrors `.sft-footer-row`
+   in both `@media` contexts). Verified via a direct AppTest render of
+   Player Search's real game log confirming the spacer row is present,
+   precedes the footer row, and the footer's content still reads correctly.
+3. **Pace in Team Efficiency's Rankings table was a bare number with no
+   color.** Added a D-I percentile-driven background tint (`data.transforms
+   .pct_rank`, `higher_is_better=True`) via the existing `numeric_pct_cols`
+   mechanism `render_responsive_table` already offers every other
+   percentile column - same "just tracks where the raw value falls, not a
+   good/bad claim" convention Four Factors Tiering and Matchup Analyzer's
+   defensive profile already use for this exact column (`Pace`'s own
+   comments elsewhere already establish this isn't a new interpretation).
+   Four Factors Tiering's heatmap already had Pace percentile-colored;
+   this brings the Rankings table in line with it.
+4. **NET & Resume's Polls table needed to open sorted by Points**, so
+   teams just outside the Top 25 (unranked but still receiving votes) show
+   up in real order right after #25 instead of the arbitrary API order
+   `load_latest_poll`'s old `ranking or 999` sort left them in (ties all
+   sorted 999, so their relative order was whatever the API happened to
+   return). Changed the sort key to `points` descending directly - the
+   real metric a poll ranks teams by in the first place, so the Top 25
+   stays in (very nearly) the same order while the "just missed it" tail
+   now reads correctly.
+
+Verified: all 36 existing unit tests still pass unmodified, a full
+`python3 -m py_compile` across every changed file, and live AppTest runs
+of `player_search.render()`, `team_efficiency.render()`, and
+`net_resume.render()` against synthetic ESPN/CBBD-shaped data (not just
+"doesn't crash" - inspected the actual rendered HTML/markdown for the real
+bio values with no "nan" leakage, the spacer row's position relative to
+the footer, and `load_latest_poll`'s output order with a deliberately
+scrambled synthetic payload). Same standing caveat as every pass in this
+doc: not run against live CBBD/ESPN data (this environment's network
+policy blocks both directly) - worth a real spot-check once that's
+available, especially item #1 above.
+
+---
+
 **Positional Vulnerability Ranking relocated again, Efficiency Elasticity
 gets a real chart, plus a thorough app-wide review pass (this doc's most
 recent update):**
