@@ -76,7 +76,7 @@ import streamlit as st
 from config import AVAILABLE_SEASONS
 from data.loaders import (
     current_cbb_season, load_espn_teams, load_espn_roster, load_espn_season_player_box_native,
-    load_espn_di_player_stats,
+    load_espn_di_player_stats, load_espn_athlete_bio,
 )
 from data.transforms import last_n_form, player_percentile_rows, espn_player_season_stats_for_teams, espn_player_result_map
 from data.utils import fuzzy_filter_names, match_player_name
@@ -133,6 +133,28 @@ def _display_hometown(row):
     state = _clean(row.get('state') if hasattr(row, 'get') else None)
     combined = f"{city}, {state}".strip(', ')
     return combined or '--'
+
+
+def _bio_strip_values(bio):
+    """(height, weight, hometown) display strings for `bio`, falling back
+    to ESPN's per-athlete core API (data.loaders.load_espn_athlete_bio) for
+    just this one player when the team roster endpoint's own row has NONE
+    of the three - see that function's docstring for why the roster
+    listing alone doesn't always carry this depth. Only fires the extra
+    call when actually needed (roster data already had it, or `bio` has no
+    usable id to look up), so this stays as cheap as the roster-only path
+    for the common case."""
+    height, weight, hometown = _display_height(bio), _display_weight(bio), _display_hometown(bio)
+    if (height, weight, hometown) != ('--', '--', '--'):
+        return height, weight, hometown
+    athlete_id = bio.get('sourceId') if hasattr(bio, 'get') else None
+    if not athlete_id:
+        return height, weight, hometown
+    with st.spinner("Loading bio detail..."):
+        extra = load_espn_athlete_bio(athlete_id)
+    if not extra:
+        return height, weight, hometown
+    return _display_height(extra), _display_weight(extra), _display_hometown(extra)
 
 
 def _pct(v):
@@ -261,10 +283,11 @@ def render():
 
     render_team_banner(team, subtitle=f"{bio.get('position') or '?'} #{bio.get('jersey') or '?'}", team_color=colors.get(team))
 
+    height_str, weight_str, hometown_str = _bio_strip_values(bio)
     render_bio_strip([
-        ('Height', _display_height(bio)),
-        ('Weight', _display_weight(bio)),
-        ('Hometown', _display_hometown(bio)),
+        ('Height', height_str),
+        ('Weight', weight_str),
+        ('Hometown', hometown_str),
     ])
 
     st.markdown(f"<div class='custom-section-header'>{season - 1}-{str(season)[2:]} SEASON STATS</div>", unsafe_allow_html=True)

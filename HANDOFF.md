@@ -5,8 +5,82 @@ Sibling app to NFL Scholar (`C:\FantasyF`) and CFB Scholar
 college basketball. This doc follows NFL Scholar's own HANDOFF.md section
 structure on purpose, so all three stay easy to cross-reference.
 
+**Follow-up: the previous pass's bio-field and game-log-footer fixes were
+real but insufficient - both properly root-caused and fixed this time,
+verified with a real headless-Chromium/Playwright render, not just
+AppTest/string inspection (this doc's most recent update):**
+
+1. **Game log footer, real root cause found**: live DOM measurement
+   (Playwright, real Chromium) proved `position: sticky` was doing NOTHING
+   at all for either the header or footer `<td>`/`<th>` cells - both moved
+   in exact lockstep with scroll at every offset tested, a known browser
+   limitation when `position: sticky` on table cells is combined with
+   `border-collapse: collapse`. The previous pass's invisible spacer row
+   was a fix for the wrong theory (a sticky-overlap that was never actually
+   happening) and didn't address the real bug. **Fixed properly**:
+   `render_sticky_footer_table` no longer uses `position: sticky` anywhere.
+   `<thead>`/`<tbody>`/`<tfoot>` are forced to `display: block` (each
+   `<tr>` re-asserts `display: table` for its own cells) and the scrolling
+   itself moves onto `<tbody>` alone (`overflow-y: auto`) - `<thead>`/
+   `<tfoot>` are then simply never part of the scrolling region at all, so
+   there's no CSS trick that can fail; confirmed live that their bounding
+   boxes are byte-identical before and after scrolling `<tbody>` to its
+   max. Column alignment across the now-independent thead/tbody/tfoot
+   needs an explicit, identical width per column (auto-layout can't
+   produce consistent widths once each section is its own layout context)
+   - new `_col_width_px` sizes each column from its header label and
+     longest actual formatted value (the table's font is monospace, so
+   character count is a reliable proxy for width), applied via a real
+   per-instance `<style>` block keyed on the existing `data-label`
+   attribute rather than inline styles, so it can't fight the mobile
+   card layout's own `!important` rules. Verified live: zero pixel drift
+   between header/body/footer column edges, at every scroll position.
+   One regression caught and fixed in the same pass by actually rendering
+   it (not just reading the diff): reusing one cell-building helper for
+   both header and data cells initially ran the header's own LABEL text
+   through the same numeric formatter data cells use, printing "--" for
+   every numeric column's header instead of its name.
+2. **Bio fields, a real second cause found**: the previous pass's
+   NaN-truthy display bug was real and is still fixed, but on its own it
+   only changed what a missing value renders AS (clean "--" instead of
+   literal "nan") - it didn't address why the value was missing in the
+   first place, which is why the report didn't change from a user's
+   perspective. Investigated further: hoopR (SportsDataverse's own R
+   package for men's college basketball - the same project family this
+   app's season box file already comes from) fetches full athlete bio via
+   a more detailed ESPN endpoint than the plain team-roster listing
+   `load_espn_roster` calls, suggesting that simpler listing may return a
+   slimmer athlete object in practice than this pipeline assumed. **Fixed**:
+   new `data.loaders.load_espn_athlete_bio(athlete_id)` calls ESPN's core
+   API per-athlete endpoint (`sports.core.api.espn.com/.../athletes/{id}`)
+   for bio detail, used as a fallback ONLY for the one player being viewed
+   and ONLY when the roster-level row has none of height/weight/hometown
+   (`ui.tabs.player_search._bio_strip_values`) - never a bulk per-team
+   fetch, and deliberately not the same failure mode as the previously-
+   confirmed load_espn_roster-vs-box-file id mismatch (that was a cross-
+   VENDOR mismatch; this fallback stays within ESPN's own id space, using
+   the exact same `sourceId` load_espn_roster already returns). Verified
+   live end-to-end with a real render() pass simulating a roster row with
+   no bio fields at all, confirming the fallback fetch fires and the real
+   value renders - plus the already-good-data path confirmed to skip the
+   extra call entirely (stays as cheap as before when the roster data is
+   already complete).
+
+**Still not independently live-verified against real CBBD/ESPN traffic**
+(this environment's network policy blocks both directly, same standing
+caveat as every pass in this doc) - the ESPN-core-API-fallback theory
+above is reasoned from a real, independent third-party implementation
+(hoopR) rather than a cold guess, but it's still a theory, not a confirmed
+fact about ESPN's actual current response shape. If height/weight/hometown
+are STILL blank after this, the next step is almost certainly getting a
+real captured payload from `load_espn_roster`'s actual live response (a
+temporary debug log of the raw JSON on one real request would settle this
+definitively) rather than reasoning about it further from this sandbox.
+
+---
+
 **Four reported bugs/requests fixed: bio fields, game-log sticky-footer
-overlap, Pace coloring, poll sort order (this doc's most recent update):**
+overlap, Pace coloring, poll sort order:**
 
 1. **Height/Weight/Hometown were blank for every player in Player Search.**
    Root cause couldn't be 100% confirmed live (this environment's network

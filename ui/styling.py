@@ -626,19 +626,28 @@ def inject_theme():
                that function now emits); every column stays present, just
                reflowed into a labeled grid.
 
-               .sft-wrap's max-height (set inline, in px, per-call) was tuned
-               for compact TABLE ROWS (~35px each) - a card is 3-5x taller, so
-               reusing that same px cap here would clip cards mid-content
-               (confirmed live: a 300px cap tuned for ~8 rows only fit about
-               half of one card). Override with a viewport-relative height
-               instead of a fixed px value so it scales sanely across phone
-               sizes, while still keeping the sticky-footer-in-a-scroll-box
-               behavior (an unbounded height would break `position: sticky`'s
-               "stick to the bottom of ITS scrolling ancestor" meaning). */
-            .sft-wrap {{ max-height: 65vh !important; }}
-            .sft-table thead {{ display: none; }}
-            .sft-table, .sft-table tbody {{ display: block; width: 100% !important; }}
-            .sft-table tr.sft-row, .sft-table tr.sft-footer-row, .sft-table tr.sft-spacer-row {{
+               Desktop scrolls `<tbody>` alone (`overflow-y:auto` set inline,
+               with `<thead>`/`<tfoot>` as non-scrolling siblings above/below
+               it - see render_sticky_footer_table's docstring for why: a
+               position:sticky-based footer/header turned out not to work at
+               all here, confirmed live). Mobile's card stack doesn't need
+               that split at all - one `<div class='sft-outer'>` scrolling
+               everything together reads perfectly fine as a vertical list,
+               so `<tbody>`'s own inline max-height/overflow-y is reset here
+               and the OUTER container becomes the one scroll box instead, at
+               a viewport-relative height (a card is 3-5x taller than a
+               table row, so reusing the desktop px height here clipped
+               cards mid-content - confirmed live before this fix existed). */
+            .sft-outer {{ max-height: 65vh !important; overflow-y: auto !important; }}
+            .sft-scrollx {{ overflow-x: visible !important; }}
+            .sft-table thead {{ display: none !important; }}
+            .sft-table, .sft-table tbody, .sft-table tfoot {{
+                display: block !important;
+                width: 100% !important;
+                max-height: none !important;
+                overflow-y: visible !important;
+            }}
+            .sft-table tr.sft-row, .sft-table tr.sft-footer-row {{
                 display: flex !important;
                 flex-wrap: wrap;
                 gap: 2px 14px;
@@ -649,34 +658,26 @@ def inject_theme():
                 padding: 10px 12px;
                 background: {C['surface_container']};
             }}
-            /* Spacer shares the footer's exact box model (border-top 2px,
-               extra top margin) so it reserves the SAME rendered height as
-               the real footer card on mobile too - see the spacer row's
-               own comment in render_sticky_footer_table for why this
-               reservation exists (the sticky footer/card overlapping the
-               last real row otherwise). It stays invisible (visibility:
-               hidden, set inline on the row) rather than sticky/colored. */
-            .sft-table tr.sft-footer-row, .sft-table tr.sft-spacer-row {{
+            .sft-table tr.sft-footer-row {{
                 border-top: 2px solid {C['primary']};
                 margin-top: 4px;
-            }}
-            .sft-table tr.sft-footer-row {{
-                position: sticky;
-                bottom: 0;
                 border-color: {C['primary']};
                 background: {C['surface_container_high']};
             }}
-            .sft-table tr.sft-row td, .sft-table tr.sft-footer-row td, .sft-table tr.sft-spacer-row td {{
+            .sft-table tr.sft-row td, .sft-table tr.sft-footer-row td {{
                 display: block !important;
                 position: static !important;
                 flex: 1 1 26%;
+                width: auto !important;
+                min-width: 0 !important;
+                max-width: none !important;
                 padding: 2px 4px !important;
                 white-space: normal !important;
                 text-align: left !important;
                 border: none !important;
                 border-radius: {R['sm']};
             }}
-            .sft-table tr.sft-row td::before, .sft-table tr.sft-footer-row td::before, .sft-table tr.sft-spacer-row td::before {{
+            .sft-table tr.sft-row td::before, .sft-table tr.sft-footer-row td::before {{
                 content: attr(data-label);
                 display: block;
                 font-size: 9px;
@@ -994,45 +995,71 @@ def render_sticky_footer_table(df, footer, numeric_cols=None, team_color_map=Non
                                 opponent_col=None, win_loss_col=None, height=360,
                                 mobile_headline_cols=None):
     """
-    Hand-rolled scrollable HTML table with a CSS `position: sticky` FOOTER
-    row (a season-average row, in practice) that stays visible at the
-    bottom of the scroll area no matter how far you've scrolled through the
-    rows above it. st.dataframe/glide-data-grid has no row-pinning API at
-    all (only COLUMN pinning via column_config) - confirmed no such option
-    exists in this Streamlit version - so two stacked st.dataframe widgets
-    (a game log + a separate "average row" table, CSS-seamed to look like
-    one) was the earlier approach here, but that's still two independent
-    canvas grids under the hood: each has its own horizontal scroll state,
-    so scrolling one sideways doesn't move the other and the illusion
-    breaks - which is exactly the "still reads as two disjointed tables"
-    complaint this replaces. Same "real platform limitation → hand-roll it"
-    call this app already made for its SVG charts (see ui/charts.py's
-    module docstring) - here the limitation is row-pinning, not charting.
+    Hand-rolled scrollable HTML table with a season-average FOOTER row that
+    stays genuinely visible below the scroll area no matter how far you've
+    scrolled through the rows above it. st.dataframe/glide-data-grid has no
+    row-pinning API at all (only COLUMN pinning via column_config) -
+    confirmed no such option exists in this Streamlit version - so two
+    stacked st.dataframe widgets (a game log + a separate "average row"
+    table, CSS-seamed to look like one) was an earlier approach here, but
+    that's still two independent canvas grids under the hood: each has its
+    own horizontal scroll state, so scrolling one sideways doesn't move the
+    other and the illusion breaks.
+
+    CORRECTION: an earlier version of this function used `position: sticky`
+    on the header/footer `<td>`/`<th>` cells. Live-confirmed (Playwright,
+    real Chromium, not just reading the code) that this does NOT work at
+    all here: `position: sticky` on table cells is unreliable across
+    browsers specifically when the table also has `border-collapse:
+    collapse` (a long-documented CSS interaction gap), and directly
+    measuring header/footer position at several scroll offsets showed both
+    moving in exact lockstep with scroll - i.e. no sticky effect
+    whatsoever, just an ordinary last/first row a user could scroll past
+    entirely, with an invisible spacer row (a prior, still-wrong fix aimed
+    at a sticky-overlap theory that never applied) sitting oddly between
+    the last real row and the footer. Replaced with a technique that
+    doesn't depend on `position: sticky` at all: `<thead>`/`<tbody>`/
+    `<tfoot>` are forced to `display: block` (each `<tr>` inside re-asserts
+    `display: table` so its own cells still lay out as a row), and the
+    SCROLLING itself is moved onto `<tbody>` alone (`overflow-y: auto`,
+    `max-height`) - `<thead>`/`<tfoot>` are then simply never part of the
+    scrolling region at all, so there's no positioning trick that can fail;
+    they're just always-rendered siblings above/below the scrollable body.
+    Horizontal scrolling (this table has more columns than fit most
+    viewports) still happens once, at the outer wrapping div, moving
+    `<thead>`/`<tbody>`/`<tfoot>` together in lockstep.
+
+    Column alignment across the three now-independent sections requires an
+    explicit, identical width per column on every cell in all three
+    (auto/content-based table layout can't produce consistent widths once
+    each section is its own layout context) - `_col_width_px` below sizes
+    each column from its header label and actual longest formatted value
+    (this font is monospace, so character count is a reliable proxy for
+    rendered width), applied via a real, per-instance `<style>` block keyed
+    on each column's own `data-label` attribute (already used for mobile's
+    card labels) rather than inline styles, so the existing mobile media
+    query's `!important` card layout can still cleanly override it below
+    768px without a specificity fight.
 
     `df`: the body rows, already in display order (NOT sorted here - a
     sortable interactive grid isn't the point of this table, a durable
-    scroll-anchored summary row is, and re-sorting would fight that).
+    footer row is, and re-sorting would fight that).
     `footer`: a single-row dict/Series of the SAME columns as `df`, always
-    rendered pinned at the bottom. `numeric_cols`: which columns right-align
-    + get numeric decimal formatting (auto-detected from `df` if omitted).
-    `team_color_map`/`opponent_col`/`win_loss_col`: same semantics as
-    style_plain_dataframe, applied to `df`'s rows only - the footer row
-    gets its own fixed highlighted treatment instead (it isn't a real
-    per-game Opponent/Result, so team/W-L tinting doesn't apply to it).
+    rendered below the scrollable body. `numeric_cols`: which columns
+    right-align + get numeric decimal formatting (auto-detected from `df`
+    if omitted). `team_color_map`/`opponent_col`/`win_loss_col`: same
+    semantics as style_plain_dataframe, applied to `df`'s rows only - the
+    footer row gets its own fixed highlighted treatment instead (it isn't a
+    real per-game Opponent/Result, so team/W-L tinting doesn't apply).
 
-    Mobile (<=767px): since this is real DOM (not st.dataframe's canvas),
-    a CSS-only "row becomes a card" transform is possible here and lives in
+    Mobile (<=767px): a CSS-only "row becomes a card" transform lives in
     ui.styling.inject_theme()'s `.sft-table` media-query block - every
     `<td>` gets a `data-label` attribute (its column name) so the mobile
     CSS can render a label above each value via `content: attr(data-label)`
     without any Python-side layout logic. `mobile_headline_cols`: which
     columns should visually lead each mobile card (larger, promoted to the
-    top via CSS `order` - DOM order is untouched, only visual order changes)
-    - defaults to the first 4 columns of `df` if not given, a reasonable
-    "identity fields first" fallback for any future caller of this
-    already-generic function. The footer row gets its own `sft-footer-row`
-    class so it becomes a distinct summary card on mobile instead of just
-    another row.
+    top via CSS `order` - DOM order is untouched, only visual order
+    changes) - defaults to the first 4 columns of `df` if not given.
     """
     if df is None or df.empty:
         return
@@ -1057,85 +1084,106 @@ def render_sticky_footer_table(df, footer, numeric_cols=None, team_color_map=Non
             return '--' if pd.isna(v) else f"{v:.{decimals.get(col, 1)}f}"
         return '' if value is None or (isinstance(value, float) and pd.isna(value)) else html.escape(str(value))
 
-    def _row_cell(col, value):
-        text = _fmt(col, value)
+    footer_get = footer.get if hasattr(footer, 'get') else (lambda c: footer[c])
+
+    def _col_width_px(col):
+        """Widest of the header label and every actual formatted value in
+        this column, converted from character count to px (this table's
+        font is monospace, so that conversion is reliable) - explicit,
+        content-aware desktop column widths so thead/tbody/tfoot (three
+        independent layout contexts once each is forced to display:block -
+        see this function's docstring) render the same column at the same
+        width in all three, instead of each auto-sizing independently."""
+        values = [str(col)] + [_fmt(col, v) for v in df[col]] + [_fmt(col, footer_get(col))]
+        longest = max(len(v) for v in values)
+        return max(56, round(longest * 7.4) + 28)
+
+    col_widths = {c: _col_width_px(c) for c in cols}
+    total_width = sum(col_widths.values())
+
+    def _row_style(extra=""):
+        return f"display:table; table-layout:fixed; width:{total_width}px; {extra}"
+
+    def _row_cell(col, value, tag='td', extra_style="", raw_text=None):
+        # `raw_text` bypasses _fmt entirely - needed for header cells, whose
+        # "value" is the column's own NAME, not a data value: running a
+        # numeric column's literal name (e.g. "Minutes") through _fmt's
+        # numeric coercion would coerce it to NaN and print "--" instead of
+        # the label (a real regression caught by rendering this for real -
+        # see this function's docstring on why that verification matters).
+        text = raw_text if raw_text is not None else _fmt(col, value)
         align = "text-align:right;" if col in numeric_cols else ""
-        style = f"padding:6px 10px; white-space:nowrap; {align}"
+        style = f"padding:6px 10px; white-space:nowrap; width:{col_widths[col]}px; {align} {extra_style}"
+        label = html.escape(str(col))
+        return f"<{tag} data-label='{label}' style='{style}'>{text}</{tag}>"
+
+    def _body_row_cell(col, value):
+        style = ""
         if opponent_col and col == opponent_col:
             c = _team_color(value)
             if c:
-                style += f"background:{c}66; color:#ffffff; font-weight:600;"
+                style = f"background:{c}66; color:#ffffff; font-weight:600;"
         elif win_loss_col and col == win_loss_col:
             v = str(value).strip().upper()
             if v == 'W':
-                style += f"background:{C['positive']}2e; color:{C['positive']}; font-weight:800;"
+                style = f"background:{C['positive']}2e; color:{C['positive']}; font-weight:800;"
             elif v == 'L':
-                style += f"background:{C['negative']}2e; color:{C['negative']}; font-weight:800;"
-        label = html.escape(str(col))
-        return f"<td data-label='{label}' style='{style}'>{text}</td>"
+                style = f"background:{C['negative']}2e; color:{C['negative']}; font-weight:800;"
+        return _row_cell(col, value, extra_style=style)
 
     header_html = "".join(
-        f"<th style='position:sticky; top:0; z-index:2; background:{C['surface_container_high']}; "
-        f"color:{C['on_surface_variant']}; font-size:10.5px; font-weight:700; text-transform:uppercase; "
-        f"letter-spacing:0.05em; padding:8px 10px; text-align:{'right' if c in numeric_cols else 'left'}; "
-        f"border-bottom:1px solid {C['outline_variant']}; white-space:nowrap;'>{html.escape(str(c))}</th>"
+        _row_cell(
+            c, None, tag='th', raw_text=html.escape(str(c)),
+            extra_style=(
+                f"background:{C['surface_container_high']}; color:{C['on_surface_variant']}; font-size:10.5px; "
+                f"font-weight:700; text-transform:uppercase; letter-spacing:0.05em; padding:8px 10px; "
+                f"border-bottom:1px solid {C['outline_variant']};"
+            ),
+        )
         for c in cols
     )
     body_html = "".join(
-        f"<tr class='sft-row'>{''.join(_row_cell(c, row[c]) for c in cols)}</tr>"
+        f"<tr class='sft-row' style='{_row_style()}'>{''.join(_body_row_cell(c, row[c]) for c in cols)}</tr>"
         for _, row in df.iterrows()
     )
-    footer_get = footer.get if hasattr(footer, 'get') else (lambda c: footer[c])
-
-    def _footer_cell_box(c):
-        return f"padding:7px 10px; font-weight:700; white-space:nowrap; text-align:{'right' if c in numeric_cols else 'left'};"
-
     footer_html = "".join(
-        f"<td data-label='{html.escape(str(c))}' style='position:sticky; bottom:0; z-index:2; "
-        f"background:{C['surface_container_high']}; border-top:2px solid {C['primary']}; {_footer_cell_box(c)}'>"
-        f"{_fmt(c, footer_get(c))}</td>"
+        _row_cell(
+            c, footer_get(c),
+            extra_style=f"background:{C['surface_container_high']}; border-top:2px solid {C['primary']}; font-weight:700;",
+        )
         for c in cols
     )
-    # Invisible spacer row, same box model (padding/font-weight/content) as
-    # the real footer row above, inserted right before it. Without this,
-    # the sticky footer (position:sticky; bottom:0) pins itself to the
-    # bottom of .sft-wrap's viewport as soon as there's ANY scroll - not
-    # just once you reach the true end of the table - because it's the
-    # last row in the same scrolling flow as the body rows, so it paints
-    # over whatever body row(s) currently occupy that same bottom strip
-    # instead of only covering rows once they've genuinely scrolled past.
-    # `visibility:hidden` (not `display:none`) keeps this row's layout box
-    # so it reserves real scroll height equal to the footer's own rendered
-    # height, giving the last real game row room to clear the footer
-    # before scrolling ends - the standard fix for this sticky-footer-in-
-    # a-scroll-container overlap class of bug.
-    spacer_html = "".join(
-        f"<td data-label='{html.escape(str(c))}' style='{_footer_cell_box(c)}'>{_fmt(c, footer_get(c))}</td>"
-        for c in cols
+    # Per-column desktop width (see _col_width_px) + per-instance mobile
+    # headline-column CSS (which columns visually lead each card), both
+    # keyed off each cell's own `data-label` attribute rather than inline
+    # styles - scoped to their own media queries so the >=768px width rule
+    # and the <=767px card-layout rule never fight over specificity (the
+    # mobile block's existing `!important` continues to win below 768px
+    # exactly as before; this just adds an equally explicit desktop rule
+    # instead of leaning on inline styles that `!important` would have had
+    # to fight for the same properties).
+    width_css = "".join(
+        f"@media (min-width: 768px) {{ [data-label='{html.escape(str(c))}'] {{ width:{w}px !important; min-width:{w}px; max-width:{w}px; }} }}"
+        for c, w in col_widths.items()
     )
-    # Per-instance mobile headline-column CSS (which columns visually lead
-    # each card) - scoped to a media query so it never affects desktop's
-    # table-cell layout, and kept per-call (not in the shared inject_theme()
-    # block) since `headline_cols` varies by caller/dataset. Safe with a
-    # single caller today (Player Search's game log); a second caller with
-    # different headline columns for the SAME data-label names would need
-    # its own scoping if that ever comes up - not a real risk yet.
     headline_css = "".join(f"td[data-label='{html.escape(str(c))}']," for c in headline_cols).rstrip(',')
     mobile_instance_css = (
         f"@media (max-width: 767px) {{ {headline_css} {{ order: -1; font-weight: 700; font-size: 13px; flex-basis: 46%; }} }}"
         if headline_css else ""
     )
     st.markdown(
-        f"<div class='sft-wrap' style='max-height:{height}px; overflow:auto; border:1px solid {C['outline_variant']}; "
-        f"border-radius:{R['sm']}; background:{C['surface_container']};'>"
-        f"<style>.sft-row:hover td {{ background:rgba({_hex_to_rgb_str(C['primary'])}, 0.06); }} {mobile_instance_css}</style>"
-        f"<table class='sft-table' style='width:100%; border-collapse:collapse; font-family:{F['mono']}; "
-        f"font-size:12px; color:{C['on_surface']};'>"
-        f"<thead><tr>{header_html}</tr></thead>"
-        f"<tbody>{body_html}"
-        f"<tr class='sft-spacer-row' aria-hidden='true' style='visibility:hidden;'>{spacer_html}</tr>"
-        f"<tr class='sft-footer-row'>{footer_html}</tr></tbody>"
-        f"</table></div>",
+        f"<div class='sft-outer' style='border:1px solid {C['outline_variant']}; border-radius:{R['sm']}; "
+        f"overflow:hidden; background:{C['surface_container']};'>"
+        f"<style>.sft-row:hover td {{ background:rgba({_hex_to_rgb_str(C['primary'])}, 0.06); }} {width_css} {mobile_instance_css}</style>"
+        f"<div class='sft-scrollx' style='overflow-x:auto;'>"
+        f"<table class='sft-table' style='border-collapse:collapse; table-layout:fixed; width:{total_width}px; "
+        f"font-family:{F['mono']}; font-size:12px; color:{C['on_surface']};'>"
+        f"<thead style='display:block; width:{total_width}px;'><tr style='{_row_style()}'>{header_html}</tr></thead>"
+        f"<tbody style='display:block; width:{total_width}px; max-height:{height}px; overflow-y:auto;'>{body_html}</tbody>"
+        f"<tfoot style='display:block; width:{total_width}px;'>"
+        f"<tr class='sft-footer-row' style='{_row_style()}'>{footer_html}</tr>"
+        f"</tfoot>"
+        f"</table></div></div>",
         unsafe_allow_html=True,
     )
 

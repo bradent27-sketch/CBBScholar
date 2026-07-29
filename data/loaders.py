@@ -407,6 +407,62 @@ def load_espn_roster(team_espn_id, season=None):
     return pd.DataFrame(rows)
 
 
+ESPN_ATHLETE_BIO_URL = "https://sports.core.api.espn.com/v2/sports/basketball/leagues/mens-college-basketball/athletes/{athlete_id}"
+
+
+@st.cache_data(ttl=86400)
+def load_espn_athlete_bio(athlete_id):
+    """
+    Full bio detail for ONE athlete via ESPN's core API - a fallback for
+    when load_espn_roster's own row for this player comes back without
+    height/weight/birthplace. Real-world evidence this gap exists: hoopR
+    (SportsDataverse's own R package for this exact sport - the same
+    family of project this app's season box file already comes from)
+    fetches full athlete bio via a comparably detailed endpoint rather than
+    the plain team-roster listing load_espn_roster calls, suggesting the
+    simpler site-API roster endpoint may return a slimmer athlete object in
+    practice than the assumption load_espn_roster was built on. Deliberately
+    scoped to ONE player, called lazily only when the cheaper roster-level
+    data is actually missing it - never a bulk per-team fetch, both because
+    it's unnecessary when the roster data already has it and because this
+    app has one already-confirmed CROSS-VENDOR id mismatch (load_espn_roster's
+    sourceId vs. the box file's athleteSourceId - see that function's
+    docstring); this stays within ESPN's own id space (the same `id` this
+    endpoint is queried by IS load_espn_roster's own sourceId - both are
+    ESPN's own athlete id, not a third party's independently-derived one),
+    so that specific failure mode doesn't apply here.
+
+    Returns a dict (not a DataFrame - one record): height, displayHeight,
+    weight, city, state, country. Empty dict on any failure, non-dict
+    response, or a missing/falsy athlete_id - never raises.
+    """
+    if not athlete_id:
+        return {}
+    try:
+        resp = requests.get(
+            ESPN_ATHLETE_BIO_URL.format(athlete_id=athlete_id),
+            params={'lang': 'en', 'region': 'us'}, timeout=10,
+        )
+        resp.raise_for_status()
+        a = resp.json()
+    except Exception:
+        return {}
+    if not isinstance(a, dict):
+        return {}
+    birth = a.get('birthPlace') or a.get('hometown') or {}
+    weight = a.get('weight')
+    if weight in (None, '', 0):
+        weight = _leading_int(a.get('displayWeight'))
+    return {
+        'height': a.get('height'),
+        'displayHeight': a.get('displayHeight'),
+        'weight': weight,
+        'city': birth.get('city'),
+        'state': birth.get('state'),
+        'country': birth.get('country'),
+    }
+
+
 # ==========================================
 # CollegeBasketballData.com (cbbd) - verified live with a real key before
 # any of the loaders below were written; field names are exact.
