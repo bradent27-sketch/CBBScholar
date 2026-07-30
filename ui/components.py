@@ -11,6 +11,19 @@ from config import THEME
 
 C = THEME['colors']
 F = THEME['fonts']
+# Sanitized (single quotes -> double quotes) font-family strings for
+# embedding inside a single-quoted inline HTML `style='...'` attribute -
+# THEME['fonts'] values are themselves single-quoted (e.g. "'Inter',
+# sans-serif"), and splicing that raw into a `style='...'` attribute
+# prematurely closes the attribute at the font name's own opening quote,
+# silently dropping every declaration after it. Real, confirmed bug
+# (Playwright): render_header's title and render_bio_strip/render_metric_
+# tiles' value text had all been silently falling back to Streamlit's
+# default font/size instead of this app's own display/mono styling, for
+# their entire history - same fix ui.charts already established for its
+# own inline SVG styles (_BODY_FONT/_MONO_FONT).
+_DISPLAY_FONT_SAFE = F['display'].replace("'", '"')
+_MONO_FONT_SAFE = F['mono'].replace("'", '"')
 
 
 def render_header():
@@ -18,7 +31,7 @@ def render_header():
         f"<div style='display:flex; align-items:center; gap:12px; margin-top:0;'>"
         f"<div style='font-size:30px; line-height:1;'>🏀</div>"
         f"<div>"
-        f"<div style='font-family:{F['display']}; font-size:21px; font-weight:800; letter-spacing:-0.02em; line-height:1.05; color:{C['on_surface']};'>"
+        f"<div style='font-family:{_DISPLAY_FONT_SAFE}; font-size:21px; font-weight:800; letter-spacing:-0.02em; line-height:1.05; color:{C['on_surface']};'>"
         f"CBB <span style='color:{C['primary']};'>SCHOLAR</span></div>"
         f"<div style='font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.14em; color:{C['on_surface_variant']}; margin-top:1px;'>"
         f"College Basketball Analytics &amp; Matchup Intelligence</div>"
@@ -125,7 +138,7 @@ def render_bio_strip(fields):
         cells.append(
             f"<div class='bio-cell' style='flex:1; background:{C['surface_container']}; text-align:center; padding:10px 6px;'>"
             f"<div style='font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:0.08em; color:{C['on_surface_variant']};'>{label}</div>"
-            f"<div style='font-family:{F['mono']}; font-size:18px; font-weight:600; color:{C['on_surface']}; margin-top:2px;'>{value}</div>"
+            f"<div style='font-family:{_MONO_FONT_SAFE}; font-size:18px; font-weight:600; color:{C['on_surface']}; margin-top:2px;'>{value}</div>"
             f"</div>"
         )
     st.markdown(
@@ -186,7 +199,7 @@ def render_metric_tiles(entries):
         tiles.append(
             f"<div class='stat-tile'><div class='t-label' title='{label}'>{label}</div>"
             f"<div class='t-value'>{value}</div>"
-            f"<div style='font-family:{F['mono']}; font-size:11px; font-weight:700; color:{color}; margin-top:4px;'>{delta}</div>"
+            f"<div style='font-family:{_MONO_FONT_SAFE}; font-size:11px; font-weight:700; color:{color}; margin-top:4px;'>{delta}</div>"
             f"</div>"
         )
     st.markdown(f"<div class='stat-tile-grid'>{''.join(tiles)}</div>", unsafe_allow_html=True)

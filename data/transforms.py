@@ -862,22 +862,28 @@ def defensive_tendency_rows(team_stats_df, team):
     return rows
 
 
-def efficiency_elasticity(player_games, eff_ratings_df, team_stats_df, opponent_team, min_games=5):
+def stat_elasticity(player_games, eff_ratings_df, team_stats_df, opponent_team, stat_col='Points', min_games=5):
     """
-    Metric 2 - Efficiency Elasticity Curve.
+    Metric 2 - <Stat> Elasticity Curve.
 
-    Fits how a player's own scoring efficiency moves as a function of
-    opponent defensive strength and pace, purely from their own game log
-    this season - a straight-line fit over already-played games, no
-    external model and no play-by-play. For each game with a resolvable
-    opponent:
-      - game efficiency: True Shooting % (Points / (2*(FGA + 0.44*FTA)) *
-        100) when that game log carries a free-throw split, else effective
-        FG% ((FGM + 0.5*3PM) / FGA * 100) as a documented fallback - CBBD's
-        per-game log (data.loaders.load_player_game_logs) has no FTA/FTM
-        columns, only the ESPN-native box file does (see data.loaders.
-        _fetch_espn_season_box_raw_cached), so which formula applies
-        depends entirely on which source produced `player_games`.
+    Fits how a player's own per-game production in `stat_col` (Points,
+    Rebounds, or Assists - any raw counting column already present on
+    `player_games`) moves as a function of opponent defensive strength and
+    pace, purely from their own game log this season - a straight-line fit
+    over already-played games, no external model and no play-by-play.
+
+    CORRECTION: this was originally a fixed "Efficiency Elasticity Curve"
+    that always derived True Shooting % (or effective FG% as a fallback
+    when the game log had no free-throw split) instead of taking a raw
+    stat directly - replaced on request with a caller-chosen raw counting
+    stat instead, since a shooting-efficiency abstraction is less directly
+    useful for matchup/prop prep than seeing the actual counting stat
+    (Points/Rebounds/Assists) move against tougher defenses. The TS%/eFG%
+    derivation is gone entirely, not just hidden behind a default - see
+    ui.tabs.matchup_analyzer's stat picker, the only caller.
+
+    For each game with a resolvable opponent:
+      - game value: `stat_col`, taken directly (no derivation).
       - opponent quality: that game's Opponent resolved against
         eff_ratings_df/team_stats_df (both D-I-wide, CBBD-sourced), then
         Def Rating percentile (LOWER Def Rating assumed better defense -
@@ -885,21 +891,21 @@ def efficiency_elasticity(player_games, eff_ratings_df, team_stats_df, opponent_
         AdjD - not independently confirmed against CBBD's own docs; see
         HANDOFF.md's standing network-access caveat) and Pace percentile.
     A simple least-squares line (numpy.polyfit, degree 1) is fit for
-    efficiency vs. defense percentile and efficiency vs. pace percentile
-    across every resolvable game - the slope is directly "efficiency points
-    gained or lost per percentile-point of opponent quality/pace," not a
-    black box. That defense-percentile slope is then applied to project an
-    efficiency adjustment for THIS specific opponent, relative to the
-    percentile of defense this player has faced on average this season.
+    `stat_col` vs. defense percentile and vs. pace percentile across every
+    resolvable game - the slope is directly "stat points gained or lost
+    per percentile-point of opponent quality/pace," not a black box. That
+    defense-percentile slope is then applied to project an adjustment for
+    THIS specific opponent, relative to the percentile of defense this
+    player has faced on average this season.
 
     Requires at least `min_games` games with a resolvable opponent AND a
-    computable efficiency value; returns {} otherwise (a 2-3 game fit is
-    too noisy for a slope to mean anything).
+    numeric `stat_col` value; returns {} otherwise (a 2-3 game fit is too
+    noisy for a slope to mean anything).
     """
     if player_games is None or player_games.empty or team_stats_df is None or team_stats_df.empty \
             or eff_ratings_df is None or eff_ratings_df.empty:
         return {}
-    if 'Opponent' not in player_games.columns or 'FGA' not in player_games.columns or 'Points' not in player_games.columns:
+    if 'Opponent' not in player_games.columns or stat_col not in player_games.columns:
         return {}
     canonical = team_stats_df['Team'].dropna().tolist()
     work = player_games.copy()
@@ -908,21 +914,8 @@ def efficiency_elasticity(player_games, eff_ratings_df, team_stats_df, opponent_
     if work.empty:
         return {}
 
-    fga = pd.to_numeric(work['FGA'], errors='coerce')
-    pts = pd.to_numeric(work['Points'], errors='coerce')
-    has_fta = 'FTA' in work.columns and pd.to_numeric(work['FTA'], errors='coerce').notna().any()
-    if has_fta:
-        fta = pd.to_numeric(work['FTA'], errors='coerce').fillna(0)
-        denom = 2 * (fga + 0.44 * fta)
-        work['_eff'] = (pts / denom.where(denom > 0)) * 100
-        efficiency_label = 'TS%'
-    elif 'FGM' in work.columns:
-        fgm = pd.to_numeric(work['FGM'], errors='coerce')
-        tpm = pd.to_numeric(work['3PM'], errors='coerce').fillna(0) if '3PM' in work.columns else 0
-        work['_eff'] = ((fgm + 0.5 * tpm) / fga.where(fga > 0)) * 100
-        efficiency_label = 'eFG%'
-    else:
-        return {}
+    efficiency_label = stat_col
+    work['_eff'] = pd.to_numeric(work[stat_col], errors='coerce')
     work = work.replace([np.inf, -np.inf], np.nan).dropna(subset=['_eff'])
     if work.empty:
         return {}

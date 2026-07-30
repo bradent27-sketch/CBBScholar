@@ -539,7 +539,25 @@ def render_relative_bars(rows):
     """
     if not rows:
         return
-    W, ROW_H, LABEL_W, VAL_W = 860, 32, 108, 60
+    W, ROW_H = 860, 32
+    # LABEL_W/VAL_W sized to the actual longest label/value in THIS call's
+    # rows, not fixed constants - fixed widths (kept here as floors,
+    # unchanged for every existing short-label/short-value call site)
+    # clipped longer content clean off the chart's edges once later passes
+    # started using longer text than this function was originally sized
+    # for: labels like "Perimeter Openness Allowed"/"Forward Vulnerability"
+    # off the LEFT edge (text-anchor='end' grows leftward from LABEL_W, so
+    # anything wider than the reserved column lands at a negative x -
+    # outside the SVG viewBox entirely, not merely covered by something),
+    # and value strings like "11th pctl"/"-0.4 pts" right at (and, at a
+    # narrower column width, past) the RIGHT edge, same underlying cause on
+    # the other side of the same row. ~7px/char (body font) and ~7.4px/char
+    # (mono font, slightly wider per character) are safe estimates for
+    # this row's 11.5px bold label text and 12px value text respectively.
+    longest_label = max((len(str(r.get('label', ''))) for r in rows), default=0)
+    longest_value = max((len(str(r.get('value_str', '--'))) for r in rows), default=0)
+    LABEL_W = max(108, min(230, round(longest_label * 7) + 20))
+    VAL_W = max(60, min(100, round(longest_value * 7.4) + 20))
     track_w = W - LABEL_W - VAL_W - 16
     H = ROW_H * len(rows) + 10
     parts = [
@@ -969,8 +987,8 @@ def render_game_script_curve(result, height=190):
 
 
 # ---------------------------------------------------------------------------
-# Efficiency elasticity curve (efficiency vs. opponent defensive strength,
-# see data.transforms.efficiency_elasticity)
+# Stat elasticity curve (a chosen per-game stat vs. opponent defensive
+# strength, see data.transforms.stat_elasticity)
 # ---------------------------------------------------------------------------
 
 _ELASTICITY_TIER_CENTERS = {
@@ -981,12 +999,16 @@ _ELASTICITY_TIER_SHORT_LABELS = {
 }
 
 
-def render_efficiency_elasticity_curve(result, opponent_team=None, height=210):
+def render_stat_elasticity_curve(result, opponent_team=None, height=210):
     """
-    Efficiency vs. opponent-defensive-strength curve (`result`: data.
-    transforms.efficiency_elasticity's own return dict). Plots this
-    player's mean efficiency in each defensive-strength tier (bucket_means)
-    at that tier's CENTER percentile on a real 0-100 "opponent defensive
+    Chosen stat vs. opponent-defensive-strength curve (`result`: data.
+    transforms.stat_elasticity's own return dict - any raw counting stat,
+    e.g. Points/Rebounds/Assists, not just the shooting-efficiency numbers
+    this chart originally always plotted; this function is entirely stat-
+    agnostic either way, unchanged by the rename - it just prints whatever
+    `efficiency_label` the caller put in `result`). Plots this player's
+    mean value in each defensive-strength tier (bucket_means) at that
+    tier's CENTER percentile on a real 0-100 "opponent defensive
     strength" axis - not evenly-spaced categorical slots - so tonight's
     specific opponent can be placed at its own exact percentile
     (opponent_def_pctl) alongside them, highlighted as a distinct marker

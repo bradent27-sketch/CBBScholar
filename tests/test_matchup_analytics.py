@@ -1,11 +1,13 @@
 """
 Unit tests for Matchup Analyzer's deeper predictive-layer functions in
 data.transforms: positional_vulnerability_ranking, defensive_tendency_rows,
-efficiency_elasticity, and the reworked (3-tier) game_script_sensitivity.
-Every function under test is pure local compute over plain DataFrames -
-no loaders, no Streamlit, no network - so these are synthetic-data tests
-with hand-checkable expected values, same style as the rest of this
-tests/ directory.
+stat_elasticity (renamed from efficiency_elasticity when it was
+generalized from a fixed TS%/eFG% derivation to a caller-chosen raw stat -
+see that function's own CORRECTION note), and the reworked (3-tier)
+game_script_sensitivity. Every function under test is pure local compute
+over plain DataFrames - no loaders, no Streamlit, no network - so these
+are synthetic-data tests with hand-checkable expected values, same style
+as the rest of this tests/ directory.
 
 This supersedes the earlier tests/test_predictive_analytics.py, written
 for the standalone Predictive Analytics tab (scheme_fingerprint,
@@ -93,7 +95,7 @@ class DefensiveTendencyRowsTests(unittest.TestCase):
         self.assertIn('Perimeter Openness Allowed', labels)
 
 
-class EfficiencyElasticityTests(unittest.TestCase):
+class StatElasticityTests(unittest.TestCase):
     def _eff_ratings_df(self):
         return pd.DataFrame([
             {'Team': 'Elite D', 'Def Rating': 90}, {'Team': 'Mid D', 'Def Rating': 100}, {'Team': 'Weak D', 'Def Rating': 110},
@@ -106,28 +108,43 @@ class EfficiencyElasticityTests(unittest.TestCase):
 
     def _player_games(self):
         rows = [
-            {'Opponent': 'Weak D', 'Points': 30, 'FGA': 20, 'FTA': 4},
-            {'Opponent': 'Weak D', 'Points': 28, 'FGA': 20, 'FTA': 2},
-            {'Opponent': 'Mid D', 'Points': 22, 'FGA': 20, 'FTA': 3},
-            {'Opponent': 'Mid D', 'Points': 24, 'FGA': 22, 'FTA': 2},
-            {'Opponent': 'Elite D', 'Points': 16, 'FGA': 20, 'FTA': 2},
-            {'Opponent': 'Elite D', 'Points': 18, 'FGA': 22, 'FTA': 1},
+            {'Opponent': 'Weak D', 'Points': 30, 'Rebounds': 12, 'FGA': 20, 'FTA': 4},
+            {'Opponent': 'Weak D', 'Points': 28, 'Rebounds': 11, 'FGA': 20, 'FTA': 2},
+            {'Opponent': 'Mid D', 'Points': 22, 'Rebounds': 9, 'FGA': 20, 'FTA': 3},
+            {'Opponent': 'Mid D', 'Points': 24, 'Rebounds': 10, 'FGA': 22, 'FTA': 2},
+            {'Opponent': 'Elite D', 'Points': 16, 'Rebounds': 6, 'FGA': 20, 'FTA': 2},
+            {'Opponent': 'Elite D', 'Points': 18, 'Rebounds': 7, 'FGA': 22, 'FTA': 1},
         ]
         return pd.DataFrame(rows)
 
     def test_negative_slope_against_tougher_defenses(self):
-        result = transforms.efficiency_elasticity(self._player_games(), self._eff_ratings_df(), self._team_stats_df(), 'Mid D')
-        self.assertEqual(result['efficiency_label'], 'TS%')
+        result = transforms.stat_elasticity(self._player_games(), self._eff_ratings_df(), self._team_stats_df(), 'Mid D', stat_col='Points')
+        self.assertEqual(result['efficiency_label'], 'Points')
         self.assertEqual(result['n_games'], 6)
         self.assertLess(result['slope_vs_defense'], 0)
         self.assertGreater(result['bucket_means']['vs Weaker Defenses']['mean'], result['bucket_means']['vs Top-Tier Defenses']['mean'])
 
+    def test_defaults_to_points_when_stat_col_omitted(self):
+        result = transforms.stat_elasticity(self._player_games(), self._eff_ratings_df(), self._team_stats_df(), 'Mid D')
+        self.assertEqual(result['efficiency_label'], 'Points')
+
+    def test_rebounds_stat_col_uses_raw_rebounds_not_a_derived_efficiency(self):
+        result = transforms.stat_elasticity(self._player_games(), self._eff_ratings_df(), self._team_stats_df(), 'Mid D', stat_col='Rebounds')
+        self.assertEqual(result['efficiency_label'], 'Rebounds')
+        self.assertAlmostEqual(result['season_avg_eff'], (12 + 11 + 9 + 10 + 6 + 7) / 6, places=1)
+
+    def test_missing_stat_col_returns_empty(self):
+        self.assertEqual(
+            transforms.stat_elasticity(self._player_games(), self._eff_ratings_df(), self._team_stats_df(), 'Mid D', stat_col='Assists'),
+            {},
+        )
+
     def test_insufficient_games_returns_empty(self):
         games = self._player_games().head(3)
-        self.assertEqual(transforms.efficiency_elasticity(games, self._eff_ratings_df(), self._team_stats_df(), 'Mid D', min_games=5), {})
+        self.assertEqual(transforms.stat_elasticity(games, self._eff_ratings_df(), self._team_stats_df(), 'Mid D', min_games=5), {})
 
     def test_empty_inputs_return_empty(self):
-        self.assertEqual(transforms.efficiency_elasticity(pd.DataFrame(), self._eff_ratings_df(), self._team_stats_df(), 'Mid D'), {})
+        self.assertEqual(transforms.stat_elasticity(pd.DataFrame(), self._eff_ratings_df(), self._team_stats_df(), 'Mid D'), {})
 
 
 class GameScriptSensitivityTests(unittest.TestCase):

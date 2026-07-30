@@ -61,11 +61,11 @@ from data.transforms import (
     player_percentile_rows, player_trend_series, team_defense_profile_rows,
     espn_player_season_stats_for_teams, last_n_form_deltas,
     positional_vulnerability_ranking, defensive_tendency_rows,
-    efficiency_elasticity, game_script_sensitivity,
+    stat_elasticity, game_script_sensitivity,
 )
 from data.utils import match_player_name, resolve_team_name
 from ui.components import render_coming_soon
-from ui.charts import render_trend_line, render_relative_bars, render_game_script_curve, render_efficiency_elasticity_curve
+from ui.charts import render_trend_line, render_relative_bars, render_game_script_curve, render_stat_elasticity_curve
 from ui.styling import df_auto_height, render_responsive_table
 
 _PLAYER_TREND_STATS = [('Points', ''), ('Assists', ''), ('Rebounds', ''), ('Minutes', ''), ('3P%', '%')]
@@ -338,31 +338,43 @@ def _render_player_trend(season, ctx, defense_team=None):
             st.caption("Not enough games yet for a trend.")
 
     if defense_team:
-        _render_efficiency_elasticity_chart(mine, defense_team, season)
+        _render_stat_elasticity_chart(mine, defense_team, season)
     _render_game_script_curve(mine, team_choice, season)
 
 
-def _render_efficiency_elasticity_chart(mine, defense_team, season):
+_ELASTICITY_STAT_OPTIONS = ('Points', 'Rebounds', 'Assists')
+
+
+def _render_stat_elasticity_chart(mine, defense_team, season):
     """
-    Efficiency Elasticity Curve (data.transforms.efficiency_elasticity) -
-    how this player's own shooting efficiency actually moves against
-    tougher/faster opponents this season, fit from their real game log.
-    Rendered as a real chart (ui.charts.render_efficiency_elasticity_curve)
-    - the tier-mean curve plus tonight's specific opponent highlighted on
-    it - positioned right after the per-stat game-log trend charts above
-    and before the Game-Script curve below. Uses `mine` (this panel's own
-    already-loaded per-game log, same rows the trend charts above just
-    rendered) so no extra game-log fetch is needed - only team_stats_df/
-    eff_ratings_df (both already weekly-cached league-wide pulls shared
-    with the rest of this tab) get loaded here.
+    <Stat> Elasticity Curve (data.transforms.stat_elasticity) - how this
+    player's own per-game production in a chosen stat actually moves
+    against tougher/faster opponents this season, fit from their real game
+    log. A "Stat" picker (Points/Rebounds/Assists) lets the viewer choose
+    which - replaced the old fixed TS%/eFG% "efficiency" framing on
+    request (a raw counting stat is more directly useful for matchup/prop
+    prep than a shooting-efficiency abstraction; see data.transforms.
+    stat_elasticity's own CORRECTION note). Rendered as a real chart
+    (ui.charts.render_stat_elasticity_curve) - the tier-mean curve plus
+    tonight's specific opponent highlighted on it - positioned right after
+    the per-stat game-log trend charts above and before the Game-Script
+    curve below. Uses `mine` (this panel's own already-loaded per-game
+    log, same rows the trend charts above just rendered) so no extra
+    game-log fetch is needed - only team_stats_df/eff_ratings_df (both
+    already weekly-cached league-wide pulls shared with the rest of this
+    tab) get loaded here.
     """
+    stat_col = st.selectbox(
+        "Stat", _ELASTICITY_STAT_OPTIONS, key="ma_elasticity_stat",
+        help="Which per-game stat to plot against opponent defensive strength.",
+    )
     team_stats_df = load_all_team_season_stats(season)
     eff_ratings_df = load_efficiency_ratings(season)
-    result = efficiency_elasticity(mine, eff_ratings_df, team_stats_df, defense_team)
+    result = stat_elasticity(mine, eff_ratings_df, team_stats_df, defense_team, stat_col=stat_col)
     if not result or len(result.get('bucket_means') or {}) < 2:
         return
-    st.markdown(f"_Efficiency ({result['efficiency_label']}) vs. opponent defensive strength — {result['n_games']} games_")
-    render_efficiency_elasticity_curve(result, opponent_team=defense_team)
+    st.markdown(f"_{result['efficiency_label']} vs. opponent defensive strength — {result['n_games']} games_")
+    render_stat_elasticity_curve(result, opponent_team=defense_team)
 
 
 def _render_game_script_curve(mine, team_choice, season):

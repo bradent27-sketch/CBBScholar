@@ -26,6 +26,21 @@ F = THEME['fonts']
 R = THEME['radius']
 S = THEME['spacing']
 
+# Sanitized (single quotes -> double quotes) font-family string for
+# embedding inside a single-quoted inline HTML `style='...'` attribute -
+# THEME['fonts'] values are themselves single-quoted (e.g. "'JetBrains
+# Mono', monospace"), and splicing that raw into a `style='...'` attribute
+# prematurely closes the attribute at the font name's own opening quote,
+# silently dropping every declaration after it in that same style string.
+# Real, confirmed bug (Playwright): render_sticky_footer_table's <table>
+# had been rendering in Streamlit's default 16px Source Sans instead of
+# the intended 12px JetBrains Mono for this table's entire history, which
+# also meant its own column-width math was sized for the wrong font. Same
+# fix ui.charts already established for its inline SVG styles
+# (_BODY_FONT/_MONO_FONT) - not shared cross-module since it's a one-line,
+# self-contained sanitization.
+_MONO_FONT_SAFE = F['mono'].replace("'", '"')
+
 # Precomputed once (CONFERENCE_COLORS is static, not live/per-season data) -
 # normalized + alias-expanded so 'ACC', 'Atlantic Coast Conference', and any
 # other spelling a source emits all resolve to the same color. Same "exact
@@ -1087,16 +1102,58 @@ def render_sticky_footer_table(df, footer, numeric_cols=None, team_color_map=Non
     footer_get = footer.get if hasattr(footer, 'get') else (lambda c: footer[c])
 
     def _col_width_px(col):
-        """Widest of the header label and every actual formatted value in
-        this column, converted from character count to px (this table's
-        font is monospace, so that conversion is reliable) - explicit,
-        content-aware desktop column widths so thead/tbody/tfoot (three
-        independent layout contexts once each is forced to display:block -
-        see this function's docstring) render the same column at the same
-        width in all three, instead of each auto-sizing independently."""
-        values = [str(col)] + [_fmt(col, v) for v in df[col]] + [_fmt(col, footer_get(col))]
+        """Widest of the header label and every actual BODY value in this
+        column (deliberately NOT the footer's own value - see below),
+        converted from character count to px - explicit, content-aware
+        desktop column widths so thead/tbody/tfoot (three independent
+        layout contexts once each is forced to display:block - see this
+        function's docstring) render the same column at the same width in
+        all three, instead of each auto-sizing independently.
+
+        7.2px/char is not a guess - it's this table's real, measured
+        JetBrains Mono-at-12px advance width (Playwright + canvas
+        measureText against a live render, exactly 7.200px for every
+        sample string tried, as expected for a true monospace font where
+        every character has an identical width). +16 covers the cell's own
+        real 14px horizontal padding (`padding:6px 7px`) plus a small 2px
+        rounding cushion - both numbers replace an earlier, looser guess
+        (7.4px/char + 28px, against 10px/side padding) made before a
+        separate bug (see `_MONO_FONT_SAFE`'s own docstring at this
+        module's top) was found and fixed: this table had actually been
+        rendering in Streamlit's default 16px Source Sans the whole time,
+        not the 12px JetBrains Mono this width math assumed, so the
+        original guess was measuring against the wrong font's metrics
+        without knowing it. Padding itself also went from 10px/side to
+        7px/side on request (the table was "just slightly too wide" in
+        real use, allowing an unwanted horizontal scrollbar) - a pure
+        spacing tighten, no column's displayed text changes.
+
+        Excluding the footer's own value matters in practice: its
+        Opponent-column text ("SEASON AVG (28 games)", in Player Search's
+        actual call site) is routinely LONGER than every real opponent
+        name in the column, so measuring it widened that one column (and
+        therefore the whole table's total width) enough to force an
+        unwanted horizontal scrollbar on every render, not just the rare
+        one with a genuinely long team name. The footer cell still gets
+        the SAME column width as the body (see _row_cell) - if its own
+        text doesn't fit, `text-overflow:ellipsis` truncates it instead of
+        stretching the column to accommodate a value real per-game rows
+        never need room for.
+
+        Capped at 130px (same ellipsis truncation as the footer case
+        above) for the same reason, applied a level further: Opponent is
+        real per-game DATA, not a one-off summary string, but a genuinely
+        long team name is still rare enough that sizing the WHOLE column -
+        and therefore the table's total width, on every render - to fit
+        every possible name in full isn't worth the horizontal-scroll
+        trade-off (the actual complaint this fix responds to). A capped,
+        occasionally-truncated Opponent cell (full name still on hover,
+        via `title`) beats a table that needs sideways scrolling on every
+        single visit.
+        """
+        values = [str(col)] + [_fmt(col, v) for v in df[col]]
         longest = max(len(v) for v in values)
-        return max(56, round(longest * 7.4) + 28)
+        return max(50, min(130, round(longest * 7.2) + 16))
 
     col_widths = {c: _col_width_px(c) for c in cols}
     total_width = sum(col_widths.values())
@@ -1113,9 +1170,21 @@ def render_sticky_footer_table(df, footer, numeric_cols=None, team_color_map=Non
         # see this function's docstring on why that verification matters).
         text = raw_text if raw_text is not None else _fmt(col, value)
         align = "text-align:right;" if col in numeric_cols else ""
-        style = f"padding:6px 10px; white-space:nowrap; width:{col_widths[col]}px; {align} {extra_style}"
+        # overflow/text-overflow: the column's own width is sized to real
+        # body data (see _col_width_px) - a value wider than that (in
+        # practice, only the footer's own longer summary text) truncates
+        # with an ellipsis instead of stretching the column or spilling
+        # into the next cell.
+        style = (
+            f"padding:6px 7px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; "
+            f"width:{col_widths[col]}px; max-width:{col_widths[col]}px; {align} {extra_style}"
+        )
         label = html.escape(str(col))
-        return f"<{tag} data-label='{label}' style='{style}'>{text}</{tag}>"
+        # `text` is already HTML-escaped where it needs to be (_fmt escapes
+        # non-numeric values; raw_text callers pass pre-escaped text too) -
+        # reusing it as-is for `title` (not re-escaping) avoids double-
+        # escaping something like "Texas A&M" into "Texas A&amp;M".
+        return f"<{tag} data-label='{label}' style='{style}' title='{text}'>{text}</{tag}>"
 
     def _body_row_cell(col, value):
         style = ""
@@ -1177,7 +1246,7 @@ def render_sticky_footer_table(df, footer, numeric_cols=None, team_color_map=Non
         f"<style>.sft-row:hover td {{ background:rgba({_hex_to_rgb_str(C['primary'])}, 0.06); }} {width_css} {mobile_instance_css}</style>"
         f"<div class='sft-scrollx' style='overflow-x:auto;'>"
         f"<table class='sft-table' style='border-collapse:collapse; table-layout:fixed; width:{total_width}px; "
-        f"font-family:{F['mono']}; font-size:12px; color:{C['on_surface']};'>"
+        f"font-family:{_MONO_FONT_SAFE}; font-size:12px; color:{C['on_surface']};'>"
         f"<thead style='display:block; width:{total_width}px;'><tr style='{_row_style()}'>{header_html}</tr></thead>"
         f"<tbody style='display:block; width:{total_width}px; max-height:{height}px; overflow-y:auto;'>{body_html}</tbody>"
         f"<tfoot style='display:block; width:{total_width}px;'>"

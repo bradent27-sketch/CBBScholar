@@ -5,6 +5,86 @@ Sibling app to NFL Scholar (`C:\FantasyF`) and CFB Scholar
 college basketball. This doc follows NFL Scholar's own HANDOFF.md section
 structure on purpose, so all three stay easy to cross-reference.
 
+**Game log width, a real pre-existing font bug found along the way, cut-off
+chart labels, and a Matchup Analyzer stat picker (this doc's most recent
+update):**
+
+1. **Game log's horizontal scroll.** Root cause was actually two stacked
+   issues, both in `ui.styling.render_sticky_footer_table`. First: the
+   Opponent column's width was being computed from the FOOTER's own
+   "SEASON AVG (28 games)" text, which is routinely longer than any real
+   opponent name - excluded the footer value from `_col_width_px`'s
+   measurement entirely (the footer cell still gets the column's real
+   width; `text-overflow:ellipsis` handles it gracefully if it doesn't
+   fit). Second, bigger find while re-measuring: this table's `<table
+   style='...font-family:{F['mono']}...'>` has a real, pre-existing bug
+   (present since before any pass in this doc touched the file) -
+   `THEME['fonts']` values are themselves single-quoted strings (`"'Jet
+   Brains Mono', monospace"`), and splicing that raw into a single-quoted
+   HTML `style='...'` attribute prematurely closes the attribute at the
+   font name's own opening quote, silently dropping every declaration
+   after it. Confirmed live (Playwright `getComputedStyle`): this table
+   had been rendering in Streamlit's default 16px Source Sans the whole
+   time, not the intended 12px JetBrains Mono - which also meant the
+   width math was calibrated against the wrong font's metrics without
+   knowing it. Same bug found and fixed in `ui.components.render_header`/
+   `render_bio_strip`/`render_metric_tiles` (all three had the identical
+   pattern). Fixed everywhere via a sanitized (double-quoted)
+   `_MONO_FONT_SAFE`/`_DISPLAY_FONT_SAFE`-style constant - the exact
+   pattern `ui.charts` already used correctly for its own inline SVG
+   styles, just never applied to these. With the real font confirmed,
+   `_col_width_px`'s character-width constant was recalibrated from a
+   guessed 7.4px/char to a measured-live 7.2px/char (JetBrains Mono at
+   12px - exact, not approximate, since monospace fonts have one advance
+   width per size). Cell padding also went from 10px/side to 7px/side
+   (pure spacing, no column's displayed text changes) and any single
+   column is now capped at 130px with ellipsis truncation for genuine
+   outliers, so one long value can't blow up the whole table's width.
+   Net effect verified live: 1183px -> 1009px total table width; zero
+   horizontal scroll at 1440px+ browser width (the vast majority of real
+   usage), still scrolls only on notably narrow (~1280px) windows.
+2. **Matchup Analyzer's defensive-profile chart had labels clipped off
+   the left edge** ("Rim Pressure Allowed" -> "Pressure Allowed", etc.) -
+   `ui.charts.render_relative_bars` used a fixed 108px label column sized
+   for this app's original short stat names (Pace, eFG% Allowed, ...);
+   labels added in later passes (Rim Pressure/Perimeter Openness Allowed,
+   Forward/Center/Guard Vulnerability) are longer, and since labels are
+   drawn `text-anchor='end'` (growing leftward from that fixed width),
+   anything wider than the column lands at a negative x - outside the SVG
+   viewBox entirely. Same latent issue found on the RIGHT side too
+   (VAL_W's fixed 60px was right at the edge of clipping newer value
+   formats like "11th pctl"). Both are now sized to the actual longest
+   label/value in each call's own rows (floors match the old fixed
+   widths exactly, so every existing short-label call site - Player
+   Search's stat bars, Matchup Analyzer's tendency profile - is
+   byte-for-byte unchanged). Verified live: zero clipped text at a
+   realistic half-column viewport width, confirmed via real text
+   bounding-box measurements, not just a screenshot.
+3. **Matchup Analyzer's elasticity curve now lets you pick the stat.**
+   `data.transforms.efficiency_elasticity` (always derived True Shooting %,
+   or effective FG% as a fallback) is renamed `stat_elasticity` and takes
+   a `stat_col` param instead - the TS%/eFG% derivation is gone entirely,
+   not just hidden behind a default, per explicit request ("get rid of
+   the TS%... isn't as relevant"). `ui.tabs.matchup_analyzer` adds a
+   "Stat" dropdown (Points/Rebounds/Assists, defaulting to Points) right
+   above the chart; `ui.charts.render_efficiency_elasticity_curve` is
+   renamed `render_stat_elasticity_curve` (pure rename - it was already
+   completely stat-agnostic internally). Verified live end-to-end
+   (Playwright): switching the dropdown between all three options
+   correctly updates both the chart title and the plotted data.
+
+**Verification**: full unit suite (39 tests, 6 new/updated for the
+`stat_elasticity` rename) passing, a full repo-wide `py_compile` sweep,
+and every fix above confirmed with a real headless-Chromium Playwright
+render against synthetic data shaped like this app's real loader outputs
+- not just AppTest/string inspection, per the standing discipline this
+doc has converged on after two earlier passes in this same session shipped
+fixes that turned out to be real but insufficient (see the entries
+directly below this one).
+
+---
+
+
 **Bio fields: real root cause found via git archaeology, not more guessing
 (this doc's most recent update)** - reported still broken after the
 previous two passes (a NaN-truthy display fix, then an ESPN-core-API
