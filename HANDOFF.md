@@ -5,9 +5,73 @@ Sibling app to NFL Scholar (`C:\FantasyF`) and CFB Scholar
 college basketball. This doc follows NFL Scholar's own HANDOFF.md section
 structure on purpose, so all three stay easy to cross-reference.
 
-**Game log width, a real pre-existing font bug found along the way, cut-off
-chart labels, and a Matchup Analyzer stat picker (this doc's most recent
+**Game log table's width math fixed for real this time, and Matchup
+Analyzer's two stat dropdowns merged into one (this doc's most recent
 update):**
+
+1. **Matchup Analyzer's Elasticity and Game-Script charts now share one
+   "Stat" dropdown.** Previously the Elasticity chart had its own Points/
+   Rebounds/Assists picker while Game-Script was hardcoded to Points with
+   no picker at all - `data.transforms.game_script_sensitivity` already
+   accepted a `stat_col` param, only its caller in `ui.tabs.
+   matchup_analyzer` never passed anything but `'Points'`. `_render_player_
+   trend` now owns the one `st.selectbox` and passes the result into both
+   `_render_stat_elasticity_chart` and `_render_game_script_curve` (both
+   now take `stat_col` as a real parameter instead of self-selecting/
+   hardcoding it). Verified live (Playwright): exactly one "Stat" label
+   renders (not two), and switching it between all three options updates
+   BOTH charts' captions and plotted data together, with no stale/leftover
+   text from the previous selection.
+2. **Game log table was still truncating headers ("RESU...", "TURNOVE...")
+   and leaving bare background space unfilled**, despite the previous
+   pass's width tightening. Root cause, found by Playwright-measuring real
+   `scrollWidth` vs `clientWidth` on every header/body cell in a live
+   render rather than guessing again: `_col_width_px`'s formula ran BOTH
+   header and body text through one shared budget (7.2px/char + a flat
+   16px padding allowance), but header cells actually render at a
+   different font-size (10.5px vs the table's 12px body font), a wider
+   padding (`8px 10px` = 20px total vs body's `6px 7px` = 14px), and a
+   `letter-spacing:0.05em` body cells don't have - none of which the
+   shared formula accounted for. The 7.2px/char constant itself was
+   independently re-verified live (real DOM span, width measured past
+   `document.fonts.ready`, not canvas `measureText`) and came back exactly
+   7.2px - it was never the bug, only ever misapplied to headers using the
+   wrong padding/spacing. Fixed by computing header and body requirements
+   SEPARATELY (each using its own real font-size/padding/letter-spacing)
+   and taking the larger, plus a flat +6px cross-browser safety cushion.
+   Separately, "fill the available background width" needed a real
+   architecture change, not just a bigger number: the table, thead/tbody/
+   tfoot, and every row now use `width:100%; min-width:{total_width}px`
+   (was a fixed `width:{total_width}px` everywhere) and each cell uses a
+   percentage share of that safe-minimum total (`col_pct`) instead of a
+   fixed px width - so columns grow proportionally to fill a wide
+   container instead of leaving the extra space blank, while never
+   shrinking below the safe, non-truncating floor that triggers real
+   horizontal scroll only when a container genuinely can't fit all 15
+   columns at their minimum width. Verified live: zero truncated cells
+   anywhere (every header AND body value) across 1440px/1920px viewports,
+   1920px shows all 15 columns with no scroll at all, thead/tbody/tfoot
+   columns stay pixel-aligned even with a real vertical scrollbar present
+   on tbody. Caught and fixed a real regression from this same change
+   before shipping it: the new inline `min-width` wasn't reset by the
+   mobile (<=767px) card-layout media query, so mobile cards were silently
+   clipping 2 out of every 3 fields off-screen (looked like a complete,
+   correctly-formatted single-column card in a screenshot, but was
+   actually missing most columns) - confirmed via direct cell-position
+   measurement, not just a screenshot glance, and fixed with an explicit
+   `min-width: 0 !important` in the same mobile media query block.
+
+**Verification**: full unit suite (39 tests) passing, `py_compile` clean,
+both fixes confirmed with a real headless-Chromium Playwright render
+against synthetic data shaped like this app's real loader outputs -
+including the mobile-card regression above, which only direct DOM
+measurement caught, not a visual screenshot check alone.
+
+---
+
+
+**Game log width, a real pre-existing font bug found along the way, cut-off
+chart labels, and a Matchup Analyzer stat picker:**
 
 1. **Game log's horizontal scroll.** Root cause was actually two stacked
    issues, both in `ui.styling.render_sticky_footer_table`. First: the

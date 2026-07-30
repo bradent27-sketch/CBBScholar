@@ -656,17 +656,39 @@ def inject_theme():
             .sft-outer {{ max-height: 65vh !important; overflow-y: auto !important; }}
             .sft-scrollx {{ overflow-x: visible !important; }}
             .sft-table thead {{ display: none !important; }}
+            /* min-width: 0 - desktop's table/thead/tbody/tfoot/tr all carry
+               an inline min-width (the table's own safe-minimum total px,
+               see render_sticky_footer_table) now - it's what makes the
+               table stretch to fill a wide container without ever
+               shrinking narrower than every column's safe minimum on
+               desktop. That inline min-width isn't touched by
+               `width: 100% !important` below (a different property -
+               setting one doesn't clear the other),
+               so without this reset it silently won by cascade here too:
+               confirmed live (Playwright) that every card's fields beyond
+               the first ~1/3 of each row were being laid out past
+               .sft-outer's own edge and clipped invisibly by its
+               overflow-x:hidden, with no way to scroll to them - the
+               mobile card view looked complete (one full column of
+               fields) but was actually missing 2 out of every 3 columns.
+               table-layout also resets to auto - fixed's algorithm has
+               nothing meaningful to do once display is no longer
+               table/table-row-group, and leaving it set alongside the
+               inline min-width was part of the same layout confusion. */
             .sft-table, .sft-table tbody, .sft-table tfoot {{
                 display: block !important;
                 width: 100% !important;
+                min-width: 0 !important;
                 max-height: none !important;
                 overflow-y: visible !important;
+                table-layout: auto !important;
             }}
             .sft-table tr.sft-row, .sft-table tr.sft-footer-row {{
                 display: flex !important;
                 flex-wrap: wrap;
                 gap: 2px 14px;
                 width: 100% !important;
+                min-width: 0 !important;
                 border: 1px solid {C['outline_variant']};
                 border-radius: {R['md']};
                 margin: 0 0 8px 0;
@@ -1102,41 +1124,48 @@ def render_sticky_footer_table(df, footer, numeric_cols=None, team_color_map=Non
     footer_get = footer.get if hasattr(footer, 'get') else (lambda c: footer[c])
 
     def _col_width_px(col):
-        """Widest of the header label and every actual BODY value in this
-        column (deliberately NOT the footer's own value - see below),
-        converted from character count to px - explicit, content-aware
+        """Safe minimum px width for this column - the larger of what its
+        HEADER needs and what its widest BODY value needs (deliberately
+        NOT the footer's own value - see below) - explicit, content-aware
         desktop column widths so thead/tbody/tfoot (three independent
         layout contexts once each is forced to display:block - see this
         function's docstring) render the same column at the same width in
         all three, instead of each auto-sizing independently.
 
-        7.2px/char is not a guess - it's this table's real, measured
-        JetBrains Mono-at-12px advance width (Playwright + canvas
-        measureText against a live render, exactly 7.200px for every
-        sample string tried, as expected for a true monospace font where
-        every character has an identical width). +16 covers the cell's own
-        real 14px horizontal padding (`padding:6px 7px`) plus a small 2px
-        rounding cushion - both numbers replace an earlier, looser guess
-        (7.4px/char + 28px, against 10px/side padding) made before a
-        separate bug (see `_MONO_FONT_SAFE`'s own docstring at this
-        module's top) was found and fixed: this table had actually been
-        rendering in Streamlit's default 16px Source Sans the whole time,
-        not the 12px JetBrains Mono this width math assumed, so the
-        original guess was measuring against the wrong font's metrics
-        without knowing it. Padding itself also went from 10px/side to
-        7px/side on request (the table was "just slightly too wide" in
-        real use, allowing an unwanted horizontal scrollbar) - a pure
-        spacing tighten, no column's displayed text changes.
+        CORRECTION: this used to run header AND body text through one
+        shared formula (7.2px/char + a flat 16px padding allowance).
+        Real deployment kept truncating header labels ("RESU...",
+        "TURNOVE...") even though that formula looked generous enough on
+        paper - the 16px padding constant was calibrated for the BODY/
+        FOOTER cell's own `padding:6px 7px` (14px total), but header cells
+        use a wider `padding:8px 10px` (20px total) AND a
+        `letter-spacing:0.05em` body cells don't have, neither of which
+        the shared formula ever accounted for. Confirmed via Playwright,
+        measuring real `scrollWidth` vs `clientWidth` on every header/body
+        cell in a live render (not guessed): every truncated header was
+        short by exactly the header-vs-body padding/letter-spacing gap,
+        never by a character-width error - 7.2px/char itself (JetBrains
+        Mono's real 0.6em advance width at the table's 12px body font) was
+        independently re-verified live too (via a real DOM span, width
+        awaited past `document.fonts.ready`, not canvas measureText) and
+        came back exactly 7.2px, so that part was never the bug. Headers
+        render at a smaller 10.5px font (-> 6.3px/char, same 0.6em ratio),
+        so they need less per character than the body's 7.2px/char - it's
+        purely the wider padding + letter-spacing that was pushing them
+        over their allotted width. Now computed as two separate
+        requirements, one using each section's own real metrics, and the
+        larger of the two (plus a flat +6px cushion for cross-browser/
+        platform subpixel rounding) wins.
 
         Excluding the footer's own value matters in practice: its
         Opponent-column text ("SEASON AVG (28 games)", in Player Search's
         actual call site) is routinely LONGER than every real opponent
         name in the column, so measuring it widened that one column (and
-        therefore the whole table's total width) enough to force an
-        unwanted horizontal scrollbar on every render, not just the rare
-        one with a genuinely long team name. The footer cell still gets
-        the SAME column width as the body (see _row_cell) - if its own
-        text doesn't fit, `text-overflow:ellipsis` truncates it instead of
+        therefore the whole table's total safe-minimum width) enough to
+        force horizontal scrolling on every render, not just the rare one
+        with a genuinely long team name. The footer cell still gets the
+        SAME column width as the body (see _row_cell) - if its own text
+        doesn't fit, `text-overflow:ellipsis` truncates it instead of
         stretching the column to accommodate a value real per-game rows
         never need room for.
 
@@ -1144,22 +1173,38 @@ def render_sticky_footer_table(df, footer, numeric_cols=None, team_color_map=Non
         above) for the same reason, applied a level further: Opponent is
         real per-game DATA, not a one-off summary string, but a genuinely
         long team name is still rare enough that sizing the WHOLE column -
-        and therefore the table's total width, on every render - to fit
-        every possible name in full isn't worth the horizontal-scroll
-        trade-off (the actual complaint this fix responds to). A capped,
-        occasionally-truncated Opponent cell (full name still on hover,
-        via `title`) beats a table that needs sideways scrolling on every
-        single visit.
+        and therefore the table's total safe-minimum width, on every
+        render - to fit every possible name in full isn't worth forcing
+        horizontal scroll on every visit just for that one column. A
+        capped, occasionally-truncated Opponent cell (full name still on
+        hover, via `title`) beats that trade-off. This is only ever a
+        FLOOR now (see total_width/col_pct below) - the column still grows
+        past it when the table has room to stretch, it just never
+        renders any NARROWER than this.
         """
-        values = [str(col)] + [_fmt(col, v) for v in df[col]]
-        longest = max(len(v) for v in values)
-        return max(50, min(130, round(longest * 7.2) + 16))
+        values = [_fmt(col, v) for v in df[col]]
+        body_longest = max((len(v) for v in values), default=0)
+        header_len = len(str(col))
+        body_need = body_longest * 7.2 + 14
+        header_need = header_len * 6.3 + max(0, header_len - 1) * 0.525 + 20
+        return max(50, min(130, round(max(body_need, header_need) + 6)))
 
     col_widths = {c: _col_width_px(c) for c in cols}
     total_width = sum(col_widths.values())
+    # Each column's share of the safe-minimum total, as a percentage - lets
+    # the table stretch to fill a wider container (see the closing
+    # st.markdown call: table/thead/tbody/tfoot all use width:100% with
+    # min-width:{total_width}px, not a fixed width:{total_width}px) while
+    # every column still never renders narrower than its own safe
+    # `col_widths[c]` floor, since these percentages are defined AS shares
+    # of that exact floor total - at the floor itself each column is
+    # therefore pixel-identical to the old fixed-width behavior; above it,
+    # columns grow proportionally instead of leaving the extra space as
+    # bare, table-less background past the table's right edge.
+    col_pct = {c: (w / total_width * 100 if total_width else 0) for c, w in col_widths.items()}
 
     def _row_style(extra=""):
-        return f"display:table; table-layout:fixed; width:{total_width}px; {extra}"
+        return f"display:table; table-layout:fixed; width:100%; min-width:{total_width}px; {extra}"
 
     def _row_cell(col, value, tag='td', extra_style="", raw_text=None):
         # `raw_text` bypasses _fmt entirely - needed for header cells, whose
@@ -1174,10 +1219,13 @@ def render_sticky_footer_table(df, footer, numeric_cols=None, team_color_map=Non
         # body data (see _col_width_px) - a value wider than that (in
         # practice, only the footer's own longer summary text) truncates
         # with an ellipsis instead of stretching the column or spilling
-        # into the next cell.
+        # into the next cell. width is a % share of the table's safe-
+        # minimum total (see col_pct) with min-width as the real px floor
+        # (no max-width) - the column can grow past that floor when the
+        # table has room to stretch, but never renders narrower than it.
         style = (
             f"padding:6px 7px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; "
-            f"width:{col_widths[col]}px; max-width:{col_widths[col]}px; {align} {extra_style}"
+            f"width:{col_pct[col]:.4f}%; min-width:{col_widths[col]}px; {align} {extra_style}"
         )
         label = html.escape(str(col))
         # `text` is already HTML-escaped where it needs to be (_fmt escapes
@@ -1232,7 +1280,7 @@ def render_sticky_footer_table(df, footer, numeric_cols=None, team_color_map=Non
     # instead of leaning on inline styles that `!important` would have had
     # to fight for the same properties).
     width_css = "".join(
-        f"@media (min-width: 768px) {{ [data-label='{html.escape(str(c))}'] {{ width:{w}px !important; min-width:{w}px; max-width:{w}px; }} }}"
+        f"@media (min-width: 768px) {{ [data-label='{html.escape(str(c))}'] {{ width:{col_pct[c]:.4f}% !important; min-width:{w}px; }} }}"
         for c, w in col_widths.items()
     )
     headline_css = "".join(f"td[data-label='{html.escape(str(c))}']," for c in headline_cols).rstrip(',')
@@ -1240,16 +1288,29 @@ def render_sticky_footer_table(df, footer, numeric_cols=None, team_color_map=Non
         f"@media (max-width: 767px) {{ {headline_css} {{ order: -1; font-weight: 700; font-size: 13px; flex-basis: 46%; }} }}"
         if headline_css else ""
     )
+    # width:100% + min-width:{total_width}px on the outer div, table, and
+    # every thead/tbody/tfoot section (instead of a fixed width:{total_
+    # width}px each) - the table stretches to fill whatever container it's
+    # in and its columns grow proportionally with it (see col_pct), so
+    # .sft-outer's background is always fully covered instead of leaving
+    # bare, table-less space past the table's right edge on a wide
+    # viewport. min-width is still the real floor: on a container narrower
+    # than total_width (a small viewport, or just many columns), the table
+    # stops shrinking at that safe width and .sft-scrollx's own
+    # overflow-x:auto takes over exactly as before - horizontal scroll
+    # only ever kicks in when the columns' own safe minimums genuinely
+    # don't fit, never merely because the table was fixed narrower than
+    # available room.
     st.markdown(
         f"<div class='sft-outer' style='border:1px solid {C['outline_variant']}; border-radius:{R['sm']}; "
-        f"overflow:hidden; background:{C['surface_container']};'>"
+        f"overflow:hidden; background:{C['surface_container']}; width:100%;'>"
         f"<style>.sft-row:hover td {{ background:rgba({_hex_to_rgb_str(C['primary'])}, 0.06); }} {width_css} {mobile_instance_css}</style>"
-        f"<div class='sft-scrollx' style='overflow-x:auto;'>"
-        f"<table class='sft-table' style='border-collapse:collapse; table-layout:fixed; width:{total_width}px; "
+        f"<div class='sft-scrollx' style='overflow-x:auto; width:100%;'>"
+        f"<table class='sft-table' style='border-collapse:collapse; table-layout:fixed; width:100%; min-width:{total_width}px; "
         f"font-family:{_MONO_FONT_SAFE}; font-size:12px; color:{C['on_surface']};'>"
-        f"<thead style='display:block; width:{total_width}px;'><tr style='{_row_style()}'>{header_html}</tr></thead>"
-        f"<tbody style='display:block; width:{total_width}px; max-height:{height}px; overflow-y:auto;'>{body_html}</tbody>"
-        f"<tfoot style='display:block; width:{total_width}px;'>"
+        f"<thead style='display:block; width:100%; min-width:{total_width}px;'><tr style='{_row_style()}'>{header_html}</tr></thead>"
+        f"<tbody style='display:block; width:100%; min-width:{total_width}px; max-height:{height}px; overflow-y:auto;'>{body_html}</tbody>"
+        f"<tfoot style='display:block; width:100%; min-width:{total_width}px;'>"
         f"<tr class='sft-footer-row' style='{_row_style()}'>{footer_html}</tr>"
         f"</tfoot>"
         f"</table></div></div>",

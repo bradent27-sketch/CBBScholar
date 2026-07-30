@@ -337,37 +337,47 @@ def _render_player_trend(season, ctx, defense_team=None):
         else:
             st.caption("Not enough games yet for a trend.")
 
+    # One "Stat" picker drives BOTH charts below (elasticity curve AND
+    # game-script curve) - these used to be two independently-controlled
+    # sections (elasticity had its own Points/Rebounds/Assists dropdown;
+    # game-script was hardcoded to Points with no picker at all), merged
+    # into one shared control on request since there's no reason to make
+    # a viewer pick the same stat twice, or leave one chart unable to show
+    # Rebounds/Assists at all. data.transforms.game_script_sensitivity
+    # already took a `stat_col` param before this change (only its CALLER
+    # here hardcoded 'Points') - stat_elasticity is the one that actually
+    # needed a real signature change (see its own CORRECTION note).
+    stat_col = st.selectbox(
+        "Stat", _ELASTICITY_STAT_OPTIONS, key="ma_elasticity_stat",
+        help="Which per-game stat drives both charts below.",
+    )
     if defense_team:
-        _render_stat_elasticity_chart(mine, defense_team, season)
-    _render_game_script_curve(mine, team_choice, season)
+        _render_stat_elasticity_chart(mine, defense_team, season, stat_col)
+    _render_game_script_curve(mine, team_choice, season, stat_col)
 
 
 _ELASTICITY_STAT_OPTIONS = ('Points', 'Rebounds', 'Assists')
 
 
-def _render_stat_elasticity_chart(mine, defense_team, season):
+def _render_stat_elasticity_chart(mine, defense_team, season, stat_col):
     """
     <Stat> Elasticity Curve (data.transforms.stat_elasticity) - how this
-    player's own per-game production in a chosen stat actually moves
-    against tougher/faster opponents this season, fit from their real game
-    log. A "Stat" picker (Points/Rebounds/Assists) lets the viewer choose
-    which - replaced the old fixed TS%/eFG% "efficiency" framing on
-    request (a raw counting stat is more directly useful for matchup/prop
-    prep than a shooting-efficiency abstraction; see data.transforms.
-    stat_elasticity's own CORRECTION note). Rendered as a real chart
-    (ui.charts.render_stat_elasticity_curve) - the tier-mean curve plus
-    tonight's specific opponent highlighted on it - positioned right after
-    the per-stat game-log trend charts above and before the Game-Script
-    curve below. Uses `mine` (this panel's own already-loaded per-game
-    log, same rows the trend charts above just rendered) so no extra
-    game-log fetch is needed - only team_stats_df/eff_ratings_df (both
-    already weekly-cached league-wide pulls shared with the rest of this
-    tab) get loaded here.
+    player's own per-game production in the chosen stat (the SAME picker
+    _render_player_trend's caller also feeds to _render_game_script_curve
+    below - see that call site) actually moves against tougher/faster
+    opponents this season, fit from their real game log. Replaced the old
+    fixed TS%/eFG% "efficiency" framing on request (a raw counting stat is
+    more directly useful for matchup/prop prep than a shooting-efficiency
+    abstraction; see data.transforms.stat_elasticity's own CORRECTION
+    note). Rendered as a real chart (ui.charts.render_stat_elasticity_curve)
+    - the tier-mean curve plus tonight's specific opponent highlighted on
+    it - positioned right after the per-stat game-log trend charts above
+    and before the Game-Script curve below. Uses `mine` (this panel's own
+    already-loaded per-game log, same rows the trend charts above just
+    rendered) so no extra game-log fetch is needed - only team_stats_df/
+    eff_ratings_df (both already weekly-cached league-wide pulls shared
+    with the rest of this tab) get loaded here.
     """
-    stat_col = st.selectbox(
-        "Stat", _ELASTICITY_STAT_OPTIONS, key="ma_elasticity_stat",
-        help="Which per-game stat to plot against opponent defensive strength.",
-    )
     team_stats_df = load_all_team_season_stats(season)
     eff_ratings_df = load_efficiency_ratings(season)
     result = stat_elasticity(mine, eff_ratings_df, team_stats_df, defense_team, stat_col=stat_col)
@@ -377,20 +387,24 @@ def _render_stat_elasticity_chart(mine, defense_team, season):
     render_stat_elasticity_curve(result, opponent_team=defense_team)
 
 
-def _render_game_script_curve(mine, team_choice, season):
+def _render_game_script_curve(mine, team_choice, season, stat_col):
     """
     Game-Script Sensitivity (data.transforms.game_script_sensitivity) -
-    Close (|margin| <= 8) / Comfortable (8-14) / Blowout (>14) production,
-    shown as a small curve rather than plain text, per explicit request.
-    `mine` is this panel's own already-loaded per-game log; only the
-    player's team schedule (for game margins) needs a fresh load here.
+    Close (|margin| <= 8) / Comfortable (8-14) / Blowout (>14) production
+    for the chosen stat (same picker as the Elasticity chart above - see
+    _render_player_trend's call site; game_script_sensitivity itself
+    already took a `stat_col` param, only this function's own hardcoded
+    'Points' call kept every other stat off it), shown as a small curve
+    rather than plain text, per explicit request. `mine` is this panel's
+    own already-loaded per-game log; only the player's team schedule (for
+    game margins) needs a fresh load here.
     """
     with st.spinner(f"Loading {team_choice}'s schedule..."):
         team_games = load_team_games(team_choice, season)
-    result = game_script_sensitivity(mine, team_games, stat_col='Points')
+    result = game_script_sensitivity(mine, team_games, stat_col=stat_col)
     if not result or len(result.get('tiers') or []) < 2:
         return
-    st.markdown("_Points by game script — Close (±8) / Comfortable (8–14) / Blowout (>14)_")
+    st.markdown(f"_{result['stat']} by game script — Close (±8) / Comfortable (8–14) / Blowout (>14)_")
     render_game_script_curve(result)
 
 
