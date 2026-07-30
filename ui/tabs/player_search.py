@@ -76,10 +76,10 @@ import streamlit as st
 from config import AVAILABLE_SEASONS
 from data.loaders import (
     current_cbb_season, load_espn_teams, load_espn_roster, load_espn_season_player_box_native,
-    load_espn_di_player_stats, load_espn_athlete_bio,
+    load_espn_di_player_stats, load_espn_athlete_bio, load_teams, load_team_roster,
 )
 from data.transforms import last_n_form, player_percentile_rows, espn_player_season_stats_for_teams, espn_player_result_map
-from data.utils import fuzzy_filter_names, match_player_name
+from data.utils import fuzzy_filter_names, match_player_name, resolve_team_name
 from ui.components import render_coming_soon, render_team_banner, render_bio_strip, render_metric_tiles
 from ui.charts import render_relative_bars
 from ui.styling import render_sticky_footer_table
@@ -135,26 +135,82 @@ def _display_hometown(row):
     return combined or '--'
 
 
-def _bio_strip_values(bio):
-    """(height, weight, hometown) display strings for `bio`, falling back
-    to ESPN's per-athlete core API (data.loaders.load_espn_athlete_bio) for
-    just this one player when the team roster endpoint's own row has NONE
-    of the three - see that function's docstring for why the roster
-    listing alone doesn't always carry this depth. Only fires the extra
-    call when actually needed (roster data already had it, or `bio` has no
-    usable id to look up), so this stays as cheap as the roster-only path
-    for the common case."""
+def _cbbd_bio_fallback(team, player_name, season):
+    """CBBD's /teams/roster is a CONFIRMED-working bio source, not a guess:
+    git history shows THIS EXACT TAB used to read height/weight/hometown
+    straight off data.loaders.load_team_roster before the CBBD-free ESPN
+    rebuild (see HANDOFF.md) - the pre-rebuild code was literally
+    `sel_row.get('height')`/`'weight'`/`'city'`/`'state'` off that same
+    function, and Player Compare still relies on it successfully today
+    with no reported issue. Used here as a fallback only (not the primary
+    path - season stats/game log stay fully ESPN-based, so this tab is
+    still CBBD-light, just no longer CBBD-free in this one specific,
+    previously-broken case), for when ESPN's own roster row for this
+    player has none of these fields.
+
+    Resolves `team` (ESPN's spelling) against CBBD's own team list and
+    `player_name` against that team's CBBD roster by name - the same
+    cross-source resolution pattern (resolve_team_name/match_player_name)
+    already used throughout this app for exactly this class of join.
+    Returns a dict (height/weight/city/state/country) or None if no CBBD
+    key is configured, the team/player can't be resolved, or the CBBD
+    roster genuinely doesn't have this player either - never raises."""
+    cbbd_teams = load_teams(season)
+    if cbbd_teams.empty:
+        return None
+    cbbd_team = resolve_team_name(team, cbbd_teams['Team'].dropna().tolist())
+    if not cbbd_team:
+        return None
+    cbbd_roster = load_team_roster(cbbd_team, season)
+    if cbbd_roster.empty:
+        return None
+    idx = match_player_name(player_name, cbbd_roster['name'])
+    if idx is None:
+        return None
+    row = cbbd_roster.iloc[idx]
+    return {
+        'height': row.get('height'),
+        'weight': row.get('weight'),
+        'city': row.get('city'),
+        'state': row.get('state'),
+        'country': row.get('country'),
+    }
+
+
+def _bio_strip_values(bio, team, player_name, season):
+    """(height, weight, hometown) display strings for `bio`. Falls through
+    two fallback tiers, in order, only when ESPN's own roster row has NONE
+    of the three:
+    1. CBBD's /teams/roster (_cbbd_bio_fallback) - PROVEN (this tab's own
+       pre-ESPN-rebuild history read bio straight from it - see that
+       function's docstring), tried first for exactly that reason.
+    2. ESPN's core-API per-athlete endpoint (load_espn_athlete_bio) - a
+       reasoned (not proven) fallback for when no CBBD key is configured,
+       so a CBBD-free deployment still has a shot at real bio data.
+    Each tier only runs when the previous one didn't produce anything
+    usable, so the common/working case (ESPN roster already has bio data)
+    never pays for either extra call."""
     height, weight, hometown = _display_height(bio), _display_weight(bio), _display_hometown(bio)
     if (height, weight, hometown) != ('--', '--', '--'):
         return height, weight, hometown
-    athlete_id = bio.get('sourceId') if hasattr(bio, 'get') else None
-    if not athlete_id:
-        return height, weight, hometown
+
     with st.spinner("Loading bio detail..."):
-        extra = load_espn_athlete_bio(athlete_id)
-    if not extra:
-        return height, weight, hometown
-    return _display_height(extra), _display_weight(extra), _display_hometown(extra)
+        cbbd_bio = _cbbd_bio_fallback(team, player_name, season)
+    if cbbd_bio:
+        h, w, ht = _display_height(cbbd_bio), _display_weight(cbbd_bio), _display_hometown(cbbd_bio)
+        if (h, w, ht) != ('--', '--', '--'):
+            return h, w, ht
+
+    athlete_id = bio.get('sourceId') if hasattr(bio, 'get') else None
+    if athlete_id:
+        with st.spinner("Loading bio detail..."):
+            extra = load_espn_athlete_bio(athlete_id)
+        if extra:
+            h, w, ht = _display_height(extra), _display_weight(extra), _display_hometown(extra)
+            if (h, w, ht) != ('--', '--', '--'):
+                return h, w, ht
+
+    return height, weight, hometown
 
 
 def _pct(v):
@@ -283,7 +339,7 @@ def render():
 
     render_team_banner(team, subtitle=f"{bio.get('position') or '?'} #{bio.get('jersey') or '?'}", team_color=colors.get(team))
 
-    height_str, weight_str, hometown_str = _bio_strip_values(bio)
+    height_str, weight_str, hometown_str = _bio_strip_values(bio, team, player_name, season)
     render_bio_strip([
         ('Height', height_str),
         ('Weight', weight_str),

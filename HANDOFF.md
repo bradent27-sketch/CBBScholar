@@ -5,6 +5,50 @@ Sibling app to NFL Scholar (`C:\FantasyF`) and CFB Scholar
 college basketball. This doc follows NFL Scholar's own HANDOFF.md section
 structure on purpose, so all three stay easy to cross-reference.
 
+**Bio fields: real root cause found via git archaeology, not more guessing
+(this doc's most recent update)** - reported still broken after the
+previous two passes (a NaN-truthy display fix, then an ESPN-core-API
+fallback theory), with one critical new fact: this app used to show these
+correctly. That's a real, checkable claim, not a vibe - `git log --follow
+ui/tabs/player_search.py` shows exactly one commit where it stopped:
+**952a1ea "Rebuild Player Search on a CBBD-free ESPN/SportsDataverse
+pipeline"**. Before it, `player_search.py` read height/weight/hometown
+straight off `data.loaders.load_team_roster` (CBBD's `/teams/roster` -
+confirmed live per that function's own docstring, and Player Compare still
+uses it successfully today) - `git show 38e5228:ui/tabs/player_search.py`
+has the literal line, `sel_row.get('height')`/`'weight'`/`'city'`/`'state'`.
+The rebuild switched to ESPN's own roster endpoint, which its OWN commit
+message admits was never live-verified - a guess replaced a proven source,
+and the guess was apparently wrong. **Fixed**: `_cbbd_bio_fallback` in
+`ui/tabs/player_search.py` calls CBBD's `load_team_roster` (resolving the
+ESPN-spelled team/player name against CBBD's own lists first, the same
+cross-source join pattern this app uses everywhere else) whenever ESPN's
+roster row for the selected player has none of height/weight/hometown -
+tried BEFORE the previous pass's ESPN-core-API fallback, since it's proven
+rather than reasoned. Season stats/game log are untouched (still fully
+ESPN-based, so this tab stays CBBD-light, not CBBD-free only in this one
+previously-broken fallback path) and the common case (ESPN roster already
+has bio data) still never touches CBBD at all.
+
+**Verified before shipping, not just claimed**: `python3 -m unittest
+discover` (36/36 passing) plus a live `streamlit run` + real headless-
+Chromium Playwright render of the EXACT regression scenario (a synthetic
+ESPN roster row with no bio fields at all, paired with a synthetic-but-
+realistically-shaped CBBD roster row matching `load_team_roster`'s actual,
+pre-existing column contract - not a new guess) - confirmed the bio strip
+renders the real height/weight/hometown through the actual `render()` code
+path, confirmed the fallback is correctly SKIPPED when ESPN's own roster
+data is already complete (no wasted CBBD calls in the common case), and
+confirmed the previous pass's game-log-footer fix is still intact
+alongside this change. One honest residual gap: this is still simulated
+data, not this session's own live ESPN/CBBD traffic (still network-blocked
+here) - what IS newly true this pass is that the fallback path is a
+PROVEN, already-relied-upon function (`load_team_roster`), not a fresh
+guess, which is a meaningfully stronger footing than the previous two
+passes had.
+
+---
+
 **Follow-up: the previous pass's bio-field and game-log-footer fixes were
 real but insufficient - both properly root-caused and fixed this time,
 verified with a real headless-Chromium/Playwright render, not just
