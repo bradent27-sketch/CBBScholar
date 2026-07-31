@@ -245,9 +245,13 @@ def render():
     with c2:
         team_names = sorted(espn_teams['Team'].dropna().unique().tolist())
         team_options = [_ALL_TEAMS_OPTION] + team_names
-        default_team = next((t for t in team_names if t.startswith('Duke')), team_names[0] if team_names else None)
-        default_team_idx = team_options.index(default_team) if default_team in team_options else 0
-        team_choice = st.selectbox("Team", team_options, index=default_team_idx, key="ps_team")
+        # Defaults to "All Teams" (index 0), not a specific team - this
+        # tab used to default to Duke, which meant searching for anyone
+        # else meant first clicking OFF Duke before the name-search box
+        # even appeared. All Teams mode already IS the "search any
+        # player by name" mode (see all_teams_mode below), so starting
+        # there gets a visitor straight to typing a name on first load.
+        team_choice = st.selectbox("Team", team_options, index=0, key="ps_team")
 
     all_teams_mode = team_choice == _ALL_TEAMS_OPTION
     colors = dict(zip(espn_teams['Team'], espn_teams['Color']))

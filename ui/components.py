@@ -83,6 +83,20 @@ def render_setup_status_sidebar():
             "Theme", options=['dark', 'light'], format_func=str.capitalize,
             key='theme_mode', horizontal=True, label_visibility='collapsed',
         )
+        # key='text_scale' directly, same pattern as 'theme_mode' above -
+        # ui.styling.inject_theme() reads this exact key to pick a zoom
+        # multiplier on top of its own viewport-width baseline (a laptop
+        # window reads meaningfully smaller than a large desktop monitor
+        # at identical declared px sizes - this is the manual override on
+        # top of that automatic baseline, not a replacement for it).
+        # 'default' stays the default for the same reason 'dark' does -
+        # a first-ever visit renders the automatic viewport baseline
+        # untouched; sizing up or down is something a visitor opts into.
+        st.radio(
+            "Text size", options=['small', 'default', 'large'], format_func=str.capitalize,
+            index=1, key='text_scale', horizontal=True, label_visibility='collapsed',
+            help="Shifts this app's automatic per-device text size up or down.",
+        )
         st.markdown("---")
 
         cbbd_key = _get_secret("cbbd_api_key")
@@ -120,11 +134,31 @@ def render_setup_status_sidebar():
 def render_team_banner(team_name, subtitle="", team_color=None):
     """Team identity banner (Player Search etc): name over a team-color
     gradient that fades into the app surface. Ported from CFB Scholar's
-    identical function."""
-    color = team_color or C['surface_container_high']
+    identical function.
+
+    CORRECTION: used to gradient the RAW team color straight in (`{color}
+    D9` -> `{color}66` -> surface) - a vivid school color (Duke blue,
+    Syracuse orange, ...) at 85% opacity reads as a loud, "solid and
+    oppressive" block rather than a design accent, per explicit request.
+    Muted by blending the raw color toward a FIXED dark neutral first
+    (ui.styling._blend_hex) rather than toward this app's own theme-
+    dependent surface color - surface_container is a pale
+    lavender in light mode, and blending toward it would have pushed a
+    naturally light team color (e.g. UNC's powder blue, Purdue's tan)
+    light enough to break this banner's own hardcoded white title text's
+    contrast. Blending toward a fixed dark tone instead keeps the result
+    reliably dark enough for white text in BOTH themes while still
+    reading as "this team's color," just desaturated rather than neon -
+    verified live (Playwright) against several real school colors
+    spanning dark (Duke navy) to naturally light (UNC powder blue,
+    Purdue tan) so this isn't just true for the safe/dark cases.
+    """
+    from ui.styling import _blend_hex
+    raw = team_color or C['surface_container_high']
+    color = _blend_hex(raw, '#0b1020', 0.52)
     sub_html = f"<div class='tb-sub'>{subtitle}</div>" if subtitle else ""
     st.markdown(
-        f"<div class='team-banner' style='background: linear-gradient(90deg, {color}D9 0%, {color}66 40%, {C['surface_container']} 100%);'>"
+        f"<div class='team-banner' style='background: linear-gradient(90deg, {color}CC 0%, {color}55 45%, {C['surface_container']} 100%);'>"
         f"<div><div class='tb-name'>{team_name}</div>{sub_html}</div></div>",
         unsafe_allow_html=True,
     )

@@ -70,6 +70,8 @@ from ui.styling import df_auto_height, render_responsive_table
 
 _PLAYER_TREND_STATS = [('Points', ''), ('Assists', ''), ('Rebounds', ''), ('Minutes', ''), ('3P%', '%')]
 
+_TEAM_PLACEHOLDER = "Select a team..."
+
 _PLAYER_STAT_HELP = {
     'eFG%': "Effective field goal % - field goal % with made threes counted as 1.5 makes.",
     'TS%': "True shooting % - scoring efficiency including free throws, the most complete shooting number.",
@@ -154,16 +156,24 @@ def _pick_player(season, teams_df):
     rather than crashing on a missing id (see get_player_season_stats).
 
     Returns a context dict, or None (after showing its own st.info message)
-    if no team/roster/stats data is available - a None here doesn't stop
-    TEAM DEFENSE's own rows from rendering; each row checks its own side
-    independently.
+    if no team/roster/stats data is available, OR if no team has been
+    picked yet - a None here doesn't stop TEAM DEFENSE's own rows from
+    rendering; each row checks its own side independently.
     """
     team_names = sorted(teams_df['Team'].dropna().unique().tolist())
     if not team_names:
         st.info("No team data available.")
         return None
-    default_team = 'Duke' if 'Duke' in team_names else team_names[0]
-    team_choice = st.selectbox("Team", team_names, index=team_names.index(default_team), key="ma_player_team")
+    # Defaults to the placeholder (index 0), not a specific team - this
+    # used to default to Duke, so scouting anyone else meant clicking off
+    # Duke first even though this whole panel is about PICKING a player,
+    # not confirming a pre-made choice. Short-circuits below (same as the
+    # "no team data" case just above) until a real team is chosen.
+    team_options = [_TEAM_PLACEHOLDER] + team_names
+    team_choice = st.selectbox("Team", team_options, index=0, key="ma_player_team")
+    if team_choice == _TEAM_PLACEHOLDER:
+        st.info("Pick a team above to scout one of its players.")
+        return None
 
     with st.spinner("Loading roster..."):
         roster_df = load_team_roster(team_choice, season)

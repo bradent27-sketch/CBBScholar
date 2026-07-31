@@ -5,9 +5,89 @@ Sibling app to NFL Scholar (`C:\FantasyF`) and CFB Scholar
 college basketball. This doc follows NFL Scholar's own HANDOFF.md section
 structure on purpose, so all three stay easy to cross-reference.
 
+**Device-aware text sizing, teams no longer pre-selected on load, a muted
+team-color banner, and a full visual polish pass (this doc's most recent
+update):**
+
+1. **Text size didn't adapt to the device.** Reported directly: fine on
+   an iPhone (the existing <=767px mobile layout already handled that),
+   too small on a laptop, and the laptop's own size then felt small again
+   on an even larger desktop monitor. Added CSS `zoom` on `.stApp`,
+   scoped to two `>=768px` media-query tiers (a laptop-range tier and a
+   `>=1600px` large-monitor tier, each bigger than the last) - `zoom`
+   (not `rem`/root-font-size) scales every already-hardcoded px value in
+   the subtree uniformly, including the inline-SVG charts (they already
+   scale their own viewBox to fill whatever box they're given), without
+   having to rewrite the many individual font-size declarations spread
+   across ui.styling/ui.charts/ui.components. A new "Text size" control
+   (Small/Default/Large) sits right under the existing Dark/Light toggle
+   in the sidebar (`ui.components.render_setup_status_sidebar`,
+   key='text_scale') and multiplies on top of that automatic baseline -
+   Python computes the final zoom number for each tier at the CURRENT
+   toggle setting and bakes it directly into the generated CSS, so there's
+   no need for the two scaling sources to compose at the CSS level.
+   Mobile (<768px) is deliberately untouched by any of this - it already
+   reads fine per the same report, and it has its own separately-tuned
+   flex/percentage layout math this wasn't worth risking.
+   **Caught by its own screenshot before shipping**: `st.radio` defaults
+   to its FIRST option when no `index=` is given - the new control listed
+   'small' first (for a natural small-to-large reading order) and defaulted
+   to it, not 'default' as intended. Fixed with an explicit `index=1`.
+2. **Player Search and Matchup Analyzer's PLAYER panel both used to
+   default to Duke on load.** Searching for anyone else meant clicking
+   OFF Duke first, even though Player Search's whole "All Teams" mode
+   (its actual any-player-by-name search) was one click away the entire
+   time. Both now default to their own "no team picked yet" placeholder
+   instead (Player Search: `_ALL_TEAMS_OPTION`, already an existing
+   option, just not the previous default; Matchup Analyzer's `_pick_
+   player`: a new placeholder + early-return, same shape as its existing
+   "no data" guard) - scoped to exactly what was asked: Matchup
+   Analyzer's TEAM DEFENSE picker (a team-only lookup with no name-search
+   step to unblock) still defaults to Duke, unchanged.
+3. **The team-color banner ("Duke — Forward" etc.) read as a solid,
+   oppressive block of color**, per explicit request - it gradiented the
+   RAW school color in at 85% opacity. Muted by blending the raw color
+   toward a FIXED dark neutral first (`ui.styling._blend_hex`, new use)
+   rather than toward this app's own theme-dependent surface color -
+   surface_container is a pale lavender in light mode, and blending
+   toward it would have pushed a naturally light team color (UNC's powder
+   blue, Purdue's tan) light enough to break this banner's hardcoded
+   white title text's contrast. Blending toward a fixed dark tone instead
+   keeps the result reliably dark enough for white text in both themes.
+   Verified live: computed contrast ratios of ~6-7:1 (white text over the
+   muted color) for both a naturally dark school color (Duke navy) and
+   two naturally light ones (UNC powder blue, Purdue tan) - comfortably
+   past WCAG AA's 4.5:1 floor, not just "looks fine in the one color we
+   tried." Same component (`ui.components.render_team_banner`) is shared
+   by Player Search and Player Compare, so both got the fix at once.
+4. **Full visual pass across all 7 tabs** (plus every sub-tab: Team
+   Efficiency's Four Factors Tiering, Rankings' Conference Standings,
+   etc.), requested to confirm fonts/colors/alignment read as
+   professional rather than "homemade" while keeping team coloring - a
+   real headless-Chromium render against synthetic data shaped like
+   every tab's real loader outputs (not a code-only review). Nothing
+   further stood out as broken or misaligned: compared items already
+   line up cleanly (Player Compare's head-to-head delta bars, Matchup
+   Analyzer's PLAYER/TEAM DEFENSE columns), team coloring is consistent
+   throughout, and no console errors on any tab. The 3 fixes above were
+   the actual polish this pass surfaced, not a signal to leave alone -
+   the broader audit found the existing design system (built up over
+   every prior pass in this doc) already holding up well.
+
+**Verification**: full unit suite (40 tests) passing, `py_compile` clean,
+zoom values spot-checked live via `getComputedStyle` at both viewport
+tiers and confirmed to compose correctly with the manual toggle (1.08 base
+x1.15 toggle = 1.242, matching the arithmetic exactly), mobile confirmed
+untouched (zoom stays 1 below 768px), and every fix above screenshotted
+in a real browser - including catching the text-scale default bug from
+its own verification screenshot before it shipped.
+
+---
+
+
 **Matchup Analyzer: a real mislabeled-value bug found while fixing a
 reported overlap, a redundant rebounding stat swapped out, and the
-Game-Script chart split into 5 win/loss tiers (this doc's most recent
+Game-Script chart split into 5 win/loss tiers:**
 update):**
 
 1. **The Elasticity chart's orange opponent-value label wasn't just

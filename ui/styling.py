@@ -156,6 +156,27 @@ def inject_theme():
     # mode fill, copied byte-for-byte so toggling to 'dark' can't change
     # it; only the light branch is new.
     _checkbox_box_bg = C['surface_container_high'] if is_light else 'rgb(7, 12, 44)'
+    # Text size: viewport-based baseline (a laptop's ~1280-1599px browser
+    # width reads meaningfully smaller than a 1920px+ desktop monitor at
+    # the exact same declared px sizes - reported directly, not guessed)
+    # times a manual multiplier from the "Text size" sidebar control
+    # (render_setup_status_sidebar, key='text_scale') - 'default' if never
+    # touched. CSS `zoom` (not rem/root-font-size) scales EVERY declared
+    # size in the subtree uniformly - font-size, padding, gaps, and the
+    # inline-SVG charts (ui.charts) too, since those already scale their
+    # own internal viewBox to fill whatever CSS box they're given, so a
+    # bigger zoomed box makes their text/shapes bigger right along with
+    # it - without having to individually rewrite the many hardcoded px
+    # values already spread across this file/ui.charts/ui.components.
+    # Scoped to >=768px only - mobile's own separate, already-tuned card
+    # layout (render_sticky_footer_table's mobile block, this file's own
+    # <=767px media query) is untouched, since it already reads fine per
+    # the same report this feature responds to, and zoom interacting with
+    # its flex-wrap percentage math wasn't worth the regression risk.
+    _TEXT_SCALE_MULT = {'small': 0.92, 'default': 1.0, 'large': 1.15}
+    _scale_mult = _TEXT_SCALE_MULT.get(st.session_state.get('text_scale', 'default'), 1.0)
+    _zoom_laptop = round(1.08 * _scale_mult, 3)
+    _zoom_desktop = round(1.18 * _scale_mult, 3)
     st.markdown(f"""
         <style>
         {_font_face_css()}
@@ -168,6 +189,13 @@ def inject_theme():
             color: {C['on_surface']} !important;
             font-family: {F['body']} !important;
             font-variant-numeric: tabular-nums;
+        }}
+
+        @media (min-width: 768px) and (max-width: 1599px) {{
+            .stApp {{ zoom: {_zoom_laptop}; }}
+        }}
+        @media (min-width: 1600px) {{
+            .stApp {{ zoom: {_zoom_desktop}; }}
         }}
 
         header[data-testid="stHeader"] {{
