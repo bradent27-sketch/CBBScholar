@@ -24,7 +24,10 @@ from data.loaders import (
     load_espn_teams, load_espn_season_player_box_native,
 )
 from data.utils import match_player_name, resolve_team_name
-from ui.components import render_coming_soon, render_team_banner, render_bio_strip, render_stat_tiles
+from ui.components import (
+    render_coming_soon, render_team_banner, render_bio_strip, render_stat_tiles,
+    sticky_selectbox,
+)
 from ui.charts import render_radar
 from ui.tabs.player_search import _fmt_height, _display_weight, _pct, _per_game
 
@@ -42,7 +45,7 @@ def _player_picker(col, label_prefix, season, teams_list, key_prefix, default_te
     KeyErrors."""
     with col:
         default_idx = teams_list.index(default_team) if default_team in teams_list else 0
-        team = st.selectbox(f"{label_prefix} — team", teams_list, index=default_idx, key=f"{key_prefix}_team")
+        team = sticky_selectbox(f"{label_prefix} — team", teams_list, key=f"{key_prefix}_team", default_index=default_idx)
         roster_df = load_team_roster(team, season)
 
         box_only_rows = []
@@ -68,7 +71,7 @@ def _player_picker(col, label_prefix, season, teams_list, key_prefix, default_te
             st.info("No roster data.")
             return None, None
         labels = [f"{r['name']} ({r.get('position') or '?'})" for r in combined_rows]
-        sel_label = st.selectbox(f"{label_prefix} — player", labels, key=f"{key_prefix}_player")
+        sel_label = sticky_selectbox(f"{label_prefix} — player", labels, key=f"{key_prefix}_player")
         return team, combined_rows[labels.index(sel_label)]
 
 
@@ -101,7 +104,10 @@ def render():
 
     default_season = current_cbb_season()
     seasons = AVAILABLE_SEASONS if default_season in AVAILABLE_SEASONS else [default_season] + AVAILABLE_SEASONS
-    season = st.selectbox("Season", seasons, index=seasons.index(default_season), format_func=lambda y: f"{y - 1}-{str(y)[2:]}", key="cmp_season")
+    season = sticky_selectbox(
+        "Season", seasons, key="cmp_season", default_index=seasons.index(default_season),
+        format_func=lambda y: f"{y - 1}-{str(y)[2:]}",
+    )
 
     teams_df = load_teams(season)
     if teams_df.empty:

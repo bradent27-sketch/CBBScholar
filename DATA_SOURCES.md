@@ -3,6 +3,24 @@
 What each tab needs, what's free, and what to go set up. Checklist first,
 detail below.
 
+**26-27 season-readiness audit, this doc's most recent update:** re-walked
+every row in the per-tab source map below against the actual current code
+(not just re-reading this doc) - no source has changed, nothing new is
+needed for the season transition. Confirmed live during this pass: every
+season selector app-wide (see `AVAILABLE_SEASONS`/`AVAILABLE_SEASONS_WITH_
+UPCOMING` fallback pattern in every `ui/tabs/*.py` file) already handles
+`current_cbb_season()` flipping from 2026 to 2027 this November with no
+`config.py` edit required, and every tab degrades to a clean empty-state
+message rather than crashing when literally every source below returns
+nothing (simulated directly - see HANDOFF.md's top entry). A companion,
+narrative version of this file - written for a non-developer read, with an
+explicit per-source refresh-cadence table and a concrete "what to actually
+do, and how often" checklist for the season - was produced as this pass's
+own deliverable; ask for it again if it's no longer at hand. One standing
+action item this pass re-surfaced rather than newly found: the real CBBD/
+Odds API keys committed to git history on 2026-07-18 (see `.streamlit/
+secrets.toml.example`'s own note) - rotate both if that hasn't happened yet.
+
 **Verification caveat on the Matchup Analyzer refinement pass:** this
 app's whole discipline here is "verified live before the parser was
 written" - the build environment for that pass could not reach

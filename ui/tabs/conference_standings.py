@@ -5,6 +5,7 @@ import streamlit as st
 
 from config import AVAILABLE_SEASONS_WITH_UPCOMING
 from data.loaders import current_cbb_season, list_conferences, load_conference_standings, team_color_map
+from ui.components import sticky_selectbox
 from ui.styling import df_auto_height, build_column_help_config, render_responsive_table
 
 
@@ -13,7 +14,10 @@ def render():
     seasons = AVAILABLE_SEASONS_WITH_UPCOMING if default_season in AVAILABLE_SEASONS_WITH_UPCOMING else [default_season] + AVAILABLE_SEASONS_WITH_UPCOMING
     col_season, col_conf = st.columns([1, 2])
     with col_season:
-        season = st.selectbox("Season", seasons, index=seasons.index(default_season), format_func=lambda y: f"{y - 1}-{str(y)[2:]}")
+        season = sticky_selectbox(
+            "Season", seasons, key="cs_season", default_index=seasons.index(default_season),
+            format_func=lambda y: f"{y - 1}-{str(y)[2:]}",
+        )
 
     conferences = list_conferences(season)
     if not conferences:
@@ -28,7 +32,7 @@ def render():
         labels = [name for name, _ in conferences]
         abbr_by_label = dict(conferences)
         default_conf_idx = next((i for i, (n, _) in enumerate(conferences) if n == 'Big Ten Conference'), 0)
-        selected_label = st.selectbox("Conference", labels, index=default_conf_idx)
+        selected_label = sticky_selectbox("Conference", labels, key="cs_conference", default_index=default_conf_idx)
     conf_abbr = abbr_by_label[selected_label]
 
     df = load_conference_standings(season, conf_abbr)

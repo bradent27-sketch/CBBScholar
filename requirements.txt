@@ -1,6 +1,13 @@
 streamlit>=1.59
 pandas>=3.0
-numpy>=2.5
+# CORRECTION: this floor used to read numpy>=2.5 - confirmed live via a real
+# `pip install -r requirements.txt` that no numpy release satisfying that
+# exists yet (PyPI tops out at 2.4.x as of this fix), so a fresh install of
+# this app failed outright with "No matching distribution found for
+# numpy>=2.5" before a single line of app code ever ran. Nothing here
+# actually needs 2.5+ specifically (just np.polyfit and basic array ops,
+# both long-stable) - lowered to a real, currently-installable floor.
+numpy>=2.0
 requests>=2.34
 # streamlit 1.59 pins pyarrow<25 internally (its own setup metadata) - the
 # previous floor here (>=25.0) directly violated that and could resolve to

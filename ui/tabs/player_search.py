@@ -80,7 +80,10 @@ from data.loaders import (
 )
 from data.transforms import last_n_form, player_percentile_rows, espn_player_season_stats_for_teams, espn_player_result_map
 from data.utils import fuzzy_filter_names, match_player_name, resolve_team_name
-from ui.components import render_coming_soon, render_team_banner, render_bio_strip, render_metric_tiles
+from ui.components import (
+    render_coming_soon, render_team_banner, render_bio_strip, render_metric_tiles,
+    sticky_selectbox, sticky_text_input, sticky_checkbox,
+)
 from ui.charts import render_relative_bars
 from ui.styling import render_sticky_footer_table
 
@@ -231,7 +234,10 @@ def render():
     seasons = AVAILABLE_SEASONS if default_season in AVAILABLE_SEASONS else [default_season] + AVAILABLE_SEASONS
     c1, c2 = st.columns([1, 2])
     with c1:
-        season = st.selectbox("Season", seasons, index=seasons.index(default_season), format_func=lambda y: f"{y - 1}-{str(y)[2:]}", key="ps_season")
+        season = sticky_selectbox(
+            "Season", seasons, key="ps_season", default_index=seasons.index(default_season),
+            format_func=lambda y: f"{y - 1}-{str(y)[2:]}",
+        )
 
     espn_teams = load_espn_teams(season)
     if espn_teams.empty:
@@ -251,7 +257,7 @@ def render():
         # even appeared. All Teams mode already IS the "search any
         # player by name" mode (see all_teams_mode below), so starting
         # there gets a visitor straight to typing a name on first load.
-        team_choice = st.selectbox("Team", team_options, index=0, key="ps_team")
+        team_choice = sticky_selectbox("Team", team_options, key="ps_team", default_index=0)
 
     all_teams_mode = team_choice == _ALL_TEAMS_OPTION
     colors = dict(zip(espn_teams['Team'], espn_teams['Color']))
@@ -268,7 +274,7 @@ def render():
     if all_teams_mode:
         candidates = box_df[['name', 'athleteSourceId', 'Team', 'Position']].drop_duplicates(subset=['athleteSourceId', 'Team']).reset_index(drop=True)
         labels = [f"{r['name']} ({r['Position'] or '?'}) — {r['Team']}" for _, r in candidates.iterrows()]
-        query = st.text_input(
+        query = sticky_text_input(
             "Search player name", key="ps_player_query",
             placeholder="Start typing any player's name — partial or slightly misspelled is fine",
         )
@@ -282,7 +288,7 @@ def render():
         if not matched_labels:
             st.info("No players matched that spelling — try a shorter or different fragment.")
             return
-        sel_label = st.selectbox("Select player", matched_labels, key="ps_player_select")
+        sel_label = sticky_selectbox("Select player", matched_labels, key="ps_player_select")
         sel_candidate = candidates.iloc[labels.index(sel_label)]
         team = sel_candidate['Team']
         source_id = sel_candidate['athleteSourceId']
@@ -331,12 +337,12 @@ def render():
             st.info(f"No roster or season data found for {team} in {season}.")
             return
         labels = [f"{r['name']} ({r.get('position') or '?'})" for r in combined_rows]
-        query = st.text_input(
+        query = sticky_text_input(
             "Filter roster (optional)", key="ps_player_query_team",
             placeholder="Start typing to narrow the roster below…",
         )
         matched_labels = fuzzy_filter_names(query, labels, limit=len(labels)) if query else labels
-        sel_label = st.selectbox("Select player", matched_labels, key="ps_player_select")
+        sel_label = sticky_selectbox("Select player", matched_labels, key="ps_player_select")
         bio = combined_rows[labels.index(sel_label)]
         source_id = bio.get('sourceId')
         player_name = bio['name']
@@ -368,7 +374,7 @@ def render():
 
     player_conf = espn_row.get('Conference')
 
-    compare_all = st.checkbox(
+    compare_all = sticky_checkbox(
         "Compare against all of Division I instead of just this conference",
         key="ps_compare_all",
         help="Free either way with this source — the whole season's already in one downloaded file, no per-team fan-out needed.",

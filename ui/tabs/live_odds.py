@@ -10,7 +10,7 @@ import streamlit as st
 
 from config import ODDS_API_PLAYER_PROP_MARKETS
 from data.loaders import fetch_ncaab_odds, fetch_ncaab_player_props
-from ui.components import render_coming_soon
+from ui.components import render_coming_soon, sticky_selectbox, sticky_multiselect
 from ui.charts import render_prop_line_shop
 from ui.styling import df_auto_height, render_responsive_table
 
@@ -119,7 +119,7 @@ def render():
     for g in odds_data:
         label = f"{g.get('away_team','?')} @ {g.get('home_team','?')} — {_fmt_tipoff(g.get('commence_time',''))}"
         game_labels[label] = g
-    sel_label = st.selectbox("Select a game", list(game_labels.keys()), key="odds_game_select")
+    sel_label = sticky_selectbox("Select a game", list(game_labels.keys()), key="odds_game_select")
     game = game_labels[sel_label]
 
     st.markdown(f"<div class='custom-section-header'>{game.get('away_team')} @ {game.get('home_team')}</div>", unsafe_allow_html=True)
@@ -165,7 +165,7 @@ def render():
                 markets_found = sorted(props_long['Market'].unique().tolist())
                 books_found = sorted(props_long['Book'].unique().tolist())
                 st.caption(f"Markets posted for this game: {', '.join(markets_found)} — across {len(books_found)} book(s): {', '.join(books_found)}")
-                market_filter = st.multiselect("Filter by market", markets_found, default=[], key="odds_market_filter")
+                market_filter = sticky_multiselect("Filter by market", markets_found, default=[], key="odds_market_filter")
                 filtered_long = props_long[props_long['Market'].isin(market_filter)] if market_filter else props_long
 
                 comparison_df = _build_props_comparison_table(filtered_long)
@@ -186,7 +186,7 @@ def render():
                     filtered_long[['Market', 'Player', 'Selection']].drop_duplicates().itertuples(index=False, name=None)
                 )
                 if bet_tuples:
-                    bet_pick = st.selectbox(
+                    bet_pick = sticky_selectbox(
                         "Compare one bet across every book", bet_tuples,
                         format_func=lambda t: f"{t[0]} — {t[1]} ({t[2]})",
                         key="odds_line_shop_pick",

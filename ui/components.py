@@ -26,6 +26,106 @@ _DISPLAY_FONT_SAFE = F['display'].replace("'", '"')
 _MONO_FONT_SAFE = F['mono'].replace("'", '"')
 
 
+# ---------------------------------------------------------------------------
+# "Sticky" widget wrappers - survive a top-level (or sub-)tab losing and
+# regaining `.open` status, which every tab in this app is gated behind (see
+# app.py's `if _tab.open:` / `_render_guarded` - the whole point of that
+# gating is that an INACTIVE tab's render() doesn't execute AT ALL on a given
+# rerun, so its expensive data pipelines don't re-fire on every click
+# elsewhere in the app).
+#
+# REAL, LIVE-CONFIRMED BUG this fixes (Playwright, real Chromium - not just
+# reasoned): a plain `st.selectbox(..., index=I, key=K)` (or multiselect/
+# slider) living inside such a gated tab silently resets to its hardcoded
+# I/default the instant a user switches to a DIFFERENT tab and back - proven
+# with three independent, isolated round-trips (Player Search's team picker,
+# Matchup Analyzer's PLAYER team picker, and - the decisive case, since it
+# has no placeholder at all - Matchup Analyzer's TEAM DEFENSE picker
+# explicitly changed away from its own hardcoded default 'Duke' to 'Kansas',
+# which reverted to 'Duke' after a round-trip through an unrelated tab).
+# Confirmed via AppTest at the session_state level too: `ma_def_team`
+# disappears from `st.session_state` entirely while its tab isn't open, not
+# just from the rendered widget - Streamlit prunes a WIDGET-scoped key's
+# session_state entry whenever that widget isn't instantiated during a
+# script run, and a fresh instantiation with no prior state to inherit falls
+# back to whatever `index=`/`value=`/`default=` the call site hardcoded.
+# This is invisible for a widget whose hardcoded default already matches
+# what a user would pick anyway (e.g., TEAM DEFENSE defaulting to 'Duke' -
+# looks "retained" if you never change it away from Duke) - which is likely
+# why this survived every prior review pass in this doc; it only becomes
+# obvious once you pick something ELSE and watch it snap back.
+#
+# Fix: mirror each widget's real value into a SECOND, plain session_state
+# entry (not itself tied to any widget's auto-managed key) on every render -
+# a plain dict assignment isn't part of Streamlit's widget-instantiation
+# bookkeeping, so it survives exactly the round-trip a widget-scoped key
+# doesn't. Each wrapper reads that mirror BEFORE instantiating the real
+# widget to compute the index/default the widget itself should reopen with,
+# so even a freshly (re-)instantiated widget reopens on the last real
+# selection instead of snapping back to its hardcoded default.
+# ---------------------------------------------------------------------------
+
+def _sticky_mirror_key(widget_key):
+    return f"_sticky__{widget_key}"
+
+
+def sticky_selectbox(label, options, key, default_index=0, **kwargs):
+    """Drop-in `st.selectbox` replacement that survives its containing tab
+    losing/regaining focus - see this module's own section header comment
+    for the bug this fixes. `options` must support `.index()` (a list, not
+    a generator) since it's used both for the remembered-value lookup below
+    and passed straight through to st.selectbox."""
+    options = list(options)
+    mirror_key = _sticky_mirror_key(key)
+    remembered = st.session_state.get(mirror_key)
+    idx = options.index(remembered) if remembered in options else default_index
+    value = st.selectbox(label, options, index=idx, key=key, **kwargs)
+    st.session_state[mirror_key] = value
+    return value
+
+
+def sticky_multiselect(label, options, key, default=None, **kwargs):
+    """Drop-in `st.multiselect` replacement - see sticky_selectbox above.
+    Remembered selections that are no longer valid options (e.g. a
+    conference/season switch narrowed the choices) are dropped silently,
+    same as st.multiselect's own behavior when `default` contains a stale
+    value."""
+    options = list(options)
+    mirror_key = _sticky_mirror_key(key)
+    remembered = st.session_state.get(mirror_key)
+    default_value = [v for v in remembered if v in options] if remembered is not None else (default or [])
+    value = st.multiselect(label, options, default=default_value, key=key, **kwargs)
+    st.session_state[mirror_key] = value
+    return value
+
+
+def sticky_slider(label, key, default_value, **kwargs):
+    """Drop-in `st.slider` replacement - see sticky_selectbox above."""
+    mirror_key = _sticky_mirror_key(key)
+    remembered = st.session_state.get(mirror_key, default_value)
+    value = st.slider(label, value=remembered, key=key, **kwargs)
+    st.session_state[mirror_key] = value
+    return value
+
+
+def sticky_checkbox(label, key, default_value=False, **kwargs):
+    """Drop-in `st.checkbox` replacement - see sticky_selectbox above."""
+    mirror_key = _sticky_mirror_key(key)
+    remembered = st.session_state.get(mirror_key, default_value)
+    value = st.checkbox(label, value=remembered, key=key, **kwargs)
+    st.session_state[mirror_key] = value
+    return value
+
+
+def sticky_text_input(label, key, default_value="", **kwargs):
+    """Drop-in `st.text_input` replacement - see sticky_selectbox above."""
+    mirror_key = _sticky_mirror_key(key)
+    remembered = st.session_state.get(mirror_key, default_value)
+    value = st.text_input(label, value=remembered, key=key, **kwargs)
+    st.session_state[mirror_key] = value
+    return value
+
+
 def render_header():
     st.markdown(
         f"<div style='display:flex; align-items:center; gap:12px; margin-top:0;'>"

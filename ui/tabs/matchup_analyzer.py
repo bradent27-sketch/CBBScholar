@@ -64,7 +64,9 @@ from data.transforms import (
     stat_elasticity, game_script_sensitivity,
 )
 from data.utils import match_player_name, resolve_team_name
-from ui.components import render_coming_soon
+from ui.components import (
+    render_coming_soon, sticky_selectbox, sticky_slider, sticky_checkbox,
+)
 from ui.charts import render_trend_line, render_relative_bars, render_game_script_curve, render_stat_elasticity_curve
 from ui.styling import df_auto_height, render_responsive_table
 
@@ -95,7 +97,10 @@ def render():
 
     default_season = current_cbb_season()
     seasons = AVAILABLE_SEASONS if default_season in AVAILABLE_SEASONS else [default_season] + AVAILABLE_SEASONS
-    season = st.selectbox("Season", seasons, index=seasons.index(default_season), format_func=lambda y: f"{y - 1}-{str(y)[2:]}", key="ma_season")
+    season = sticky_selectbox(
+        "Season", seasons, key="ma_season", default_index=seasons.index(default_season),
+        format_func=lambda y: f"{y - 1}-{str(y)[2:]}",
+    )
 
     teams_df = load_teams(season)
     if teams_df.empty:
@@ -170,7 +175,7 @@ def _pick_player(season, teams_df):
     # not confirming a pre-made choice. Short-circuits below (same as the
     # "no team data" case just above) until a real team is chosen.
     team_options = [_TEAM_PLACEHOLDER] + team_names
-    team_choice = st.selectbox("Team", team_options, index=0, key="ma_player_team")
+    team_choice = sticky_selectbox("Team", team_options, key="ma_player_team", default_index=0)
     if team_choice == _TEAM_PLACEHOLDER:
         st.info("Pick a team above to scout one of its players.")
         return None
@@ -198,7 +203,7 @@ def _pick_player(season, teams_df):
         st.info(f"No roster or season data found for {team_choice} in {season}.")
         return None
     labels = [f"{r['name']} ({r.get('position') or '?'})" for r in combined_rows]
-    sel_label = st.selectbox("Player", labels, key="ma_player_select")
+    sel_label = sticky_selectbox("Player", labels, key="ma_player_select")
     sel_row = combined_rows[labels.index(sel_label)]
 
     with st.spinner("Loading stats..."):
@@ -225,14 +230,14 @@ def _pick_defense_team(teams_df):
         st.info("No team data available.")
         return None
     default_team = 'Duke' if 'Duke' in team_names else team_names[0]
-    return st.selectbox("Team", team_names, index=team_names.index(default_team), key="ma_def_team")
+    return sticky_selectbox("Team", team_names, key="ma_def_team", default_index=team_names.index(default_team))
 
 
 def _render_tendency_profile(season, ctx):
     sel_row, stats = ctx['sel_row'], ctx['stats']
     include_net_rating, source, box_df, conf = ctx['include_net_rating'], ctx['source'], ctx['box_df'], ctx['conf']
 
-    compare_all = st.checkbox(
+    compare_all = sticky_checkbox(
         "Compare against all of Division I instead of just this conference"
         + ("" if source == 'espn' else " (cached ~weekly)"),
         key="ma_player_compare_all",
@@ -357,7 +362,7 @@ def _render_player_trend(season, ctx, defense_team=None):
     # already took a `stat_col` param before this change (only its CALLER
     # here hardcoded 'Points') - stat_elasticity is the one that actually
     # needed a real signature change (see its own CORRECTION note).
-    stat_col = st.selectbox(
+    stat_col = sticky_selectbox(
         "Stat", _ELASTICITY_STAT_OPTIONS, key="ma_elasticity_stat",
         help="Which per-game stat drives both charts below.",
     )
@@ -551,9 +556,9 @@ def _render_defensive_profile(team, season):
 
 def _render_positional_defense(team, season):
     st.markdown(f"**{team} — positional matchup defense**")
-    recent_games_cap = st.slider(
-        "Games to include (most recent)", min_value=5, max_value=30, value=20, step=5,
-        key="ma_pos_defense_window",
+    recent_games_cap = sticky_slider(
+        "Games to include (most recent)", key="ma_pos_defense_window", default_value=20,
+        min_value=5, max_value=30, step=5,
         help="Lower = fewer CBBD calls (only matters on the fallback) and a more current read; higher = more complete.",
     )
     trigger_key = f"ma_pos_defense_loaded_{season}_{team}_{recent_games_cap}"
@@ -612,7 +617,7 @@ def _render_positional_defense(team, season):
     # incorporates team/season/games-cap so switching teams can't leave a
     # stale bucket selection that isn't in the new options list.
     bucket_options = summary['Bucket'].tolist()
-    selected_bucket = st.selectbox(
+    selected_bucket = sticky_selectbox(
         "Position group", bucket_options, key=f"ma_pos_defense_bucket_{team}_{season}_{recent_games_cap}",
     )
     for stat in ('Points', 'Rebounds', 'Assists'):

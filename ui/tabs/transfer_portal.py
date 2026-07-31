@@ -19,7 +19,7 @@ import streamlit as st
 
 from config import AVAILABLE_SEASONS_WITH_UPCOMING
 from data.loaders import current_cbb_season, load_recruiting_rankings, load_transfer_portal, load_teams
-from ui.components import render_coming_soon
+from ui.components import render_coming_soon, sticky_selectbox, sticky_text_input
 from ui.styling import df_auto_height, render_responsive_table
 from ui.tabs.player_search import _fmt_height
 
@@ -71,9 +71,9 @@ def render():
 
     default_season = current_cbb_season() + 1
     seasons = AVAILABLE_SEASONS_WITH_UPCOMING if default_season in AVAILABLE_SEASONS_WITH_UPCOMING else [default_season] + AVAILABLE_SEASONS_WITH_UPCOMING
-    season = st.selectbox(
-        "Recruiting class / portal season", seasons, index=seasons.index(default_season),
-        format_func=lambda y: f"{y - 1}-{str(y)[2:]}", key="tp_season",
+    season = sticky_selectbox(
+        "Recruiting class / portal season", seasons, key="tp_season", default_index=seasons.index(default_season),
+        format_func=lambda y: f"{y - 1}-{str(y)[2:]}",
         help="Defaults to the upcoming season — recruiting/portal activity is about who's arriving NEXT, not this season's roster.",
     )
 
@@ -91,12 +91,12 @@ def render():
     team_options = ["All teams"] + (sorted(teams_df['Team'].dropna().unique().tolist()) if not teams_df.empty else [])
     fc1, fc2 = st.columns([1, 2])
     with fc1:
-        team_filter = st.selectbox(
+        team_filter = sticky_selectbox(
             "Filter by team", team_options, key="tp_team_filter",
             help="Shows this team's recruiting class AND portal activity together.",
         )
     with fc2:
-        text_filter = st.text_input("Filter by player name", key="tp_text_filter")
+        text_filter = sticky_text_input("Filter by player name", key="tp_text_filter")
 
     st.markdown("**Recruiting Class Rankings**")
     if recruits.empty:

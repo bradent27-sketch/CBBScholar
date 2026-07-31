@@ -5,9 +5,173 @@ Sibling app to NFL Scholar (`C:\FantasyF`) and CFB Scholar
 college basketball. This doc follows NFL Scholar's own HANDOFF.md section
 structure on purpose, so all three stay easy to cross-reference.
 
+**Season-readiness audit for 26-27: a real, app-wide state-loss bug found
+and fixed (every tab), the unsatisfiable `numpy>=2.5` pin, and the first
+genuine live-Playwright walkthrough against synthetic data this session
+(this doc's most recent update):**
+
+Requested as a general "walk through the app, check for bugs/visual/data
+issues, make sure it's ready for the 26-27 season" pass, done BEFORE the
+season starts (this session's real date fell in the 2026 off-season, the
+exact window this kind of audit matters most). Same standing sandbox
+caveat as every pass in this doc up front: this environment still cannot
+reach api.collegebasketballdata.com, ESPN, GitHub release assets, ncaa.com,
+or The Odds API directly (re-confirmed via both direct `curl` and `WebFetch`
+- both 403). Everything below that needed live rendering was verified
+against a real `streamlit run` + real headless-Chromium Playwright, driven
+by a from-scratch synthetic data universe (8 teams, full rosters, a
+double-round-robin schedule with realistic, internally-consistent box
+scores spanning all 5 game-script tiers) that monkeypatches every
+`data.loaders` function BEFORE `app.py` and its tab modules import them -
+not committed to this repo (scratch tooling only) but real DOM/CSS/chart
+math over every tab, not a code-only review.
+
+1. **Real, live-confirmed, app-wide bug: every stateful widget with an
+   explicit `key=` inside a tab silently resets to its hardcoded default
+   the instant you switch to a DIFFERENT top-level tab and come back.**
+   Found by literally doing what a real user does - pick a team/player in
+   Matchup Analyzer, glance at Live Odds, come back - and noticing the
+   PLAYER side had reverted to its placeholder while TEAM DEFENSE (which
+   happened to already be sitting on its own hardcoded default, Duke) looked
+   fine. That similarity was the trap: a THIRD test that changed TEAM
+   DEFENSE away from Duke to Kansas and round-tripped the same way proved
+   it reverts too - this isn't specific to placeholder-style pickers or to
+   Matchup Analyzer, it's every `st.selectbox`/`multiselect`/`slider`/
+   `checkbox`/`text_input` with a `key=` in every one of the 9 tab files
+   (Player Search's team picker showed the identical reset independently).
+   Root cause, pinned down via `streamlit.testing.v1.AppTest` at the
+   `st.session_state` level (not just observed in the browser):
+   `st.session_state['ma_def_team']` disappears ENTIRELY the instant its
+   containing tab stops being the open one (confirmed by directly printing
+   `at.session_state` mid-script) - Streamlit prunes a widget-scoped
+   session_state entry whenever that widget isn't instantiated during a
+   script run, which is exactly what happens to EVERY widget inside a tab
+   gated by `if tab.open:` (this app's own `_render_guarded`/tab-switching
+   optimization - see app.py - which exists so an inactive tab's expensive
+   data pipeline doesn't refire on every click elsewhere in the app; reverting
+   that gating to "fix" this would reintroduce the exact perf problem it was
+   built to solve, so it stays). A freshly re-instantiated widget then has
+   nothing to inherit and falls back to whatever `index=`/`value=`/`default=`
+   the call site hardcoded. This is invisible for any widget whose hardcoded
+   default already matches what a user would've picked anyway (which is
+   probably why this survived every previous pass in this doc - TEAM
+   DEFENSE's own default IS Duke, so "reset to Duke" and "correctly
+   remembered Duke" look identical unless you specifically pick something
+   else and watch for it to snap back).
+
+   **Fixed**: five drop-in `sticky_*` wrappers in `ui/components.py`
+   (`sticky_selectbox`/`sticky_multiselect`/`sticky_slider`/
+   `sticky_checkbox`/`sticky_text_input`) that mirror each widget's real
+   value into a SECOND, plain `st.session_state` entry on every render - a
+   plain dict assignment isn't part of Streamlit's widget-instantiation
+   bookkeeping, so it survives exactly the round-trip a widget-scoped key
+   doesn't - and read that mirror BEFORE instantiating the real widget to
+   compute the index/default it should reopen with. Applied at every
+   affected call site across all 9 tab files (~25 sites: every season/team/
+   player/conference/poll/scope/stat/game/bucket picker, Team Efficiency's
+   highlight multiselect, Live Odds' market filter and bet picker, NET &
+   Resume's trajectory multiselect and filter box, Transfer Portal's team
+   filter and name filter, Matchup Analyzer's games-per-team slider and two
+   compare-all checkboxes, Player Search's two query boxes and compare-all
+   checkbox) - two selectboxes that had no explicit `key=` at all
+   (Conference Standings' season/conference pickers) gained one so they
+   could be wrapped too. The sidebar's own theme/text-size radios were
+   already safe without any change - `render_setup_status_sidebar()` runs
+   unconditionally every rerun, never gated behind `if tab.open:`.
+
+   **Verified three ways**: (a) the exact three-step round-trip that found
+   the bug, re-run against the FIXED app in a real browser and confirmed
+   fixed (Matchup Analyzer PLAYER, Player Search, and the decisive
+   TEAM-DEFENSE-changed-to-Kansas case all now correctly reopen on the real
+   last selection, not the hardcoded default); (b) a full walkthrough of
+   all 7 tabs/sub-tabs plus light/dark, all 3 text sizes, and a 390px mobile
+   viewport, re-run end to end against the fixed code with zero console
+   errors and the fix still holding after many more interactions than the
+   isolated repro; (c) new `tests/test_sticky_widgets.py` (6 tests, all via
+   real `streamlit.testing.v1.AppTest` runs - a pure-Python test of the
+   wrapper's own arithmetic wouldn't have caught the original bug, since the
+   bug was never in this module's arithmetic to begin with) - one test per
+   wrapper confirming a CHANGED value survives the identical tab-round-trip,
+   plus a sanity-check that an untouched selectbox still shows its real
+   default (ruling out a wrapper that just always shows `default_index`
+   regardless of input).
+
+2. **`requirements.txt`'s `numpy>=2.5` pin is unsatisfiable right now** -
+   confirmed live via a real `pip install -r requirements.txt`: no numpy
+   release meeting that floor exists yet (PyPI tops out at 2.4.x as of this
+   fix), so a completely fresh install of this app failed outright before a
+   single line of app code ever ran, on this environment's real package
+   index (also confirmed current: the same index serves pandas 3.0.5 and
+   streamlit 1.60.0 without issue, so this isn't a stale-mirror artifact).
+   Nothing in this codebase actually needs 2.5+ specifically (`np.polyfit`
+   and basic array ops, both long-stable). **Fixed**: lowered to
+   `numpy>=2.0`, a real, currently-installable floor - re-verified with a
+   clean `pip install --dry-run -r requirements.txt`.
+
+3. **Reminder, not a new finding**: `.streamlit/secrets.toml.example` still
+   documents (from a prior pass) that a real CBBD key and Odds API key were
+   accidentally committed to this repo's git history on 2026-07-18, before
+   being scrubbed to placeholders on 2026-07-21. Placeholder-in-the-current-
+   file does NOT remove the real values from git HISTORY (`git log -p`
+   still shows them in that one old commit) - if the two keys named there
+   haven't actually been rotated yet (collegebasketballdata.com/key,
+   the-odds-api.com), that's still the one outstanding action item, and it's
+   a human account-side step this doc can't do on anyone's behalf.
+
+4. **Season-transition logic re-verified, not just re-read**: every tab's
+   season selector already uses the same defensive
+   `AVAILABLE_SEASONS if default_season in AVAILABLE_SEASONS else
+   [default_season] + AVAILABLE_SEASONS` pattern (or the
+   `..._WITH_UPCOMING` variant for Transfer Portal/Conference Standings),
+   so `current_cbb_season()` flipping from 2026 to 2027 this coming
+   November needs no manual `config.py` update to show up correctly as the
+   new default - confirmed by literally forcing `current_cbb_season()` to
+   2027 with every loader ALSO returning empty (simulating day one of the
+   26-27 season, before SportsDataverse/CBBD/ESPN have anything published
+   for it yet) and walking every tab: every one correctly shows "2026-27"
+   as the selected season and its own clean "NEEDS SETUP"/"TEMPORARILY
+   UNAVAILABLE" empty state - zero tracebacks anywhere, including Transfer
+   Portal (which stacks `current_cbb_season() + 1`, correctly showing
+   "2027-28") and every sub-tab (Four Factors Tiering, Conference
+   Standings).
+
+5. **Reviewed, not changed - confirmed working as designed, not a bug**:
+   Matchup Analyzer's positional-defense "Points Delta"/etc. coloring reads
+   POSITIVE as green - i.e. "this position is outscoring their own average
+   against this defense" renders as a green light, not a red flag. Read in
+   isolation this looks backwards (green usually means "good defense" in
+   this app's other tables), but this whole section is framed as "which
+   position is worth targeting" (this file's own docstrings: "should I
+   worry about their guards," "worth targeting") - green correctly means
+   "good news for whoever's scouting this matchup to exploit it," matching
+   `positional_vulnerability_ranking`'s own stated framing. Not touched.
+
+**Verification discipline note**: this pass's own synthetic-data harness
+had a bug worth naming honestly rather than silently fixing and moving on
+- `fetch_net_rankings_manual`/`fetch_ncaab_odds`/`fetch_ncaab_player_props`
+are real `@st.cache_data`-decorated functions in the shipped app (their
+"Refresh"-button callers call a real `.clear()` on them), and the FIRST
+version of this session's monkeypatch stand-ins were bare lambdas with no
+such method - clicking "Fetch latest NET rankings" against that harness
+threw `AttributeError: 'function' object has no attribute 'clear'`, which
+briefly looked exactly like a real in-app crash (Streamlit's own
+`_render_guarded` catches it and shows "The RANKINGS tab hit an error").
+Traced to the test harness, not the app, via a minimal direct repro before
+it got anywhere near this doc as a false "found a bug" claim - fixed by
+giving each stand-in a no-op `.clear` attribute, re-tested, and the tab
+renders cleanly. Named here in case a future pass reuses/extends this
+session's harness pattern and hits the same trap.
+
+**Full verification**: 46 unit tests (40 pre-existing + 6 new in
+`tests/test_sticky_widgets.py`), `python3 -m py_compile` across every
+changed file, and the live Playwright/AppTest verification described above
+- all passing.
+
+---
+
+
 **Device-aware text sizing, teams no longer pre-selected on load, a muted
-team-color banner, and a full visual polish pass (this doc's most recent
-update):**
+team-color banner, and a full visual polish pass:**
 
 1. **Text size didn't adapt to the device.** Reported directly: fine on
    an iPhone (the existing <=767px mobile layout already handled that),

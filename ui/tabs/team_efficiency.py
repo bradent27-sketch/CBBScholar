@@ -7,7 +7,7 @@ import streamlit as st
 from config import AVAILABLE_SEASONS
 from data.loaders import current_cbb_season, load_efficiency_ratings, load_all_team_season_stats, team_color_map
 from data.transforms import four_factors_percentile_grid, pct_rank
-from ui.components import render_coming_soon, render_hero_tiles
+from ui.components import render_coming_soon, render_hero_tiles, sticky_selectbox, sticky_multiselect
 from ui.charts import render_efficiency_scatter, render_percentile_heatmap
 from ui.styling import df_auto_height, build_column_help_config, render_responsive_table
 
@@ -17,7 +17,10 @@ def render():
 
     default_season = current_cbb_season()
     seasons = AVAILABLE_SEASONS if default_season in AVAILABLE_SEASONS else [default_season] + AVAILABLE_SEASONS
-    season = st.selectbox("Season", seasons, index=seasons.index(default_season), format_func=lambda y: f"{y - 1}-{str(y)[2:]}")
+    season = sticky_selectbox(
+        "Season", seasons, key="te_season", default_index=seasons.index(default_season),
+        format_func=lambda y: f"{y - 1}-{str(y)[2:]}",
+    )
 
     df = load_efficiency_ratings(season)
     if df.empty:
@@ -72,8 +75,8 @@ def _render_rankings_subtab(df, colors, ranked, season):
     # (y, inverted so up = better since a LOWER defensive rating is better).
     st.markdown("<div class='custom-section-header'>EFFICIENCY LANDSCAPE</div>", unsafe_allow_html=True)
     top1 = ranked.sort_values('Rank')['Team'].head(1).tolist()
-    extra = st.multiselect("Highlight teams", sorted(df['Team'].dropna().tolist()), key="te_highlight",
-                           help="The #1 team is highlighted by default — add any others you want to compare.")
+    extra = sticky_multiselect("Highlight teams", sorted(df['Team'].dropna().tolist()), key="te_highlight",
+                                help="The #1 team is highlighted by default — add any others you want to compare.")
     render_efficiency_scatter(
         df, 'Off Rating', 'Def Rating', colors, invert_y=True,
         highlight=set(top1) | set(extra),
@@ -138,7 +141,7 @@ def _render_four_factors_subtab(df, ranked, season):
         st.info("Four Factors tiering needs /stats/team/season data, which isn't available right now.")
         return
     conf_options = ["Top 25 (Net Rating)"] + sorted(df['Conference'].dropna().unique().tolist())
-    scope = st.selectbox("Scope", conf_options, key="te_ff_scope")
+    scope = sticky_selectbox("Scope", conf_options, key="te_ff_scope")
     if scope == "Top 25 (Net Rating)":
         scope_teams = ranked.sort_values('Net Rating', ascending=False)['Team'].head(25).tolist()
     else:

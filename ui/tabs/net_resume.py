@@ -25,7 +25,7 @@ from data.loaders import (
     _fetch_rankings_raw, team_color_map,
 )
 from data.transforms import poll_trajectory
-from ui.components import render_coming_soon
+from ui.components import render_coming_soon, sticky_selectbox, sticky_multiselect, sticky_text_input
 from ui.charts import render_rank_trajectory
 from ui.styling import df_auto_height, build_column_help_config, render_responsive_table
 
@@ -50,7 +50,7 @@ def render():
         if net_df.empty:
             st.warning("Couldn't fetch or parse NCAA.com's NET rankings page right now — try again in a moment.")
         else:
-            filter_text = st.text_input("Filter by team name", key="nr_net_filter")
+            filter_text = sticky_text_input("Filter by team name", key="nr_net_filter")
             shown = net_df
             if filter_text:
                 shown = net_df[net_df['Team'].str.contains(filter_text, case=False, na=False)]
@@ -78,7 +78,10 @@ def render():
     seasons = AVAILABLE_SEASONS if default_season in AVAILABLE_SEASONS else [default_season] + AVAILABLE_SEASONS
     c1, c2 = st.columns([1, 2])
     with c1:
-        season = st.selectbox("Season", seasons, index=seasons.index(default_season), format_func=lambda y: f"{y - 1}-{str(y)[2:]}", key="nr_season")
+        season = sticky_selectbox(
+            "Season", seasons, key="nr_season", default_index=seasons.index(default_season),
+            format_func=lambda y: f"{y - 1}-{str(y)[2:]}",
+        )
 
     poll_types = list_cbb_poll_types(season)
     if not poll_types:
@@ -91,7 +94,7 @@ def render():
 
     with c2:
         default_idx = poll_types.index('AP Top 25') if 'AP Top 25' in poll_types else 0
-        poll_type = st.selectbox("Poll", poll_types, index=default_idx, key="nr_poll")
+        poll_type = sticky_selectbox("Poll", poll_types, key="nr_poll", default_index=default_idx)
 
     df, week = load_latest_poll(season, poll_type)
     if df.empty:
@@ -117,7 +120,7 @@ def render():
     st.markdown("<div class='custom-section-header'>RANK TRAJECTORY</div>", unsafe_allow_html=True)
     raw = _fetch_rankings_raw(season)
     all_teams = sorted({r.get('team') for r in raw if r.get('pollType') == poll_type and r.get('team')})
-    picked = st.multiselect(
+    picked = sticky_multiselect(
         "Teams (default: current top 10)", all_teams, key="nr_traj_teams",
         help="Every team that appeared in this poll at any point this season is selectable.",
     )
