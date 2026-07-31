@@ -162,24 +162,53 @@ class GameScriptSensitivityTests(unittest.TestCase):
             {'Date': '2026-01-15', 'Points': 8}, {'Date': '2026-01-18', 'Points': 16},
         ])
 
-    def test_three_tier_split_in_order(self):
+    def test_five_tier_split_in_order(self):
+        # Margins: 01-01:+3 (Close), 01-04:-10 (Comfortable Loss),
+        # 01-08:+20 (Blowout Win), 01-11:+5 (Close), 01-15:-16 (Blowout
+        # Loss), 01-18:+12 (Comfortable Win) - every tier gets exactly one
+        # or two games, so all 5 are populated and independently checkable.
         result = transforms.game_script_sensitivity(self._player_games(), self._team_games(), stat_col='Points')
-        self.assertEqual([t['label'] for t in result['tiers']], ['Close', 'Comfortable', 'Blowout'])
-        close, comfortable, blowout = result['tiers']
+        self.assertEqual(
+            [t['label'] for t in result['tiers']],
+            ['Blowout Loss', 'Comfortable Loss', 'Close', 'Comfortable Win', 'Blowout Win'],
+        )
+        blowout_loss, comfortable_loss, close, comfortable_win, blowout_win = result['tiers']
+        self.assertAlmostEqual(blowout_loss['mean'], 8.0)
+        self.assertEqual(blowout_loss['games'], 1)
+        self.assertAlmostEqual(comfortable_loss['mean'], 18.0)
+        self.assertEqual(comfortable_loss['games'], 1)
         self.assertAlmostEqual(close['mean'], 24.0)
         self.assertEqual(close['games'], 2)
-        self.assertAlmostEqual(comfortable['mean'], 17.0)
-        self.assertEqual(comfortable['games'], 2)
-        self.assertAlmostEqual(blowout['mean'], 9.0)
-        self.assertEqual(blowout['games'], 2)
+        self.assertAlmostEqual(comfortable_win['mean'], 16.0)
+        self.assertEqual(comfortable_win['games'], 1)
+        self.assertAlmostEqual(blowout_win['mean'], 10.0)
+        self.assertEqual(blowout_win['games'], 1)
         self.assertAlmostEqual(result['season_mean'], 16.7, places=1)
         self.assertEqual(result['n_games'], 6)
 
-    def test_missing_middle_tier_is_simply_omitted(self):
+    def test_win_and_loss_of_the_same_margin_land_in_different_tiers(self):
+        # A +12 win and a -12 loss both have |margin|=12 (old behavior
+        # would have merged them into one "Comfortable" tier) - confirms
+        # they now land in separate Comfortable Win / Comfortable Loss
+        # tiers instead of being combined.
+        team_games = pd.DataFrame([
+            {'Date': '2026-01-01', 'Margin': 12}, {'Date': '2026-01-04', 'Margin': -12}, {'Date': '2026-01-08', 'Margin': 1},
+        ])
+        player_games = pd.DataFrame([
+            {'Date': '2026-01-01', 'Points': 20}, {'Date': '2026-01-04', 'Points': 10}, {'Date': '2026-01-08', 'Points': 15},
+        ])
+        result = transforms.game_script_sensitivity(player_games, team_games, stat_col='Points')
+        self.assertEqual([t['label'] for t in result['tiers']], ['Comfortable Loss', 'Close', 'Comfortable Win'])
+        comfortable_loss, close, comfortable_win = result['tiers']
+        self.assertAlmostEqual(comfortable_loss['mean'], 10.0)
+        self.assertAlmostEqual(close['mean'], 15.0)
+        self.assertAlmostEqual(comfortable_win['mean'], 20.0)
+
+    def test_missing_middle_tiers_are_simply_omitted(self):
         team_games = pd.DataFrame([{'Date': '2026-01-01', 'Margin': 2}, {'Date': '2026-01-04', 'Margin': 25}, {'Date': '2026-01-08', 'Margin': -1}])
         player_games = pd.DataFrame([{'Date': '2026-01-01', 'Points': 20}, {'Date': '2026-01-04', 'Points': 8}, {'Date': '2026-01-08', 'Points': 22}])
         result = transforms.game_script_sensitivity(player_games, team_games, stat_col='Points')
-        self.assertEqual([t['label'] for t in result['tiers']], ['Close', 'Blowout'])
+        self.assertEqual([t['label'] for t in result['tiers']], ['Close', 'Blowout Win'])
 
     def test_insufficient_total_games_returns_empty(self):
         team_games = pd.DataFrame([{'Date': '2026-01-01', 'Margin': 3}, {'Date': '2026-01-04', 'Margin': 5}])

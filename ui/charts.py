@@ -901,22 +901,42 @@ def render_prop_line_shop(rows):
 
 
 # ---------------------------------------------------------------------------
-# Game-script curve (Close/Comfortable/Blowout production, see
-# data.transforms.game_script_sensitivity)
+# Game-script curve (Blowout Loss / Comfortable Loss / Close / Comfortable
+# Win / Blowout Win production, see data.transforms.game_script_sensitivity)
 # ---------------------------------------------------------------------------
 
 def render_game_script_curve(result, height=190):
     """
-    Line/area chart across a player's Close/Comfortable/Blowout game-script
-    tiers (`result`: data.transforms.game_script_sensitivity's own return
-    dict). Straight segments connect each tier's mean `stat` value -
-    deliberately NOT a smoothed/splined curve, since only up to 3 discrete
-    tiers exist and implying more statistical smoothness than that would
-    misrepresent the data - with a light area fill under the line for
-    visual weight, a dashed season-average reference line, and each
-    point's own game count labeled directly so a small-sample tier still
-    reads honestly rather than being hidden. No-ops if `result` has fewer
-    than 2 plotted tiers (a single point can't draw a line).
+    Line/area chart across a player's game-script tiers (`result`: data.
+    transforms.game_script_sensitivity's own return dict - up to 5 tiers,
+    Blowout Loss/Comfortable Loss/Close/Comfortable Win/Blowout Win, any
+    of which can be missing if the player had zero games in it; entirely
+    tier-count-agnostic in what it PLOTS, so the 3-tier -> 5-tier split
+    when win/loss was separated out needed no changes to the plotting
+    logic - it just plots however many tiers `result['tiers']` actually
+    has). Straight segments connect each tier's mean `stat` value -
+    deliberately NOT a smoothed/splined curve, since only a handful of
+    discrete tiers exist and implying more statistical smoothness than
+    that would misrepresent the data - with a light area fill under the
+    line for visual weight, a dashed season-average reference line, and
+    each point's own game count labeled directly so a small-sample tier
+    still reads honestly rather than being hidden. No-ops if `result` has
+    fewer than 2 plotted tiers (a single point can't draw a line).
+
+    ML/MR (left/right plot margins) DO need to react to the actual first/
+    last tier labels, though: the first and last points sit right at the
+    plot's own edges (`px(0)==ML`, `px(n-1)==ML+plot_w`) with their
+    `text-anchor='middle'` category-name labels centered on that same x -
+    half the label's width extends past the edge in each direction, and a
+    fixed margin sized for the old 3-tier labels ("Close"/"Comfortable"/
+    "Blowout", all <=11 chars) started clipping the new, longer ones
+    ("Comfortable Loss"/"Blowout Win", both wider) right off the SVG's own
+    right edge - confirmed live via a real bounding-box measurement, not
+    just guessed from the label length change. Margins below are a floor
+    (the old fixed values, so every short-label call site - and this
+    chart's OTHER caller, if one ever plots fewer/shorter tiers again -
+    renders byte-for-byte the same) that only grows for a genuinely wider
+    edge label.
     """
     tiers = (result or {}).get('tiers') or []
     if len(tiers) < 2:
@@ -924,8 +944,19 @@ def render_game_script_curve(result, height=190):
     season_avg = (result or {}).get('season_mean')
     stat_label = (result or {}).get('stat', '')
 
+    def _edge_label_margin(label, floor):
+        # ~5.6px/char is this chart's own regular-weight ~11px body-font
+        # label text (Playwright-measured against a live render, same
+        # discipline as every other width constant in this app) - halved
+        # since text-anchor='middle' only pushes half the label's width
+        # past its anchor point on the overflow side, plus a small flat
+        # cushion for cross-browser/platform subpixel variance.
+        return max(floor, round(len(str(label)) * 5.6 / 2) + 8)
+
     W, H = 860, height
-    ML, MR, MT, MB = 56, 24, 30, 48
+    MT, MB = 30, 48
+    ML = _edge_label_margin(tiers[0]['label'], 56)
+    MR = _edge_label_margin(tiers[-1]['label'], 24)
     plot_w, plot_h = W - ML - MR, H - MT - MB
     values = [t['mean'] for t in tiers]
     bounds = values + ([season_avg] if season_avg is not None else [])
@@ -1059,12 +1090,28 @@ def render_stat_elasticity_curve(result, opponent_team=None, height=210):
 
     if season_avg is not None:
         say = py(season_avg)
+        # The opponent marker's own value label and name label (below)
+        # both anchor at `ox` - when tonight's opponent sits in the right
+        # half of the defensive-strength axis (opp_x >= 50, a common case:
+        # a tough, high-percentile defense), `ox` lands close to this
+        # label's default right-edge anchor (ML + plot_w), and the two
+        # texts overlap illegibly whenever their y-values are also close
+        # (confirmed live from a real report - "season avg" and the
+        # opponent's own value ran together into unreadable text). Rather
+        # than compute an exact pixel collision (fragile - depends on
+        # font metrics this module doesn't measure), anchor this label to
+        # whichever HALF of the plot the opponent marker ISN'T in - the
+        # two labels then start from opposite edges and can't collide
+        # regardless of how close their y-values happen to be.
+        say_left = has_opp_marker and opp_x >= 50
+        say_x = ML if say_left else ML + plot_w
+        say_anchor = "start" if say_left else "end"
         parts.append(
             f"<line x1='{ML}' y1='{say:.1f}' x2='{ML + plot_w}' y2='{say:.1f}' stroke='{C['on_surface_variant']}' "
             f"stroke-width='1.2' stroke-dasharray='4,3'><title>Season average {_esc(stat_label)}: {season_avg:.1f}</title></line>"
         )
         parts.append(
-            f"<text x='{ML + plot_w}' y='{say - 6:.1f}' text-anchor='end' font-size='10' "
+            f"<text x='{say_x}' y='{say - 6:.1f}' text-anchor='{say_anchor}' font-size='10' "
             f"fill='{C['on_surface_variant']}'>season avg {season_avg:.1f}</text>"
         )
 
@@ -1090,6 +1137,18 @@ def render_stat_elasticity_curve(result, opponent_team=None, height=210):
         )
 
     if has_opp_marker:
+        # CORRECTION: `oy` here is deliberately the PIXEL y-coordinate
+        # (py(opp_y)), not the data value - real bug found while fixing
+        # the reported overlap (below): both the tooltip and the visible
+        # orange value label used to print `{oy:.1f}` directly, i.e. a raw
+        # SVG pixel coordinate (something like "114.0" or "58.0") instead
+        # of the actual projected stat value - `opp_y` (the real data
+        # value, still in scope and untouched by this reassignment) is
+        # what both of those need instead. Confirmed live: this had been
+        # showing a meaningless number on every render with an opponent
+        # marker, not just an overlap - the reported "not showing up
+        # clearly" screenshot's garbled digits were this bug's actual
+        # output, not merely a rendering collision.
         ox, oy = px(opp_x), py(opp_y)
         opp_label = opponent_team or "tonight's opponent"
         parts.append(
@@ -1098,11 +1157,11 @@ def render_stat_elasticity_curve(result, opponent_team=None, height=210):
         )
         parts.append(
             f"<circle cx='{ox:.1f}' cy='{oy:.1f}' r='7.5' fill='{C['tertiary']}' stroke='{C['surface']}' stroke-width='2'>"
-            f"<title>Projected vs {_esc(opp_label)}: {oy:.1f} {_esc(stat_label)} (opponent defense percentile {opp_x:.0f})</title></circle>"
+            f"<title>Projected vs {_esc(opp_label)}: {opp_y:.1f} {_esc(stat_label)} (opponent defense percentile {opp_x:.0f})</title></circle>"
         )
         parts.append(
             f"<text x='{ox:.1f}' y='{oy - 14:.1f}' text-anchor='middle' font-size='12.5' font-weight='800' "
-            f"font-family='{_MONO_FONT}' fill='{C['tertiary']}'>{oy:.1f}</text>"
+            f"font-family='{_MONO_FONT}' fill='{C['tertiary']}'>{opp_y:.1f}</text>"
         )
         parts.append(
             f"<text x='{ox:.1f}' y='{MT - 12}' text-anchor='middle' font-size='9.5' font-weight='700' "

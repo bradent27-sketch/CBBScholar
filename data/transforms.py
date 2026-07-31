@@ -670,10 +670,13 @@ def positional_defense_trend(matchup_df, position_map, bucket, stat='Points'):
 # every ALLOWED-rate stat after it is - `higher_is_better=True` here just
 # means the percentile bar tracks the RAW pace value directly (fast team ->
 # long/high-colored bar), not a claim that fast is the "better" tempo -
-# every other stat's direction below is a real defensive-quality claim,
 # this one is purely descriptive context for reading them (a fast team
 # concedes more raw points/rebounds/assists per game than its per-
-# possession rates alone would suggest, just from extra possessions).
+# possession rates alone would suggest, just from extra possessions). Off.
+# Reb % is the other non-"allowed" row (this team's OWN offensive
+# rebounding, not an opponent rate) - see its own inline comment below for
+# why it's here instead of the "Off. Reb % Allowed" row it replaced. Every
+# remaining stat's direction is a real defensive-quality claim.
 _TEAM_DEFENSE_METRICS = [
     ('Pace', 'Pace', True, False, "Possessions per 40 minutes — tempo, not quality. Shows whether this team plays fast or slow relative to D-I; a fast pace means more raw possessions (and more raw points/rebounds/assists) to defend per game, even at identical per-possession rates."),
     ('eFG% Allowed', 'Def eFG%', False, True, "Effective field goal % allowed to opponents — lower is better defense."),
@@ -681,8 +684,19 @@ _TEAM_DEFENSE_METRICS = [
     ('3P% Allowed', 'Def 3P%', False, True, "Opponent three-point percentage against this team — lower is better three-point defense."),
     ('2P% Allowed', 'Def 2P%', False, True, "Opponent two-point field goal percentage against this team — lower is better interior/mid-range defense."),
     ('FT Rate Allowed', 'Def FT Rate', False, True, "Opponent free throw attempts relative to their own field goal attempts — lower means fouling less / sending opponents to the line less often."),
-    ('Off. Reb % Allowed', 'Def ORB%', False, True, "Opponent offensive rebound rate — lower means this defense boxes out better."),
-    ('Def. Reb %', 'Def DREB%', True, True, "This team's own defensive rebound rate (complement of Off. Reb % Allowed) — higher is better."),
+    # CORRECTION: this row used to be 'Off. Reb % Allowed' (Def ORB% -
+    # the opponent's offensive rebound rate against this team) sitting
+    # right next to 'Def. Reb %' (Def DREB%) - on a missed shot, the
+    # offense either grabs it (ORB%) or the defense does (DREB%), so
+    # those two numbers are near-complements of each other and were
+    # showing the same rebounding battle twice, per explicit request.
+    # Swapped for this team's own OFFENSIVE rebound rate (Off ORB% -
+    # "share of own misses rebounded", already loaded and already used
+    # this same way in FOUR_FACTORS above) instead: a genuinely different
+    # dimension (this team's own second-chance creation) rather than
+    # another read on the same allowed-rebounding number.
+    ('Off. Reb %', 'Off ORB%', True, True, "This team's own offensive rebound rate — share of their own missed shots they rebound. Higher means more second-chance opportunities created."),
+    ('Def. Reb %', 'Def DREB%', True, True, "This team's own defensive rebound rate — share of opponent misses this team rebounds. Higher is better."),
     ('TO Ratio Forced', 'Def TO Ratio', True, False, "Turnovers forced per possession — higher is better defense."),
 ]
 
@@ -693,11 +707,11 @@ def team_defense_profile_rows(stats_df, team):
     ui.charts.render_relative_bars (the same single-sided bar-plus-value
     treatment Player Search uses for a player's own tendency profile) - Pace
     (context, not a quality claim - see _TEAM_DEFENSE_METRICS) plus eFG%/
-    3PA rate/3P%/2P%/FT rate/ORB% allowed, this team's own DREB%, and TO
+    3PA rate/3P%/2P%/FT rate allowed, this team's own ORB%/DREB%, and TO
     ratio forced, D-I percentile per column with the correct better-
-    direction baked in (an ALLOWED rate/percentage is good when LOW; DREB%
-    and TO ratio forced are good when HIGH). Powers Matchup Analyzer's TEAM
-    DEFENSE panel (one team at a time, not team-vs-team, so a single-sided
+    direction baked in (an ALLOWED rate/percentage is good when LOW; this
+    team's own ORB%/DREB% and TO ratio forced are good when HIGH). Powers
+    Matchup Analyzer's TEAM DEFENSE panel (one team at a time, not team-vs-team, so a single-sided
     bar is the right shape here, not a mirrored one) - Pace renders inline
     in this same bar list rather than as a separate metric, per explicit
     request ("a number isn't telling... it can be inline with the other
@@ -980,7 +994,7 @@ def stat_elasticity(player_games, eff_ratings_df, team_stats_df, opponent_team, 
     }
 
 
-_GAME_SCRIPT_TIER_ORDER = ('Close', 'Comfortable', 'Blowout')
+_GAME_SCRIPT_TIER_ORDER = ('Blowout Loss', 'Comfortable Loss', 'Close', 'Comfortable Win', 'Blowout Win')
 
 
 def game_script_sensitivity(player_games, team_games, stat_col='Points', close_margin=8, blowout_margin=14, min_games=3):
@@ -989,19 +1003,35 @@ def game_script_sensitivity(player_games, team_games, stat_col='Points', close_m
 
     A coarser proxy than true live win-probability/score-by-time tracking,
     which this app doesn't have (no play-by-play source): buckets a
-    player's games into three tiers by their TEAM's final margin, via a
-    join on Date ALONE - deliberately not Opponent name, since team_games
-    (CBBD-spelled) and player_games (which can be ESPN-spelled) don't
-    always agree on spelling, but a team plays at most one game per date,
-    so Date is an unambiguous, source-agnostic join key:
-        Close:       |Margin| <= close_margin        (default 8)
-        Comfortable: close_margin < |Margin| <= blowout_margin (default 14)
-        Blowout:     |Margin| > blowout_margin
+    player's games into five tiers by their TEAM's own SIGNED final margin
+    (positive = win, negative = loss - team_games' own `Margin` column is
+    already `PF - PA`, see data.loaders.load_team_games), via a join on
+    Date ALONE - deliberately not Opponent name, since team_games (CBBD-
+    spelled) and player_games (which can be ESPN-spelled) don't always
+    agree on spelling, but a team plays at most one game per date, so
+    Date is an unambiguous, source-agnostic join key:
+        Blowout Loss:     Margin < -blowout_margin               (lost by more than 14)
+        Comfortable Loss: -blowout_margin <= Margin < -close_margin (lost by 8-14)
+        Close:             -close_margin <= Margin <= close_margin (within 8, either way)
+        Comfortable Win:   close_margin < Margin <= blowout_margin (won by 8-14)
+        Blowout Win:       Margin > blowout_margin                (won by more than 14)
 
-    Reports each tier's mean `stat_col` and game count, in that fixed
-    Close -> Comfortable -> Blowout order (so a caller can plot it as a
-    real left-to-right curve), plus the season mean as a flat reference.
-    No per-tier minimum-games gate - every tier with at least one game is
+    CORRECTION: this used to bucket on |Margin| alone into three tiers
+    (Close/Comfortable/Blowout), the same threshold either direction -
+    couldn't tell a player's production in a comfortable WIN apart from a
+    comfortable LOSS, both landed in "Comfortable" together. Per explicit
+    request, split into the 5 tiers above instead, using the exact same
+    close_margin/blowout_margin thresholds as before (a Margin of exactly
+    +/-8 or +/-14 keeps the same inclusive/exclusive tie-break the old
+    |Margin| version used - it favors the milder tier at each boundary) -
+    only "Close" (a legitimately close game either way) stays a single,
+    unsplit tier, matching what was actually asked for.
+
+    Reports each tier's mean `stat_col` and game count, in the fixed
+    Blowout Loss -> Comfortable Loss -> Close -> Comfortable Win ->
+    Blowout Win order (so a caller can plot it as a real left-to-right
+    "getting better" curve), plus the season mean as a flat reference. No
+    per-tier minimum-games gate - every tier with at least one game is
     included, WITH its real game count, so a viewer can judge sample-size
     confidence directly rather than this function silently hiding a small-
     sample tier (same "show the real count, don't hide behind a threshold"
@@ -1025,12 +1055,15 @@ def game_script_sensitivity(player_games, team_games, stat_col='Points', close_m
         return {}
 
     def _tier(margin):
-        m = abs(margin)
-        if m <= close_margin:
+        if margin < -blowout_margin:
+            return 'Blowout Loss'
+        if margin < -close_margin:
+            return 'Comfortable Loss'
+        if margin <= close_margin:
             return 'Close'
-        if m <= blowout_margin:
-            return 'Comfortable'
-        return 'Blowout'
+        if margin <= blowout_margin:
+            return 'Comfortable Win'
+        return 'Blowout Win'
 
     work['_tier'] = work['_margin'].apply(_tier)
     season_mean = float(work[stat_col].mean())

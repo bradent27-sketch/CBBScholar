@@ -390,21 +390,29 @@ def _render_stat_elasticity_chart(mine, defense_team, season, stat_col):
 def _render_game_script_curve(mine, team_choice, season, stat_col):
     """
     Game-Script Sensitivity (data.transforms.game_script_sensitivity) -
-    Close (|margin| <= 8) / Comfortable (8-14) / Blowout (>14) production
-    for the chosen stat (same picker as the Elasticity chart above - see
+    Blowout Loss (>14) / Comfortable Loss (8-14) / Close (+/-8) /
+    Comfortable Win (8-14) / Blowout Win (>14) production for the chosen
+    stat (same picker as the Elasticity chart above - see
     _render_player_trend's call site; game_script_sensitivity itself
     already took a `stat_col` param, only this function's own hardcoded
     'Points' call kept every other stat off it), shown as a small curve
-    rather than plain text, per explicit request. `mine` is this panel's
-    own already-loaded per-game log; only the player's team schedule (for
-    game margins) needs a fresh load here.
+    rather than plain text, per explicit request. Split win/loss apart per
+    a later request too - the tiers used to bucket on |margin| alone, so a
+    comfortable win and a comfortable loss landed in the same
+    "Comfortable" tier together (see game_script_sensitivity's own
+    CORRECTION note). `mine` is this panel's own already-loaded per-game
+    log; only the player's team schedule (for game margins) needs a fresh
+    load here.
     """
     with st.spinner(f"Loading {team_choice}'s schedule..."):
         team_games = load_team_games(team_choice, season)
     result = game_script_sensitivity(mine, team_games, stat_col=stat_col)
     if not result or len(result.get('tiers') or []) < 2:
         return
-    st.markdown(f"_{result['stat']} by game script — Close (±8) / Comfortable (8–14) / Blowout (>14)_")
+    st.markdown(
+        f"_{result['stat']} by game script — Blowout Loss (>14) / Comfortable Loss (8–14) / "
+        f"Close (±8) / Comfortable Win (8–14) / Blowout Win (>14)_"
+    )
     render_game_script_curve(result)
 
 

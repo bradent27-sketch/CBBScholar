@@ -5,9 +5,76 @@ Sibling app to NFL Scholar (`C:\FantasyF`) and CFB Scholar
 college basketball. This doc follows NFL Scholar's own HANDOFF.md section
 structure on purpose, so all three stay easy to cross-reference.
 
-**Game log table's width math fixed for real this time, and Matchup
-Analyzer's two stat dropdowns merged into one (this doc's most recent
+**Matchup Analyzer: a real mislabeled-value bug found while fixing a
+reported overlap, a redundant rebounding stat swapped out, and the
+Game-Script chart split into 5 win/loss tiers (this doc's most recent
 update):**
+
+1. **The Elasticity chart's orange opponent-value label wasn't just
+   overlapping the season-average label - it was showing the wrong number
+   entirely.** Reported as "the [opponent] text... is not showing up
+   clearly/overlapping"; the overlap was real (both labels can anchor near
+   the same right edge - a tough, high-percentile opponent lands the
+   marker right where the season-avg label already defaults to), fixed by
+   anchoring the season-avg label to whichever horizontal half the
+   opponent marker ISN'T in, so the two can't collide regardless of their
+   y-values. But digging into WHY the overlapping text looked like
+   garbage numbers (not just doubled-up legible text) surfaced a second,
+   deeper, pre-existing bug: `ui.charts.render_stat_elasticity_curve` did
+   `ox, oy = px(opp_x), py(opp_y)` (converting the data point to pixel
+   coordinates) and then printed `{oy:.1f}` as the visible value label and
+   inside the tooltip - `oy` at that point IS the pixel y-coordinate, not
+   the player's actual projected stat value, so the label had been
+   showing a meaningless SVG coordinate (something like "114.0") instead
+   of the real number on every single render with an opponent marker, not
+   merely overlapping. Fixed by using the untouched original `opp_y` (the
+   real data value, still in scope) for the label/tooltip text, keeping
+   `oy` only for positioning. Verified live (Playwright): exact
+   reconstruction of the reported scenario (opponent in the right half,
+   projected value close to season average) now shows correct, cleanly
+   separated text; a left-half opponent and a no-opponent-marker case
+   both still render exactly as before (regression-checked).
+2. **"Off. Reb % Allowed" and "Def. Reb %" were showing the same
+   rebounding battle twice** (on a missed shot, the offense either gets it
+   back - ORB% - or the defense does - DREB% - so the two numbers are
+   near-complements of each other), per explicit request. Removed the
+   "Allowed" row and swapped in this team's own OFFENSIVE rebound rate
+   (`Off ORB%` - "share of own misses rebounded," already loaded and
+   already used the same way in `FOUR_FACTORS`) in its place - a genuinely
+   different dimension (this team's own second-chance creation) instead of
+   another read on the same allowed-rebounding number.
+3. **Game-Script Sensitivity now splits win vs. loss into 5 tiers**
+   instead of bucketing on `|margin|` alone into 3 (a comfortable win and
+   a comfortable loss used to land in the same "Comfortable" tier
+   together, indistinguishable). `data.transforms.game_script_sensitivity`
+   now tiers on team_games' own SIGNED `Margin` (`PF - PA`, already
+   available - `Result`'s W/L wasn't even needed) into Blowout Loss (>14) /
+   Comfortable Loss (8-14) / Close (+/-8, unsplit either way, matching
+   what was actually asked for) / Comfortable Win (8-14) / Blowout Win
+   (>14), same threshold values as before. `ui.charts.
+   render_game_script_curve` needed no change to WHAT it plots (already
+   tier-count-agnostic) - but its fixed left/right margins, sized for the
+   old 3 short labels ("Close"/"Comfortable"/"Blowout"), started clipping
+   the new longer ones right off the SVG's own edge ("Blowout Win"
+   rendering as "Blowout W...", confirmed via a real bounding-box
+   measurement showing text extending past the viewBox). Margins are now
+   computed from the actual first/last tier's label width (a floor at the
+   old fixed values, so short-label cases are unchanged) instead of fixed
+   constants.
+
+**Verification**: full unit suite (40 tests, 1 new + 2 rewritten for the
+5-tier split) passing, `py_compile` clean, every fix confirmed with a real
+headless-Chromium Playwright render - both isolated chart-function calls
+with hand-crafted edge-case data (the exact reported collision scenario,
+reconstructed pixel-for-pixel) and a full end-to-end render through the
+real Matchup Analyzer UI with synthetic loader data, checking actual DOM
+text content and bounding boxes, not screenshots or guesses.
+
+---
+
+
+**Game log table's width math fixed for real this time, and Matchup
+Analyzer's two stat dropdowns merged into one:**
 
 1. **Matchup Analyzer's Elasticity and Game-Script charts now share one
    "Stat" dropdown.** Previously the Elasticity chart had its own Points/
