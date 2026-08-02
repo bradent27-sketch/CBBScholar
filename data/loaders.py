@@ -227,16 +227,51 @@ def load_conference_standings(season, espn_conference_abbr):
     rows = []
     for e in entries:
         team = e.get('team', {})
-        stats = {s.get('name'): s.get('displayValue') for s in e.get('stats', [])}
+        stats = {s.get('name'): s for s in e.get('stats', [])}
+        overall_display = stats.get('overall', {}).get('displayValue', '--')
+        win_pct_stat = stats.get('winPercent', {})
         rows.append({
             'Team': team.get('displayName', team.get('location', '--')),
-            'Overall': stats.get('overall', '--'),
-            'W': stats.get('wins', '--'),
-            'L': stats.get('losses', '--'),
-            'PCT': stats.get('winPercent', '--'),
-            'Streak': stats.get('streak', '--'),
+            'Overall': overall_display,
+            'W': stats.get('wins', {}).get('displayValue', '--'),
+            'L': stats.get('losses', {}).get('displayValue', '--'),
+            'PCT': win_pct_stat.get('displayValue', '--'),
+            'Streak': stats.get('streak', {}).get('displayValue', '--'),
+            '_conf_pct': _parse_win_pct(win_pct_stat.get('value'), win_pct_stat.get('displayValue')),
+            '_overall_pct': _parse_record_win_pct(overall_display),
         })
-    return pd.DataFrame(rows)
+    # ESPN's own entry order isn't rank order (observed worst-team-first) -
+    # sort explicitly: best conference win% first, ties broken by overall
+    # win% (parsed from the "W-L" record string, not a separate field ESPN
+    # exposes). Missing/unparseable values sort last either way.
+    df = pd.DataFrame(rows).sort_values(
+        ['_conf_pct', '_overall_pct'], ascending=False, na_position='last',
+    ).drop(columns=['_conf_pct', '_overall_pct']).reset_index(drop=True)
+    return df
+
+
+def _parse_win_pct(value, display):
+    """Numeric win% from ESPN's stat entry - prefers the raw `value` field,
+    falls back to parsing `displayValue` (e.g. ".714") since not every
+    stat is guaranteed to carry both. None if neither is usable."""
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(display)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_record_win_pct(record_display):
+    """Win% from a "W-L" record display string (e.g. "20-5") - ESPN's
+    standings payload has no separate numeric field for overall win%, only
+    this string, used here purely as the Conference Standings tiebreaker."""
+    try:
+        w, l = record_display.split('-')
+        w, l = int(w), int(l)
+        return w / (w + l) if (w + l) > 0 else None
+    except (AttributeError, ValueError):
+        return None
 
 
 # ==========================================

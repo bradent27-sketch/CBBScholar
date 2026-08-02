@@ -279,10 +279,7 @@ def render():
             placeholder="Start typing any player's name — partial or slightly misspelled is fine",
         )
         if not query:
-            st.info(
-                "Type a player's name above to search across all of Division I. Covers players who've appeared "
-                "in at least one game this season (this source is game-by-game box scores, not a full roster list)."
-            )
+            st.info("Min. 1 game played this season.")
             return
         matched_labels = fuzzy_filter_names(query, labels, limit=25)
         if not matched_labels:
