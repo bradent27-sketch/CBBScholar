@@ -126,6 +126,105 @@ def sticky_text_input(label, key, default_value="", **kwargs):
     return value
 
 
+def sticky_date_input(label, key, default_value, **kwargs):
+    """Drop-in `st.date_input` replacement - see sticky_selectbox above.
+
+    `default_value` is only ever consulted when there's no remembered value
+    at all (a genuinely first visit), same contract as every wrapper above:
+    a caller passing "today" as its default must not have that default snap
+    back over a date the visitor actually picked, just because they looked
+    at another tab in between."""
+    mirror_key = _sticky_mirror_key(key)
+    remembered = st.session_state.get(mirror_key, default_value)
+    value = st.date_input(label, value=remembered, key=key, **kwargs)
+    st.session_state[mirror_key] = value
+    return value
+
+
+def set_sticky_value(key, value):
+    """
+    Drives a sticky widget that is ON THE CURRENTLY OPEN TAB from outside
+    itself - built for the Game Slate's prev/next-day arrows moving its own
+    date picker.
+
+    Sets BOTH the mirror entry and the widget's own session_state key,
+    because a widget on the open tab was instantiated on the previous run
+    and its widget key therefore still exists - and Streamlit uses that
+    stored value in preference to the `value=`/`index=` the sticky wrapper
+    computes, so writing the mirror alone would appear to do nothing at all.
+
+    Only safe for a value the target widget will definitely accept (any
+    date, for a date_input). To seed a widget on a tab that ISN'T open, use
+    seed_sticky_value below instead - it has the opposite failure mode.
+
+    MUST run in a callback (`on_click`) or otherwise before the target
+    widget is instantiated this run: Streamlit raises if a widget's
+    session_state key is reassigned after that widget has already rendered.
+    """
+    st.session_state[_sticky_mirror_key(key)] = value
+    st.session_state[key] = value
+
+
+def seed_sticky_value(key, value):
+    """
+    Seeds a sticky widget that lives on a tab which is NOT currently open -
+    the cross-tab hand-off behind switch_tab below.
+
+    Writes ONLY the mirror, and clears any lingering widget key. That
+    asymmetry with set_sticky_value above is the whole point, and it is a
+    safety property rather than a stylistic choice:
+
+    - Writing the raw widget key makes Streamlit RAISE on the next run
+      whenever the seeded value isn't a member of the destination
+      selectbox's options - which is not a rare case here. Seeding a
+      matchup seeds a team, and the destination's option list is a
+      different data source's spelling of the league (CBBD's `school`
+      names against the slate's ESPN `location` names), on a season the
+      visitor may then change out from under it.
+    - The mirror has no such problem: every sticky wrapper above checks
+      `remembered in options` before using it and falls back to its own
+      default otherwise. A value that doesn't resolve degrades to "opened
+      on the default" instead of a traceback.
+
+    Safe to write because the destination's widget key has been pruned by
+    Streamlit while its tab was closed (see this module's section header) -
+    the pop is belt-and-braces for the case where it somehow hasn't been.
+    """
+    st.session_state[_sticky_mirror_key(key)] = value
+    st.session_state.pop(key, None)
+
+
+def switch_tab(tab_label, **sticky_state):
+    """
+    Switches the app's active top-level tab AND pre-seeds the destination's
+    own widgets, so the target opens already pointed at whatever the caller
+    was looking at instead of asking the visitor to re-pick it.
+
+    THE RULE THIS DEPENDS ON: this must run as an `on_click` CALLBACK. It
+    cannot be called from a tab's render() body. app.py builds the top-level
+    tabs as `st.tabs(TAB_LABELS, key="active_tab", on_change="rerun")`, and
+    Streamlit raises StreamlitAPIException if `st.session_state['active_tab']`
+    is reassigned during the same script run that already read it to render
+    those tabs - which app.py did, long before any tab's render() was
+    reached. A callback runs in the PRE-SCRIPT phase, before st.tabs()
+    executes for the next run, so the assignment is legal there.
+
+    That single constraint is why the Game Slate's cards are keyed
+    `st.container`s styled with CSS rather than one block of raw HTML:
+    raw HTML cannot fire a Python callback, and without the callback there
+    is no pre-seeding - which is the entire point of the tab.
+
+    `sticky_state` keys are the DESTINATION widgets' own `key=` values
+    (e.g. ma_player_team='Duke'). Seeding goes through seed_sticky_value,
+    NOT set_sticky_value - see that function for why writing the raw
+    widget key across a tab boundary turns an unresolvable team name into
+    a traceback instead of a harmless fallback.
+    """
+    st.session_state['active_tab'] = tab_label
+    for key, value in sticky_state.items():
+        seed_sticky_value(key, value)
+
+
 def render_header():
     st.markdown(
         f"<div style='display:flex; align-items:center; gap:12px; margin-top:0;'>"

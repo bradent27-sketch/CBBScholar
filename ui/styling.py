@@ -149,6 +149,17 @@ def inject_theme():
     _panel_tint = 'rgba(234, 230, 245, 0.85)' if is_light else 'rgba(19, 27, 56, 0.55)'
     _card_tint = 'rgba(234, 230, 245, 0.7)' if is_light else 'rgba(19, 27, 56, 0.4)'
     _input_bg = 'rgba(0, 0, 0, 0.04)' if is_light else 'rgba(0, 0, 0, 0.25)'
+    # Game Slate card effects (see the .gs-* block far below). Same
+    # explicit-per-mode treatment as every literal rgba() above - these are
+    # alpha blends that a bare C[...] hex can't express, so neither follows
+    # THEME['colors'] automatically and each needs both branches spelled
+    # out. The logo drop-shadow inverts rather than dims: on a dark surface
+    # it's a black halo lifting near-black mark edges off the background,
+    # and on a light one that same halo would only smudge, so light mode
+    # gets a soft neutral shadow instead.
+    _card_shadow = 'rgba(23, 20, 38, 0.16)' if is_light else 'rgba(0, 0, 0, 0.45)'
+    _logo_shadow = 'rgba(23, 20, 38, 0.25)' if is_light else 'rgba(0, 0, 0, 0.55)'
+    _won_tint = 'rgba(109, 40, 217, 0.10)' if is_light else 'rgba(192, 132, 252, 0.10)'
     # Streamlit's own unchecked-checkbox box has no stable testid of its
     # own to target (confirmed live: it's an unnamed emotion-hashed div,
     # a sibling of the real <input>, not a descendant of any [role] or
@@ -465,6 +476,206 @@ def inject_theme():
             font-weight: 600;
             color: {C['on_surface']};
             font-family: {F['mono']};
+        }}
+
+        /* ===================================================================
+           GAME SLATE matchup cards (ui/tabs/game_slate.py).
+
+           Every rule here is scoped to `div[class*="st-key-gs_card_"]` -
+           the class Streamlit emits for `st.container(key="gs_card_N")`
+           ("st-key-" + key, with every character outside [a-zA-Z0-9_-]
+           replaced by "-"). Scoping to that prefix is what keeps these
+           rules off every OTHER keyed container in the app (this file
+           already leans on the same mechanism for render_responsive_table's
+           desktop/mobile switch, so the technique is confirmed against this
+           app's own pinned Streamlit, not just documented).
+
+           The card can't be one raw-HTML block: it has to contain real
+           st.button widgets, because switch_tab must fire as an on_click
+           callback (see ui.components.switch_tab). Hence a keyed container
+           styled from out here, with the card's own markdown supplying the
+           per-card team colors as CSS custom properties.
+           =================================================================== */
+        div[class*="st-key-gs_card_"] {{
+            position: relative;
+            background: {_card_tint};
+            border: 1px solid {C['outline_variant']};
+            border-radius: {R['md']};
+            padding: 14px 16px 10px 16px;
+            margin-bottom: 12px;
+            overflow: hidden;
+            transition: transform 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease;
+        }}
+        div[class*="st-key-gs_card_"]:hover {{
+            transform: translateY(-2px);
+            border-color: {C['primary']};
+            box-shadow: 0 6px 20px {_card_shadow};
+        }}
+        /* The top accent bar is a gradient of the two teams' REAL colors.
+           It lives on the container's ::before, and the container is
+           Streamlit-owned - there's no inline style attribute to set. So
+           each card's own markdown emits a one-line <style> scoped to its
+           own key class declaring --gs-a/--gs-b, which this rule reads.
+           Note the fallback inside each var(): a team with no color
+           degrades to the neutral outline rather than producing an invalid
+           gradient that drops the whole bar. */
+        div[class*="st-key-gs_card_"]::before {{
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0;
+            height: 3px;
+            background: linear-gradient(90deg,
+                var(--gs-a, {C['outline']}) 0%, var(--gs-a, {C['outline']}) 48%,
+                var(--gs-b, {C['outline']}) 52%, var(--gs-b, {C['outline']}) 100%);
+        }}
+        .gs-meta {{
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 6px;
+            font-size: 10px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.07em;
+            color: {C['on_surface_variant']};
+            margin-bottom: 10px;
+        }}
+        .gs-meta .gs-date {{ color: {C['on_surface']}; }}
+        .gs-meta .gs-dot {{ opacity: 0.45; }}
+        .gs-meta .gs-live {{
+            color: {C['on_primary']};
+            background: {C['error']};
+            border-radius: {R['full']};
+            padding: 1px 7px;
+            letter-spacing: 0.08em;
+        }}
+        .gs-meta .gs-tv {{ color: {C['tertiary']}; }}
+        .gs-headline {{
+            font-size: 10.5px;
+            font-weight: 700;
+            color: {C['primary']};
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            margin: -4px 0 8px 0;
+        }}
+        /* Row is a flexbox: .gs-name takes the free space so conference,
+           score and the W flag are pushed to the right edge; everything
+           else is flex: 0 0 so a long school name can't squeeze the logo. */
+        .gs-team {{
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 8px;
+            border-radius: {R['default']};
+            border-left: 3px solid var(--gs-color, {C['outline']});
+            margin-bottom: 4px;
+            background: {_panel_tint};
+        }}
+        .gs-team .gs-side {{
+            flex: 0 0 auto;
+            font-size: 9px;
+            font-weight: 800;
+            letter-spacing: 0.08em;
+            color: {C['on_surface_variant']};
+            width: 30px;
+        }}
+        /* object-fit: contain prevents distortion on a non-square mark; the
+           drop-shadow lifts marks whose own edges are near-black off a dark
+           surface. alt='' is intentional - the team name is the very next
+           element, so alt text would read the school twice. */
+        .gs-team .gs-logo {{
+            flex: 0 0 24px;
+            height: 24px;
+            width: 24px;
+            object-fit: contain;
+            filter: drop-shadow(0 1px 3px {_logo_shadow});
+        }}
+        .gs-team .gs-rank {{
+            flex: 0 0 auto;
+            font-family: {F['mono']};
+            font-size: 10px;
+            font-weight: 700;
+            color: {C['tertiary']};
+        }}
+        .gs-team .gs-name {{
+            flex: 1 1 auto;
+            min-width: 0;
+            font-size: 13.5px;
+            font-weight: 700;
+            color: {C['on_surface']};
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }}
+        .gs-team .gs-conf {{
+            flex: 0 0 auto;
+            font-size: 9.5px;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: {C['on_surface_variant']};
+        }}
+        .gs-team .gs-score {{
+            flex: 0 0 auto;
+            font-family: {F['mono']};
+            font-size: 17px;
+            font-weight: 700;
+            color: {C['on_surface']};
+            min-width: 30px;
+            text-align: right;
+        }}
+        .gs-team .gs-win-flag {{
+            flex: 0 0 auto;
+            font-size: 9px;
+            font-weight: 800;
+            color: {C['on_primary']};
+            background: var(--gs-color, {C['outline']});
+            border-radius: {R['full']};
+            padding: 1px 6px;
+        }}
+        /* State classes: won / lost / neither. A TIE gets NEITHER - the
+           renderer passes None rather than False for "no winner", so a tie
+           can't dim both teams (see _team_row_html). */
+        .gs-team.gs-won {{ background: {_won_tint}; }}
+        .gs-team.gs-won .gs-score {{ color: var(--gs-color, {C['on_surface']}); }}
+        .gs-team.gs-lost .gs-name {{ color: {C['on_surface_variant']}; opacity: 0.72; }}
+        .gs-team.gs-lost .gs-score {{ color: {C['on_surface_variant']}; opacity: 0.72; }}
+
+        /* Buttons inside a card.
+
+           DESCENDANT selector, not the usual `.stButton > button` direct
+           child: Streamlit wraps a button carrying help= in two extra
+           <span>s (stTooltipHoverTarget / stTooltipIcon), so the direct
+           child never matches. Every button on these cards has a tooltip.
+
+           !important is required, not decorative: Streamlit injects its own
+           button styles with emotion at RUNTIME, after this <style> block,
+           so an equally-specific override silently loses the cascade. Both
+           of those failures look completely fine in a screenshot - verify
+           with getComputedStyle, not by eye. */
+        div[class*="st-key-gs_card_"] .stButton button {{
+            background: {C['surface_container_high']} !important;
+            border: 1px solid {C['outline_variant']} !important;
+            color: {C['on_surface_variant']} !important;
+            font-size: 11px !important;
+            font-weight: 700 !important;
+            letter-spacing: 0.04em;
+            padding: 2px 6px !important;
+            min-height: 30px !important;
+        }}
+        div[class*="st-key-gs_card_"] .stButton button:hover {{
+            background: {C['primary']} !important;
+            border-color: {C['primary']} !important;
+            color: {C['on_primary']} !important;
+        }}
+        div[class*="st-key-gs_card_"] .stButton button:disabled {{
+            opacity: 0.4;
+            background: {C['surface_container']} !important;
+            color: {C['on_surface_variant']} !important;
+        }}
+        @media (max-width: 767px) {{
+            div[class*="st-key-gs_card_"] {{ padding: 12px 12px 8px 12px; }}
+            .gs-team .gs-conf {{ display: none; }}
         }}
 
         div[data-testid="stExpander"] {{

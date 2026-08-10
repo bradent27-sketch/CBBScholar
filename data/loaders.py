@@ -1840,6 +1840,706 @@ def get_player_season_profile(team, season, player_name, cbbd_athlete_id):
     return row, False, 'espn', box_df, row['athleteSourceId']
 
 
+# ===========================================================
+# GAME SLATE - "who is playing on a given day", the launchpad the Game
+# Slate tab (ui/tabs/game_slate.py) is built on.
+#
+# TWO sources behind one normalized frame, split by what each is actually
+# good at (see DATA_SOURCES.md's Game Slate row):
+#
+#   PAST  -> SportsDataverse/hoopR's published season SCHEDULE parquet.
+#            Same release namespace this file's box-score pipeline already
+#            downloads from (ESPN_SEASON_PLAYER_BOX_URL), just a dataset
+#            nothing here had used before. VERIFIED LIVE while this was
+#            written, unlike most of this file's ESPN/CBBD touchpoints:
+#            2026 = 6,318 games x 86 columns, 1.72MB, parses in ~0.4s, and
+#            the release asset's own Last-Modified showed it had been
+#            republished 3 days earlier - in AUGUST, i.e. the daily rebuild
+#            runs year-round, not just in season. Free, keyless, no CBBD
+#            quota, one download per season.
+#
+#   TODAY/ -> ESPN's public scoreboard endpoint, one call per date.
+#   FUTURE   The schedule parquet is a rebuild of games ESPN has already
+#            played, so it cannot be relied on for games that HAVEN'T -
+#            and "who plays tonight" is the whole point of this tab.
+#
+# The two are reconciled by making the scoreboard parser emit the parquet's
+# OWN column names and running both through the same _normalize_slate_frame.
+# That isn't a coincidence to lean on casually - hoopR's 86 schedule columns
+# ARE a flat rename of the scoreboard event payload (status_type_state <-
+# status.type.state, home_logo <- competitors[].team.logo, and so on all the
+# way down), which is why the field paths in _scoreboard_raw_rows below are
+# derived from a payload that WAS inspected column-by-column rather than
+# guessed at.
+#
+# HONEST VERIFICATION CAVEAT, same standard as the rest of this file: the
+# build environment for this pass could not reach site.api.espn.com at all
+# (egress policy, confirmed via a direct 403 on CONNECT - the same standing
+# limitation HANDOFF.md documents for every ESPN/CBBD touchpoint). The
+# PARQUET path is verified against real downloaded data end to end; the
+# SCOREBOARD path is reasoned from the parquet's own field-name mapping plus
+# this file's existing, working ESPN parsers, and is NOT independently
+# live-verified. Treat it as unconfirmed until it's actually run with real
+# network access - and note the tab degrades to "no games" rather than
+# breaking if the shape differs.
+# ===========================================================
+SLATE_DISPLAY_TZ = 'America/New_York'
+
+HOOPR_MBB_SCHEDULE_URL = (
+    "https://github.com/sportsdataverse/sportsdataverse-data/releases/download/"
+    "espn_mens_college_basketball_schedules/mbb_schedule_{season}.parquet"
+)
+ESPN_CBB_SCOREBOARD_URL = (
+    "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/scoreboard"
+)
+
+# ESPN's own "Division I" group id - the scoreboard endpoint returns every
+# level of college basketball without it.
+_ESPN_DI_GROUP = 50
+
+# ESPN publishes rank 99 for an UNRANKED team rather than omitting the
+# field - 5,744 of the 2026 file's 6,318 rows carry it. Rendered raw, every
+# card claims both teams are the 99th-ranked team in the country. Verified
+# directly against the real file, not assumed.
+_UNRANKED_SENTINEL = 99
+
+
+def _daily_bucket():
+    """Plain ISO date string, e.g. '2026-08-10' - the `persist="disk"`
+    cache-key argument for the season schedule file, on the same mechanism
+    (and for the same reason) as `_week_bucket()`/`_twice_weekly_bucket()`
+    above: `ttl=` is SILENTLY IGNORED on a disk-persisted cache, so freshness
+    has to come from a hashed argument that changes on its own.
+
+    Daily rather than weekly because the upstream file really is rebuilt
+    daily (confirmed via the release asset's Last-Modified header), and
+    because a schedule is exactly the thing that must not be a week stale -
+    scores land the same night, and a tip time moves whenever a network
+    picks a game up."""
+    return datetime.date.today().isoformat()
+
+
+def _slate_season_bounds(season):
+    """(first, last) plausible calendar dates for a CBB `season` as this app
+    numbers it (ESPN's spring-year scheme - see current_cbb_season). Used
+    only to keep the date picker and the "is this season in progress"
+    check honest; deliberately wider than any real season's actual first
+    and last game."""
+    return datetime.date(season - 1, 11, 1), datetime.date(season, 4, 15)
+
+
+@st.cache_data(show_spinner=False, persist="disk")
+def _fetch_season_schedule_raw_cached(season, _bucket):
+    """
+    Raw download + parquet parse of hoopR's published season schedule.
+    RAISES on a real network/parse failure rather than degrading to an
+    empty frame - a `persist="disk"` cache that memoized a transient blip
+    as "this season has no games" would keep serving that for the whole
+    bucket window (see _fetch_espn_season_box_raw_cached, which this
+    mirrors, and HANDOFF.md's "transient failures get cached" gotcha).
+    Caught at the public-wrapper boundary in _season_schedule below.
+
+    A season whose file doesn't exist yet returns an EMPTY frame rather
+    than raising - that's a real "nothing published yet" state, not a
+    failure. Confirmed live: 2023-2026 all publish, 2027 404s until the
+    season tips.
+    """
+    resp = requests.get(HOOPR_MBB_SCHEDULE_URL.format(season=season), timeout=60)
+    if resp.status_code == 404:
+        return pd.DataFrame()
+    resp.raise_for_status()
+    return pd.read_parquet(io.BytesIO(resp.content))
+
+
+def _season_schedule(season):
+    """Public wrapper - never raises, degrades to an empty DataFrame OUTSIDE
+    the cache boundary so a transient failure isn't memoized."""
+    try:
+        return _fetch_season_schedule_raw_cached(season, _daily_bucket())
+    except Exception:
+        return pd.DataFrame()
+
+
+def _conference_id_name_map(raw_sched):
+    """
+    {espn_conference_id: 'Big Ten'} built ENTIRELY out of the schedule file
+    itself - no standings call, no hardcoded list.
+
+    How: on a conference game the file's game-level `groups_id` equals both
+    teams' `home_conference_id`/`away_conference_id`, and `groups_short_name`
+    names it. Verified against the real 2026 file rather than assumed -
+    that equality holds on 100.0% of its 3,673 conference games, and the
+    resulting map covers all 31 conference ids appearing anywhere in the
+    file (home or away), with no gaps.
+    """
+    if raw_sched is None or raw_sched.empty:
+        return {}
+    needed = {'groups_is_conference', 'groups_id', 'groups_short_name'}
+    if not needed.issubset(raw_sched.columns):
+        return {}
+    conf = raw_sched[raw_sched['groups_is_conference'] == True]  # noqa: E712 - pandas mask, not a bool test
+    conf = conf.dropna(subset=['groups_id', 'groups_short_name'])
+    if conf.empty:
+        return {}
+    named = conf.groupby('groups_id')['groups_short_name'].agg(lambda s: s.mode().iloc[0])
+    return {int(k): str(v) for k, v in named.items() if pd.notna(k)}
+
+
+def format_tipoff(iso_str, tbd=False, tz=SLATE_DISPLAY_TZ, long=False):
+    """
+    ISO timestamp -> the tip-off string a card prints, in ET (the house
+    standard across this app and its two sibling apps).
+
+    Three details here are each a real bug if dropped, all inherited from
+    CFB Scholar's equivalent where they were found the hard way:
+
+    1. A TBD game still carries a PLACEHOLDER timestamp (typically midnight
+       UTC). Rendered raw it shows a confident, wrong tip time - so the flag
+       is checked first, before any parsing.
+    2. For a TBD game the weekday comes from the RAW DATE STRING, never
+       from a timezone conversion: midnight UTC converts to the PREVIOUS
+       EVENING in Eastern, so a Saturday game reads "Friday".
+    3. `.replace(' 0', ' ')` strips the leading zero ('08:00 PM' ->
+       '8:00 PM'). Applied to the formatted string, which is why the
+       weekday-name portion can't contain a ' 0' to damage.
+    """
+    if tbd:
+        if long and iso_str:
+            try:
+                day = datetime.date.fromisoformat(str(iso_str)[:10])
+                return f"{day.strftime('%A')} · time TBD"
+            except ValueError:
+                return 'Time TBD'
+        return 'TBD'
+    try:
+        dt = datetime.datetime.fromisoformat(str(iso_str).replace('Z', '+00:00'))
+    except (TypeError, ValueError):
+        return ''
+    try:
+        from zoneinfo import ZoneInfo
+        local = dt.astimezone(ZoneInfo(tz))
+    except Exception:
+        local = dt
+    pattern = '%A at %I:%M %p' if long else '%a %I:%M %p'
+    return local.strftime(pattern).replace(' 0', ' ') + ' ET'
+
+
+def _slate_timestamp(iso_str):
+    """Timezone-aware datetime from either source's timestamp string, or
+    None if it doesn't parse."""
+    try:
+        return datetime.datetime.fromisoformat(str(iso_str).replace('Z', '+00:00'))
+    except (TypeError, ValueError):
+        return None
+
+
+def _local_date(iso_str, tbd=False):
+    """
+    The ET calendar date a game actually belongs to.
+
+    Slicing the first 10 characters off the raw timestamp is the obvious
+    approach and it is WRONG, which is not obvious - both sources stamp
+    games in UTC, and a night game in the US is already the next day there.
+    Caught on real data rather than reasoned about: the 2026 national
+    championship (start_date '2026-04-07T00:50Z') rendered as
+    "04/07/2026 · Monday at 8:50 PM ET" - a self-contradicting card, since
+    04/07 was a Tuesday. Every evening tip in the file has the same defect,
+    which is most of them.
+
+    A TBD game is the exception and takes the RAW slice: its timestamp is a
+    midnight-UTC placeholder, and converting THAT to Eastern lands on the
+    previous evening - turning a Saturday game into Friday. Same reasoning
+    as format_tipoff's own TBD branch, for the same underlying reason.
+    """
+    raw = str(iso_str)[:10] if iso_str is not None else ''
+    if tbd:
+        return raw
+    dt = _slate_timestamp(iso_str)
+    if dt is None:
+        return raw
+    try:
+        from zoneinfo import ZoneInfo
+        return dt.astimezone(ZoneInfo(SLATE_DISPLAY_TZ)).date().isoformat()
+    except Exception:
+        return raw
+
+
+def _format_slate_date(value):
+    """MM/DD/YYYY, zero-padded. Returns the input unchanged on a parse
+    failure so a malformed row degrades to showing SOMETHING rather than
+    blanking the card's whole meta line."""
+    try:
+        return datetime.date.fromisoformat(str(value)[:10]).strftime('%m/%d/%Y')
+    except (TypeError, ValueError):
+        return str(value) if value is not None else ''
+
+
+def _hex_color(value):
+    """ESPN stores colors bare ('00274c'). Normalized to '#rrggbb', or None
+    if it isn't a real 6-digit hex - a malformed value must never reach the
+    card, which interpolates colors straight into CSS."""
+    s = str(value or '').strip().lstrip('#')
+    if len(s) != 6 or not re.fullmatch(r'[0-9a-fA-F]{6}', s):
+        return None
+    return f"#{s.lower()}"
+
+
+def dark_logo_variant(url):
+    """
+    ESPN's dark-background team mark, derived from the standard one by
+    swapping the `/500/` path segment for `/500-dark/`.
+
+    Both variants are kept per row (rather than picking one here) because
+    THIS app has a light mode as well as a dark one - CFB Scholar, where
+    this tab comes from, could hardcode the dark variant precisely because
+    every surface in it is dark. The `500-dark` mark is designed FOR dark
+    backgrounds and reads as a smudge on a pale one, so the choice belongs
+    at render time, next to the theme, not here.
+
+    Returns None when the URL doesn't carry the expected segment, so the
+    caller falls back to the standard mark instead of emitting a guessed
+    URL that 404s.
+    """
+    s = str(url or '')
+    return s.replace('/500/', '/500-dark/') if '/500/' in s else None
+
+
+def _https(url):
+    """ESPN CDN URLs served over http:// are silently blocked as mixed
+    content on an https-served page (Streamlit Cloud) - no console error,
+    no log line, the image just never appears. Confirmed non-issue for THIS
+    source (0 of the 2026 file's 6,318 rows carry an http:// logo, and 0
+    home logos are null), but the rewrite costs nothing and the failure
+    mode is invisible, which is exactly the combination worth guarding."""
+    s = str(url or '')
+    return s.replace('http://', 'https://') if s.startswith('http://') else s
+
+
+def _col(df, name, default=None):
+    """
+    Column accessor that tolerates a MISSING column.
+
+    Necessary, not defensive padding: this file's schema genuinely drifts
+    between seasons. Confirmed by diffing all four published files -
+    `broadcast`/`highlights` exist only in 2025-26, `venue_capacity` only
+    in 2023, `away_non_div1_team` only in 2025. Indexing any of those
+    directly would hard-crash the tab on a perfectly good season.
+    """
+    if name in df.columns:
+        return df[name]
+    return pd.Series([default] * len(df), index=df.index)
+
+
+def _normalize_slate_frame(raw, conf_map=None, source='local'):
+    """
+    hoopR-schedule-shaped rows -> the one normalized slate frame the Game
+    Slate tab renders. Both sources (parquet and ESPN scoreboard) go
+    through here, so nothing downstream ever branches on where a row came
+    from - the scoreboard parser's whole job is to emit these same input
+    column names.
+
+    Scores are gated on STATUS, never on presence. That inverts the
+    obvious approach for a real reason: ESPN sends score "0" for a game
+    that hasn't tipped, not null, so "has a score" is true for every
+    future game on the board. A postponed or canceled game is the same
+    trap from the other side - it reaches a 'post' state carrying 0-0 and
+    would otherwise render as a real final (18 such rows in the 2026 file
+    alone). Only STATUS_FINAL is treated as played.
+    """
+    if raw is None or raw.empty:
+        return pd.DataFrame()
+    conf_map = conf_map or {}
+
+    status_name = _col(raw, 'status_type_name').astype(str)
+    state = _col(raw, 'status_type_state').astype(str)
+    played = status_name.eq('STATUS_FINAL')
+    live = state.eq('in')
+    # A live game's running score is real and worth showing; a scheduled or
+    # postponed one has nothing to show at all.
+    show_score = played | live
+
+    home_pts = pd.to_numeric(_col(raw, 'home_score'), errors='coerce').where(show_score)
+    away_pts = pd.to_numeric(_col(raw, 'away_score'), errors='coerce').where(show_score)
+
+    home_name = _col(raw, 'home_location').astype('object')
+    away_name = _col(raw, 'away_location').astype('object')
+
+    # Winner stays None for an unplayed game AND for a tie. It must not
+    # collapse to a team name on 'home_winner is False' either - that's the
+    # AWAY team winning, which the away flag states directly.
+    home_won = _col(raw, 'home_winner')
+    away_won = _col(raw, 'away_winner')
+    winner = pd.Series([None] * len(raw), index=raw.index, dtype='object')
+    winner = winner.mask(played & (home_won == True), home_name)  # noqa: E712
+    winner = winner.mask(played & (away_won == True), away_name)  # noqa: E712
+
+    def _rank(col_name):
+        r = pd.to_numeric(_col(raw, col_name), errors='coerce')
+        return r.where((r > 0) & (r < _UNRANKED_SENTINEL))
+
+    def _conf(col_name):
+        ids = pd.to_numeric(_col(raw, col_name), errors='coerce')
+        return ids.map(lambda v: conf_map.get(int(v)) if pd.notna(v) else None)
+
+    home_conf_id = pd.to_numeric(_col(raw, 'home_conference_id'), errors='coerce')
+    away_conf_id = pd.to_numeric(_col(raw, 'away_conference_id'), errors='coerce')
+
+    start = _col(raw, 'start_date')
+    start = start.where(start.notna(), _col(raw, 'date'))
+    # `time_valid` is ESPN's own "this tip time is real" flag; a False here
+    # is what makes a game TBD. Absent (older files) -> treat as real,
+    # which is what every completed season's rows actually are.
+    tbd = ~_col(raw, 'time_valid', True).fillna(True).astype(bool)
+    iso_date = pd.Series(
+        [_local_date(s, t) for s, t in zip(start, tbd)], index=raw.index, dtype='object',
+    )
+
+    neutral = _col(raw, 'neutral_site', False).fillna(False).astype(bool)
+    venue = _col(raw, 'venue_full_name').astype('object')
+
+    out = pd.DataFrame({
+        'GameId': _col(raw, 'game_id', None).fillna(_col(raw, 'id', None)).astype(str),
+        'Date': iso_date,
+        'Date Display': iso_date.map(_format_slate_date),
+        'Tipoff': [format_tipoff(s, t) for s, t in zip(start, tbd)],
+        'Tipoff Long': [format_tipoff(s, t, long=True) for s, t in zip(start, tbd)],
+        'Time TBD': tbd,
+        'Away': away_name,
+        'Home': home_name,
+        'Away Display': _col(raw, 'away_display_name').astype('object'),
+        'Home Display': _col(raw, 'home_display_name').astype('object'),
+        'Away Abbr': _col(raw, 'away_abbreviation').astype('object'),
+        'Home Abbr': _col(raw, 'home_abbreviation').astype('object'),
+        'Away Color': _col(raw, 'away_color').map(_hex_color),
+        'Home Color': _col(raw, 'home_color').map(_hex_color),
+        'Away Logo': _col(raw, 'away_logo').map(_https),
+        'Home Logo': _col(raw, 'home_logo').map(_https),
+        'Away Conf': _conf('away_conference_id'),
+        'Home Conf': _conf('home_conference_id'),
+        'Away Pts': away_pts,
+        'Home Pts': home_pts,
+        'Away Rank': _rank('away_current_rank'),
+        'Home Rank': _rank('home_current_rank'),
+        'Winner': winner,
+        'Venue': venue,
+        'Neutral Site': neutral,
+        'Status': state,
+        'Status Detail': _col(raw, 'status_type_short_detail').astype('object'),
+        'Played': played,
+        'Live': live,
+        'Broadcast': _col(raw, 'broadcast').astype('object'),
+        'Headline': _col(raw, 'notes_headline').astype('object'),
+        'Season Type': pd.to_numeric(_col(raw, 'season_type'), errors='coerce'),
+        # "Is this a game this app can actually analyze" - the CBB answer to
+        # CFB Scholar's `FBS Matchup`. A D-I team carries an ESPN conference
+        # id and a non-D-I opponent does not, which is measurable rather
+        # than assumed: on the real 2026 file that's 365 D-I teams out of
+        # 728 distinct names, and 5,767 of 6,318 games (91.3%) with both
+        # sides in D-I.
+        'D-I Matchup': home_conf_id.notna() & away_conf_id.notna(),
+        '_source': source,
+    })
+    out['Away Logo Dark'] = out['Away Logo'].map(dark_logo_variant)
+    out['Home Logo Dark'] = out['Home Logo'].map(dark_logo_variant)
+    joiner = neutral.map(lambda n: ' vs ' if n else ' @ ')
+    out['Matchup'] = out['Away'].astype(str) + joiner + out['Home'].astype(str)
+    # Drop rows with no identifiable teams rather than rendering a card for
+    # two blanks - an unattributable row is worse than a missing one.
+    out = out[out['Away'].notna() & out['Home'].notna()]
+    # Order on the real timestamp, NEVER on the 'Tipoff' display string:
+    # "Mon 9:00 AM" sorts AFTER "Mon 10:00 AM" as text, because '9' > '1'.
+    # (This app has a scar from the same class of mistake elsewhere -
+    # sorting star ratings by their glyph string, where U+2606 > U+2605
+    # puts empty stars above filled ones.) 'Date Display' has the same
+    # hazard, which is why ISO 'Date' is kept beside it.
+    order = pd.to_datetime(start, errors='coerce', utc=True, format='mixed')
+    out = out.assign(_order=order.reindex(out.index))
+    out = out.sort_values(['Date', '_order'], na_position='last').drop(columns='_order')
+    return out.reset_index(drop=True)
+
+
+def _scoreboard_raw_rows(payload):
+    """
+    ESPN scoreboard JSON -> a DataFrame with hoopR's SCHEDULE column names,
+    so `_normalize_slate_frame` can consume it unchanged.
+
+    Field paths below mirror hoopR's own flattening one-for-one (its
+    `home_logo` is `competitors[homeAway=home].team.logo`, its
+    `status_type_state` is `status.type.state`, and so on), which is what
+    makes this a rename of an inspected payload rather than a guess at an
+    unseen one. Still NOT live-verified from this build environment - see
+    this section's header comment.
+    """
+    events = (payload or {}).get('events') or []
+    rows = []
+    for ev in events:
+        comps = ev.get('competitions') or []
+        if not comps:
+            continue
+        comp = comps[0]
+        sides = {}
+        for c in comp.get('competitors') or []:
+            side = c.get('homeAway')
+            if side in ('home', 'away'):
+                sides[side] = c
+        if 'home' not in sides or 'away' not in sides:
+            continue
+
+        status = comp.get('status') or ev.get('status') or {}
+        stype = status.get('type') or {}
+        venue = comp.get('venue') or {}
+        notes = comp.get('notes') or []
+        groups = comp.get('groups') or {}
+        season = ev.get('season') or {}
+        broadcasts = comp.get('broadcasts') or []
+        names = broadcasts[0].get('names') if broadcasts else None
+
+        row = {
+            'id': ev.get('id'),
+            'game_id': ev.get('id'),
+            'date': ev.get('date'),
+            'start_date': comp.get('date') or ev.get('date'),
+            'time_valid': comp.get('timeValid', True),
+            'neutral_site': comp.get('neutralSite', False),
+            'venue_full_name': venue.get('fullName'),
+            'status_type_name': stype.get('name'),
+            'status_type_state': stype.get('state'),
+            'status_type_completed': stype.get('completed'),
+            'status_type_short_detail': stype.get('shortDetail') or stype.get('detail'),
+            'season_type': season.get('type'),
+            'notes_headline': (notes[0].get('headline') if notes else None),
+            'broadcast': ('/'.join(names) if names else None),
+            'groups_id': groups.get('id'),
+            'groups_short_name': groups.get('shortName') or groups.get('name'),
+            'groups_is_conference': groups.get('isConference'),
+        }
+        for side, c in sides.items():
+            team = c.get('team') or {}
+            rank = (c.get('curatedRank') or {}).get('current')
+            row.update({
+                f'{side}_id': team.get('id'),
+                f'{side}_location': team.get('location') or team.get('displayName'),
+                f'{side}_display_name': team.get('displayName'),
+                f'{side}_abbreviation': team.get('abbreviation'),
+                f'{side}_color': team.get('color'),
+                f'{side}_logo': team.get('logo'),
+                f'{side}_conference_id': team.get('conferenceId'),
+                # Scoreboard scores arrive as STRINGS ('69'); _normalize_
+                # slate_frame runs them through pd.to_numeric anyway, so no
+                # cast is needed here - but note it is '0', not null, for a
+                # game that hasn't tipped, which is why that function gates
+                # on status rather than on presence.
+                f'{side}_score': c.get('score'),
+                f'{side}_winner': c.get('winner'),
+                f'{side}_current_rank': rank,
+            })
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _fetch_scoreboard_cached(date_iso):
+    """
+    One day's D-I scoreboard. RAISES on a real failure (caught by the
+    public wrapper) so a blip isn't memoized as an empty day.
+
+    TTL is ONE HOUR, deliberately shorter than the 6-24h used elsewhere in
+    this file. Tip times are precisely the field that changes late (a game
+    moves when a network picks it up), and during a game the score is live -
+    a stale schedule is the failure mode most worth avoiding here.
+
+    `limit` is set well above any real day's game count: CBB's biggest days
+    are far larger than the sports these endpoints are usually paged for -
+    the real 2026 season peaked at 169 games in a single day (2025-11-03),
+    against ESPN's default page size of 25.
+    """
+    resp = requests.get(
+        ESPN_CBB_SCOREBOARD_URL,
+        params={
+            'dates': str(date_iso).replace('-', ''),
+            'groups': _ESPN_DI_GROUP,
+            'limit': 500,
+        },
+        timeout=15,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _scoreboard_slate(date_iso, conf_map=None):
+    """One day's slate from ESPN's live scoreboard - never raises."""
+    try:
+        payload = _fetch_scoreboard_cached(str(date_iso))
+    except Exception:
+        return pd.DataFrame()
+    return _normalize_slate_frame(_scoreboard_raw_rows(payload), conf_map=conf_map, source='espn')
+
+
+def slate_dates(season):
+    """
+    Every date the published schedule file knows has games this season, as
+    [{'date': 'YYYY-MM-DD', 'games': int, 'di_games': int}, ...] ascending.
+
+    `di_games` is NOT redundant with `games`. It's what the tab's default
+    date has to key on, and the gap between them is where CFB Scholar's
+    equivalent shipped a real bug: it defaulted to the last COMPLETED week,
+    which in a real season turned out to be an FCS playoff round with plenty
+    of games and zero analyzable ones - so the tab opened on an empty
+    screen. CBB has the same shape of trap (a date can be all non-D-I
+    games), so the same two-level fallback applies: last date with
+    `di_games > 0`, falling back to last date with any games at all.
+
+    Covers only games ALREADY PLAYED - the live scoreboard is what serves
+    today and forward - so this is a hint for the date picker, never a
+    whitelist of dates the tab is allowed to show.
+    """
+    raw = _season_schedule(season)
+    if raw.empty or 'game_date' not in raw.columns:
+        return []
+    day = pd.to_datetime(raw['game_date'], errors='coerce').dt.date
+    di = _col(raw, 'home_conference_id').notna() & _col(raw, 'away_conference_id').notna()
+    work = pd.DataFrame({'day': day, 'di': di}).dropna(subset=['day'])
+    if work.empty:
+        return []
+    grouped = work.groupby('day')['di'].agg(['size', 'sum']).sort_index()
+    return [
+        {'date': d.isoformat(), 'games': int(r['size']), 'di_games': int(r['sum'])}
+        for d, r in grouped.iterrows()
+    ]
+
+
+def default_slate_date(season, dates=None):
+    """
+    The date the tab should open on: TODAY when today falls inside this
+    season, otherwise the most recent date that actually has analyzable
+    games - with a plain "most recent date with any games" fallback behind
+    that (see slate_dates for the bug that two-level fallback exists for;
+    keep it even if it looks like CBB can't hit it).
+
+    `dates` is accepted so a caller that already has slate_dates' output
+    doesn't pay for it twice.
+    """
+    dates = slate_dates(season) if dates is None else dates
+    today = datetime.date.today()
+    lo, hi = _slate_season_bounds(season)
+    if lo <= today <= hi:
+        return today
+    with_di = [d for d in dates if d['di_games'] > 0]
+    chosen = (with_di or dates or [None])[-1]
+    if chosen is None:
+        return min(today, hi)
+    return datetime.date.fromisoformat(chosen['date'])
+
+
+def slate_source(season, date_iso):
+    """
+    Which source a given date will actually be served from - 'local' (the
+    published season file), 'espn' (a live scoreboard call), or None if
+    neither can help. Drives the tab's data-freshness footer, so a visitor
+    can tell a static published snapshot from a live pull.
+    """
+    if str(date_iso) in {d['date'] for d in slate_dates(season)}:
+        return 'local'
+    try:
+        day = datetime.date.fromisoformat(str(date_iso))
+    except ValueError:
+        return None
+    lo, hi = _slate_season_bounds(season)
+    return 'espn' if lo <= day <= hi else None
+
+
+def load_slate(season, date_iso, di_only=True):
+    """
+    One day's games, normalized - the Game Slate tab's whole data contract.
+
+    Source ladder, in order: the published season file when it already
+    covers this date (free, keyless, no per-day call, and richer - it
+    carries venue, broadcast, ranks and both logo variants), otherwise a
+    live ESPN scoreboard call for that day. The live path also covers the
+    case that matters most in season: TODAY, whose games the published
+    file cannot contain yet by construction.
+
+    Falls THROUGH to the live path when the file has the date but returns
+    nothing for it, so a partially-built file can't strand a day.
+
+    `di_only` filters to games between two Division I teams - see
+    `D-I Matchup` in _normalize_slate_frame for what that means and what it
+    actually costs (about 9% of a season's games, nearly all of them a D-I
+    team hosting a non-D-I opponent this app has no stats for either way).
+
+    Returns an empty DataFrame on any failure - never raises.
+    """
+    season = season or current_cbb_season()
+    raw = _season_schedule(season)
+    conf_map = _conference_id_name_map(raw)
+
+    games = pd.DataFrame()
+    if not raw.empty and 'game_date' in raw.columns:
+        day = pd.to_datetime(raw['game_date'], errors='coerce').dt.date
+        try:
+            target = datetime.date.fromisoformat(str(date_iso))
+        except ValueError:
+            target = None
+        if target is not None:
+            games = _normalize_slate_frame(raw[day == target], conf_map=conf_map, source='local')
+
+    if games.empty:
+        games = _scoreboard_slate(date_iso, conf_map=conf_map)
+
+    if games.empty:
+        return games
+    if di_only and 'D-I Matchup' in games.columns:
+        games = games[games['D-I Matchup']]
+    return games.reset_index(drop=True)
+
+
+def slate_team_bridge(games, season=None):
+    """
+    {espn_team_name: cbbd_team_name} for every team on this slate.
+
+    The Game Slate's buttons hand a matchup to the Matchup Analyzer, whose
+    team pickers are keyed on CBBD's `school` names (load_teams) - while
+    every name on the slate is ESPN's `location` ("Duke", "UConn"). Those
+    two namespaces genuinely disagree, and a mismatch here is SILENT: the
+    seeded value simply isn't a valid option and the destination quietly
+    opens on its default instead (see ui.components.switch_tab).
+
+    Routed through the same data.utils.resolve_team_name this app already
+    uses to reconcile these exact two sources elsewhere (see
+    _bridge_espn_box_to_cbbd_names). A team that doesn't resolve is OMITTED
+    rather than mapped to None - every call site does `.get(name)` and
+    disables the button on a miss, and a None VALUE would sail straight
+    through that check and seed a null.
+
+    Returns {} when CBBD isn't configured at all, which the tab reads as
+    "render the cards, disable the jump buttons".
+    """
+    if games is None or games.empty:
+        return {}
+    teams_df = load_teams(season or current_cbb_season())
+    if teams_df.empty:
+        return {}
+    canonical = teams_df['Team'].dropna().tolist()
+    if not canonical:
+        return {}
+    names = set(games['Away'].dropna()) | set(games['Home'].dropna())
+    out = {}
+    for name in names:
+        resolved = resolve_team_name(name, canonical)
+        if resolved:
+            out[name] = resolved
+    return out
+
+
+def refresh_slate():
+    """Drops every cached layer behind the slate - the published season
+    file AND every per-day scoreboard call. Wired to the tab's own refresh
+    control rather than any schedule, matching this app's existing
+    manual-refresh precedent."""
+    _fetch_season_schedule_raw_cached.clear()
+    _fetch_scoreboard_cached.clear()
+
+
 def clear_league_wide_caches():
     """
     Manual "refresh league-wide data now" escape hatch for every long
@@ -1870,6 +2570,12 @@ def clear_league_wide_caches():
     _fetch_espn_season_box_raw_cached.clear()
     _load_espn_season_player_box_native_cached.clear()
     _espn_di_player_stats_cached.clear()
+    # The Game Slate's own sources (published season schedule file + every
+    # per-day scoreboard call). Also reachable on their own from the tab's
+    # local refresh control - see refresh_slate() - so a visitor who only
+    # wants tonight's tip times re-pulled doesn't have to drop every
+    # league-wide cache in the app to get them.
+    refresh_slate()
 
 
 def _odds_api_key():

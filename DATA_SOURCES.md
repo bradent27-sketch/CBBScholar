@@ -60,14 +60,16 @@ efficiency ratings, rankings — without the bot-wall problem.
 ## Per-tab source map
 
 **Correction:** this table previously listed Bracketology and Fantasy &
-Pools as their own rows. Neither exists as a tab anymore — `app.py` wires
-exactly 7 top-level tabs (Player Search, Team Efficiency, Rankings,
-Matchup Analyzer, Live Odds, Player Compare, Transfer Portal), with NET &
-Resume and Conference Standings as sub-tabs under Rankings, not separate
-top-level tabs — and no `ui/tabs/bracketology.py` or
-`ui/tabs/fantasy_pools.py` file exists in the repo. HANDOFF.md's §3 still
-describes both systems in present tense from when they existed; this is a
-documentation-drift correction, not a claim that removing them was wrong.
+Pools as their own rows. Neither exists as a tab anymore — `app.py` now
+wires exactly 8 top-level tabs (Game Slate, Player Search, Team
+Efficiency, Rankings, Matchup Analyzer, Live Odds, Player Compare,
+Transfer Portal), with NET & Resume and Conference Standings as sub-tabs
+under Rankings, not separate top-level tabs — and no
+`ui/tabs/bracketology.py` or `ui/tabs/fantasy_pools.py` file exists in the
+repo. HANDOFF.md's §3 still describes both systems in present tense from
+when they existed; this is a documentation-drift correction, not a claim
+that removing them was wrong. (Game Slate is the newest tab and leads the
+list deliberately — it's a launchpad into the others, not a report.)
 
 **Second correction, same spirit:** a "Predictive Analytics" 8th tab briefly
 existed in this table too, then was retired based on in-app usage feedback
@@ -80,6 +82,7 @@ Fantasy correction above.
 
 | Tab | Source | Status |
 |---|---|---|
+| Game Slate | PAST dates: SportsDataverse/hoopR's published season schedule file (`espn_mens_college_basketball_schedules` / `mbb_schedule_{season}.parquet`) — same GitHub Releases namespace the box-score pipeline already uses. TODAY/FUTURE dates: ESPN's public scoreboard endpoint, one call per date. No CBBD call except the team-name bridge behind the jump buttons, which reuses `load_teams`' already-cached list | **Live**, no key needed for the games themselves. The schedule file was verified live end-to-end while it was wired (2026 = 6,318 games × 86 columns, 1.72MB, republished daily upstream — confirmed via the release asset's own Last-Modified in the off-season). The ESPN scoreboard path is **not** independently live-verified — see the caveat below |
 | Player Search | ESPN public endpoints (team list, roster) + a free SportsDataverse season box-score file — NOT CollegeBasketballData.com | **Live** — the one deliberately CBBD-free tab in this app (see HANDOFF.md); season stats/game log both come from the same box-score file, summed locally. Net Rating dropped (not buildable from box scores alone); Usage% computed locally from box-score totals instead of a precomputed API field |
 | Team Efficiency | CollegeBasketballData.com API `/ratings/adjusted` | **Live** |
 | Rankings → NET & Resume | ncaa.com (manual fetch — see below) + CollegeBasketballData.com API `/rankings` (AP/Coaches poll) | **Live** |
@@ -88,6 +91,49 @@ Fantasy correction above.
 | Matchup Analyzer | PLAYER panel: ESPN's own endpoints + the ESPN-native SportsDataverse season file (same architecture as Player Search), falling back to CollegeBasketballData.com only if ESPN's own roster/box-file lookup comes up empty for that player. TEAM DEFENSE: CollegeBasketballData.com `/stats/team/season` for the defensive profile, plus a SEPARATE CBBD-name-resolved ESPN file for the positional breakdown (falls back to CBBD scoped to opponents actually played on staleness). `/teams/roster` powers the player picker on both, either way | **Live** — a two-column player-vs-team-defense prep tool (not a team-vs-team projection anymore; `/ratings/adjusted` is no longer used here). See HANDOFF.md for why PLAYER's fallback logic changed from a date-freshness heuristic to "does ESPN's own data actually have this player" — the freshness heuristic was tripping constantly due to a team-name-resolution mismatch, not real staleness. Also now carries a deeper predictive layer (Positional Vulnerability Ranking, Rim Pressure/Perimeter Openness Allowed, Efficiency Elasticity, Game-Script Sensitivity) — see HANDOFF.md, zero new sources, pure local compute over the same data this row already describes |
 | Live Odds | The Odds API `basketball_ncaab` | **Live** (shows "no games" in the off-season — correct behavior) |
 | Player Compare | ESPN's own endpoints + the ESPN-native SportsDataverse season file (same architecture as Player Search), falling back to CollegeBasketballData.com only if ESPN's own roster/box-file lookup comes up empty for that player. `/teams/roster` powers the player picker either way | **Live** — both players' season-stat profiles resolve independently via `data.loaders.get_player_season_profile`, so one player can come from the free file while the other falls back to CBBD if only one player isn't found in ESPN's own data yet |
+
+## Game Slate: what's verified, what isn't, and what to check in November
+
+This tab has an unusually clean verification story on one side and an
+open item on the other, so both are stated plainly rather than averaged
+into "live".
+
+**Verified live, against real downloaded data** (the build environment for
+this pass could reach GitHub release assets, which earlier passes could
+not — that's a change from what HANDOFF.md records): the hoopR schedule
+file downloads, parses, and covers 2023–2026 (2027 404s until the season
+tips). Measured on the real 2026 file: 6,318 games, 147 game dates, 365
+D-I teams out of 728 distinct names, 5,767 games (91.3%) between two D-I
+teams, a peak of 169 games on a single date, every logo URL already
+`https` with zero nulls on the home side, and a complete 31-conference
+id→name map derivable from the file itself. The whole loader→card path was
+run against it end to end.
+
+**NOT verified: the ESPN scoreboard path.** `site.api.espn.com` is
+unreachable from this sandbox (403 on CONNECT — the same standing egress
+limitation every ESPN/CBBD touchpoint in this app has hit). Its parser is
+derived from the schedule file's own field-name mapping (hoopR's 86
+schedule columns are a flat rename of the scoreboard event payload) plus
+this app's existing working ESPN parsers — a reasoned extension of an
+inspected shape, not a cold guess, the same standard `load_espn_teams`
+holds. **Check this first once the 2026-27 season tips:** open Game Slate
+on today's date and confirm games appear with real tip times. The tab
+degrades to "no games found" rather than breaking if the shape differs.
+
+**Also open:** whether the published schedule file carries games that
+haven't been played yet. Every row in a completed-season file is final, so
+an off-season snapshot can't answer it, and the upstream pipeline rebuilds
+schedules alongside its play-by-play stage. The tab does not depend on the
+answer — past dates come from the file, today and forward from the
+scoreboard — but if the file does turn out to carry future games, the
+scoreboard call could become a narrower fallback rather than the primary
+path for those dates.
+
+**Cost:** one ~1.7MB file download per season (cached to disk for a day),
+plus one keyless scoreboard call per date viewed (cached one hour, short
+on purpose — tip times move late and live scores change by the minute).
+Zero CBBD calls for the games themselves. The jump buttons' team-name
+bridge reads `load_teams`, which every other CBBD tab has already cached.
 
 ## Correction: recruiting rankings gap (resolved)
 

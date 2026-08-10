@@ -188,7 +188,11 @@ STAT_DECIMALS = {
 }
 
 # Exact tab label strings - shared between app.py's st.tabs(...) call and any
-# tab that needs to programmatically switch the active tab.
+# tab that needs to programmatically switch the active tab (see
+# ui.components.switch_tab, which assigns one of these to
+# st.session_state['active_tab']; they must stay string-identical to the
+# labels app.py actually passes to st.tabs).
+TAB_SLATE = "GAME SLATE"
 TAB_PLAYER_SEARCH = "PLAYER SEARCH"
 TAB_EFFICIENCY = "TEAM EFFICIENCY"
 TAB_RANKINGS = "RANKINGS"
@@ -196,8 +200,14 @@ TAB_PORTAL = "TRANSFER PORTAL"
 TAB_MATCHUP = "MATCHUP ANALYZER"
 TAB_LIVE_ODDS = "LIVE ODDS"
 TAB_COMPARE = "PLAYER COMPARE"
+# GAME SLATE leads deliberately: it answers the first question of a real
+# prep session ("who is playing"), and its whole purpose is handing a chosen
+# game to the tabs after it with both teams already filled in - so it reads
+# as the entry point rather than an eighth destination. This does change
+# which tab the app opens on; moving it back is a one-line reorder here
+# (app.py builds its tab list from TAB_LABELS' order, index for index).
 TAB_LABELS = [
-    TAB_PLAYER_SEARCH, TAB_EFFICIENCY, TAB_RANKINGS, TAB_MATCHUP, TAB_LIVE_ODDS, TAB_COMPARE, TAB_PORTAL,
+    TAB_SLATE, TAB_PLAYER_SEARCH, TAB_EFFICIENCY, TAB_RANKINGS, TAB_MATCHUP, TAB_LIVE_ODDS, TAB_COMPARE, TAB_PORTAL,
 ]
 
 # ==========================================
