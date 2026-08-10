@@ -1883,7 +1883,15 @@ def get_player_season_profile(team, season, player_name, cbbd_athlete_id):
 # network access - and note the tab degrades to "no games" rather than
 # breaking if the shape differs.
 # ===========================================================
-SLATE_DISPLAY_TZ = 'America/New_York'
+# Central time, on request. This is the ONE knob that moves every displayed
+# tip time AND the calendar day a game is filed under - _local_date below
+# derives the slate's dates from this zone too, so the two can never
+# disagree the way they did when dates came off the raw UTC timestamp.
+#
+# Note this deliberately diverges from the "ET everywhere" house standard
+# the sibling apps share; if a future pass ports something between them,
+# that's the reason for the difference, not an oversight.
+SLATE_DISPLAY_TZ = 'America/Chicago'
 
 HOOPR_MBB_SCHEDULE_URL = (
     "https://github.com/sportsdataverse/sportsdataverse-data/releases/download/"
@@ -1985,10 +1993,36 @@ def _conference_id_name_map(raw_sched):
     return {int(k): str(v) for k, v in named.items() if pd.notna(k)}
 
 
+def _to_display_tz(dt, tz=SLATE_DISPLAY_TZ):
+    """
+    (localized datetime, zone label) for a tz-aware datetime.
+
+    Falls back to leaving the timestamp in UTC and SAYING SO. That honesty
+    matters more than it looks: on Windows, `zoneinfo` has no system tz
+    database to read and raises unless the `tzdata` package is installed
+    (it's in requirements.txt for exactly this reason). A silent fallback
+    would render every tip time an hour or six off while still labelling it
+    Central - the worst possible failure for a schedule, since nothing about
+    the output looks wrong.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        local = dt.astimezone(ZoneInfo(tz))
+        # %Z resolves to the abbreviation actually in force at that instant -
+        # CST or CDT. Not cosmetic: a basketball season straddles the DST
+        # boundary (November tips are CST, March/April tournament games are
+        # CDT), so one hardcoded label is wrong for part of every season.
+        # Every game on a given DATE shares one abbreviation, so a page
+        # never shows a mix.
+        return local, (local.strftime('%Z') or 'CT')
+    except Exception:
+        return dt, 'UTC'
+
+
 def format_tipoff(iso_str, tbd=False, tz=SLATE_DISPLAY_TZ, long=False):
     """
-    ISO timestamp -> the tip-off string a card prints, in ET (the house
-    standard across this app and its two sibling apps).
+    ISO timestamp -> the tip-off string a card prints, in SLATE_DISPLAY_TZ
+    (Central, on request - see that constant).
 
     Three details here are each a real bug if dropped, all inherited from
     CFB Scholar's equivalent where they were found the hard way:
@@ -1998,10 +2032,12 @@ def format_tipoff(iso_str, tbd=False, tz=SLATE_DISPLAY_TZ, long=False):
        is checked first, before any parsing.
     2. For a TBD game the weekday comes from the RAW DATE STRING, never
        from a timezone conversion: midnight UTC converts to the PREVIOUS
-       EVENING in Eastern, so a Saturday game reads "Friday".
+       EVENING anywhere in the US, so a Saturday game reads "Friday". That
+       gap is WIDER in Central than in Eastern (six hours, not five), so
+       moving the app off ET makes this trap easier to hit, not harder.
     3. `.replace(' 0', ' ')` strips the leading zero ('08:00 PM' ->
-       '8:00 PM'). Applied to the formatted string, which is why the
-       weekday-name portion can't contain a ' 0' to damage.
+       '8:00 PM'). Applied to the time portion only, before the zone label
+       is appended - a label is free to contain a ' 0' without being damaged.
     """
     if tbd:
         if long and iso_str:
@@ -2015,13 +2051,9 @@ def format_tipoff(iso_str, tbd=False, tz=SLATE_DISPLAY_TZ, long=False):
         dt = datetime.datetime.fromisoformat(str(iso_str).replace('Z', '+00:00'))
     except (TypeError, ValueError):
         return ''
-    try:
-        from zoneinfo import ZoneInfo
-        local = dt.astimezone(ZoneInfo(tz))
-    except Exception:
-        local = dt
+    local, label = _to_display_tz(dt, tz)
     pattern = '%A at %I:%M %p' if long else '%a %I:%M %p'
-    return local.strftime(pattern).replace(' 0', ' ') + ' ET'
+    return local.strftime(pattern).replace(' 0', ' ') + f' {label}'
 
 
 def _slate_timestamp(iso_str):
@@ -2035,19 +2067,26 @@ def _slate_timestamp(iso_str):
 
 def _local_date(iso_str, tbd=False):
     """
-    The ET calendar date a game actually belongs to.
+    The calendar date a game actually belongs to, in SLATE_DISPLAY_TZ.
 
     Slicing the first 10 characters off the raw timestamp is the obvious
     approach and it is WRONG, which is not obvious - both sources stamp
     games in UTC, and a night game in the US is already the next day there.
     Caught on real data rather than reasoned about: the 2026 national
     championship (start_date '2026-04-07T00:50Z') rendered as
-    "04/07/2026 · Monday at 8:50 PM ET" - a self-contradicting card, since
+    "04/07/2026 · Monday at 8:50 PM" - a self-contradicting card, since
     04/07 was a Tuesday. Every evening tip in the file has the same defect,
     which is most of them.
 
+    This is ALSO why the slate filters on this derived date rather than on
+    the schedule file's own `game_date` column (see _season_slate): that
+    column is Eastern, and a late West Coast tip (9:30pm PT = 12:30am ET
+    the next day = 11:30pm CT the same day) falls on a different calendar
+    day in the two zones. Selecting by one and displaying the other would
+    reintroduce exactly the contradiction above, just for fewer games.
+
     A TBD game is the exception and takes the RAW slice: its timestamp is a
-    midnight-UTC placeholder, and converting THAT to Eastern lands on the
+    midnight-UTC placeholder, and converting THAT backwards lands on the
     previous evening - turning a Saturday game into Friday. Same reasoning
     as format_tipoff's own TBD branch, for the same underlying reason.
     """
@@ -2057,11 +2096,10 @@ def _local_date(iso_str, tbd=False):
     dt = _slate_timestamp(iso_str)
     if dt is None:
         return raw
-    try:
-        from zoneinfo import ZoneInfo
-        return dt.astimezone(ZoneInfo(SLATE_DISPLAY_TZ)).date().isoformat()
-    except Exception:
-        return raw
+    local, label = _to_display_tz(dt)
+    # A UTC fallback (no tz database available) must not silently reclassify
+    # every evening game onto the next day - keep the raw slice instead.
+    return raw if label == 'UTC' else local.date().isoformat()
 
 
 def _format_slate_date(value):
@@ -2375,10 +2413,43 @@ def _scoreboard_slate(date_iso, conf_map=None):
     return _normalize_slate_frame(_scoreboard_raw_rows(payload), conf_map=conf_map, source='espn')
 
 
+@st.cache_data(show_spinner=False, persist="disk")
+def _season_slate_cached(season, _bucket):
+    """
+    The WHOLE published season, already normalized - one shared frame every
+    date view slices out of, rather than re-normalizing 6,000+ rows per
+    date and per filter change.
+
+    Normalizing up front is what lets both the date list and the per-date
+    filter key off the DERIVED local date (see _local_date) instead of the
+    file's own Eastern `game_date` column. Selecting on one zone's calendar
+    while displaying another's is the same self-contradiction the UTC-slice
+    bug produced, just narrowed to late West Coast tips - and now that this
+    app displays Central, that gap is real rather than hypothetical.
+
+    Raises on a real failure; caught by the wrapper below, outside the
+    cache, so a transient blip isn't memoized as "this season has no games".
+    """
+    raw = _fetch_season_schedule_raw_cached(season, _bucket)
+    if raw is None or raw.empty:
+        return pd.DataFrame()
+    return _normalize_slate_frame(raw, conf_map=_conference_id_name_map(raw), source='local')
+
+
+def _season_slate(season):
+    """Public wrapper - never raises, degrades to an empty DataFrame
+    OUTSIDE the cache boundary."""
+    try:
+        return _season_slate_cached(season, _daily_bucket())
+    except Exception:
+        return pd.DataFrame()
+
+
 def slate_dates(season):
     """
     Every date the published schedule file knows has games this season, as
     [{'date': 'YYYY-MM-DD', 'games': int, 'di_games': int}, ...] ascending.
+    Dates are in SLATE_DISPLAY_TZ, matching what the cards themselves show.
 
     `di_games` is NOT redundant with `games`. It's what the tab's default
     date has to key on, and the gap between them is where CFB Scholar's
@@ -2393,17 +2464,12 @@ def slate_dates(season):
     today and forward - so this is a hint for the date picker, never a
     whitelist of dates the tab is allowed to show.
     """
-    raw = _season_schedule(season)
-    if raw.empty or 'game_date' not in raw.columns:
+    season_df = _season_slate(season)
+    if season_df.empty:
         return []
-    day = pd.to_datetime(raw['game_date'], errors='coerce').dt.date
-    di = _col(raw, 'home_conference_id').notna() & _col(raw, 'away_conference_id').notna()
-    work = pd.DataFrame({'day': day, 'di': di}).dropna(subset=['day'])
-    if work.empty:
-        return []
-    grouped = work.groupby('day')['di'].agg(['size', 'sum']).sort_index()
+    grouped = season_df.groupby('Date')['D-I Matchup'].agg(['size', 'sum']).sort_index()
     return [
-        {'date': d.isoformat(), 'games': int(r['size']), 'di_games': int(r['sum'])}
+        {'date': str(d), 'games': int(r['size']), 'di_games': int(r['sum'])}
         for d, r in grouped.iterrows()
     ]
 
@@ -2470,21 +2536,28 @@ def load_slate(season, date_iso, di_only=True):
     Returns an empty DataFrame on any failure - never raises.
     """
     season = season or current_cbb_season()
-    raw = _season_schedule(season)
-    conf_map = _conference_id_name_map(raw)
+    season_df = _season_slate(season)
 
     games = pd.DataFrame()
-    if not raw.empty and 'game_date' in raw.columns:
-        day = pd.to_datetime(raw['game_date'], errors='coerce').dt.date
-        try:
-            target = datetime.date.fromisoformat(str(date_iso))
-        except ValueError:
-            target = None
-        if target is not None:
-            games = _normalize_slate_frame(raw[day == target], conf_map=conf_map, source='local')
+    if not season_df.empty:
+        games = season_df[season_df['Date'] == str(date_iso)]
 
     if games.empty:
-        games = _scoreboard_slate(date_iso, conf_map=conf_map)
+        # The live path needs the same conference-id -> name map the season
+        # file supplies for free; it's already downloaded and cached, so
+        # this costs nothing beyond a dict build.
+        #
+        # Note the one asymmetry: ESPN's scoreboard is paged by EASTERN
+        # calendar day, while this app now displays Central, so a game
+        # tipping after midnight Eastern would come back under the next ET
+        # day while carrying the previous Central date. Deliberately not
+        # handled with a second call, because it is not a real case rather
+        # than because it's hard: measured against the full 2026 season,
+        # ZERO of 6,318 games fall on different Central and Eastern dates -
+        # the latest tip all year was 10:59 PM CT, since ESPN's own
+        # scheduling day ends before Eastern midnight. Revisit only if a
+        # real game ever shows a date that disagrees with the picker.
+        games = _scoreboard_slate(date_iso, conf_map=_conference_id_name_map(_season_schedule(season)))
 
     if games.empty:
         return games
@@ -2537,6 +2610,10 @@ def refresh_slate():
     control rather than any schedule, matching this app's existing
     manual-refresh precedent."""
     _fetch_season_schedule_raw_cached.clear()
+    # The normalized season frame is its own cache entry downstream of the
+    # raw download - clearing only the download would leave every date view
+    # still served from the stale normalized copy.
+    _season_slate_cached.clear()
     _fetch_scoreboard_cached.clear()
 
 

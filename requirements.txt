@@ -19,3 +19,11 @@ requests>=2.34
 # ever upgraded past 1.59.
 pyarrow>=14.0,<25.0
 matplotlib>=3.11
+# Required on WINDOWS specifically, which is where this app actually runs
+# (see run_app.bat): Python's stdlib `zoneinfo` reads the operating
+# system's tz database, and Windows doesn't ship one - ZoneInfo() raises
+# ZoneInfoNotFoundError there without this package. The Game Slate converts
+# every tip time (and every game's calendar DATE) into Central through
+# zoneinfo, so without this the whole tab falls back to UTC. A no-op on
+# Linux/macOS, which have their own system tz database.
+tzdata>=2025.1

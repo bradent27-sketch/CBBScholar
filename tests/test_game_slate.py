@@ -67,8 +67,8 @@ class NormalizeSlateFrameTests(unittest.TestCase):
         self.assertEqual(r['Home Pts'], 69)
         self.assertEqual(r['Away Pts'], 63)
         self.assertEqual(r['Winner'], 'Michigan')
-        # 00:50Z is the evening of the 6th in ET - see
-        # test_date_is_the_ET_day_not_the_UTC_slice.
+        # 00:50Z is the evening of the 6th in Central - see
+        # test_date_is_the_local_day_not_the_UTC_slice.
         self.assertEqual(r['Date'], '2026-04-06')
         self.assertEqual(r['Date Display'], '04/06/2026')
 
@@ -77,7 +77,7 @@ class NormalizeSlateFrameTests(unittest.TestCase):
         so the loader must gate on STATUS, never on score presence."""
         df = _normalize(_raw_game(
             status_type_name='STATUS_SCHEDULED', status_type_state='pre',
-            status_type_completed=False, status_type_short_detail='7:00 PM ET',
+            status_type_completed=False, status_type_short_detail='7:00 PM CT',
             home_score=0, away_score=0, home_winner=None, away_winner=None,
         ))
         r = df.iloc[0]
@@ -118,10 +118,10 @@ class NormalizeSlateFrameTests(unittest.TestCase):
         self.assertTrue(pd.isna(r['Home Rank']))
         self.assertEqual(r['Away Rank'], 3)
 
-    def test_date_is_the_ET_day_not_the_UTC_slice(self):
+    def test_date_is_the_local_day_not_the_UTC_slice(self):
         """A night game is already the NEXT day in UTC. Slicing the raw
         timestamp gave the 2026 national championship (00:50Z) a date of
-        04/07 while its own tip line read "Monday at 8:50 PM ET" - and
+        04/07 while its own tip line read "Monday at 7:50 PM CDT" - and
         04/07 was a Tuesday. Caught on real data, not in review."""
         df = _normalize(_raw_game(start_date='2026-04-07T00:50Z'))
         r = df.iloc[0]
@@ -131,8 +131,8 @@ class NormalizeSlateFrameTests(unittest.TestCase):
 
     def test_tbd_game_keeps_the_raw_date_rather_than_shifting_back_a_day(self):
         """The inverse trap: a TBD game's midnight-UTC placeholder converts
-        to the PREVIOUS evening in Eastern, so converting it would move a
-        Saturday game to Friday."""
+        to the PREVIOUS evening in Central (six hours back, so it lands at
+        6pm the day before), which would move a Saturday game to Friday."""
         df = _normalize(_raw_game(start_date='2026-01-17T00:00Z', time_valid=False))
         r = df.iloc[0]
         self.assertEqual(r['Date'], '2026-01-17')
@@ -142,9 +142,9 @@ class NormalizeSlateFrameTests(unittest.TestCase):
     def test_games_order_by_real_time_not_the_display_string(self):
         """"Mon 9:00 AM" sorts AFTER "Mon 10:00 AM" as text ('9' > '1')."""
         df = _normalize(
-            _raw_game(game_id=1, start_date='2026-01-17T22:00Z'),   # 5:00 PM ET
-            _raw_game(game_id=2, start_date='2026-01-17T14:00Z'),   # 9:00 AM ET
-            _raw_game(game_id=3, start_date='2026-01-17T16:00Z'),   # 11:00 AM ET
+            _raw_game(game_id=1, start_date='2026-01-17T22:00Z'),   # 4:00 PM CST
+            _raw_game(game_id=2, start_date='2026-01-17T14:00Z'),   # 8:00 AM CST
+            _raw_game(game_id=3, start_date='2026-01-17T16:00Z'),   # 10:00 AM CST
         )
         self.assertEqual(list(df['GameId']), ['2', '3', '1'])
 
@@ -200,11 +200,11 @@ class NormalizeSlateFrameTests(unittest.TestCase):
 class TipoffFormattingTests(unittest.TestCase):
     def test_long_form_names_the_weekday_in_et(self):
         # 2026-04-07T00:50Z is Monday evening in Eastern, not Tuesday.
-        self.assertEqual(loaders.format_tipoff('2026-04-07T00:50Z', long=True), 'Monday at 8:50 PM ET')
+        self.assertEqual(loaders.format_tipoff('2026-04-07T00:50Z', long=True), 'Monday at 7:50 PM CDT')
 
     def test_leading_zero_stripped(self):
-        self.assertIn(' 8:50 PM', loaders.format_tipoff('2026-04-07T00:50Z'))
-        self.assertNotIn('08:50', loaders.format_tipoff('2026-04-07T00:50Z'))
+        self.assertIn(' 7:50 PM', loaders.format_tipoff('2026-04-07T00:50Z'))
+        self.assertNotIn('07:50', loaders.format_tipoff('2026-04-07T00:50Z'))
 
     def test_tbd_never_prints_its_placeholder_timestamp(self):
         out = loaders.format_tipoff('2026-01-17T00:00Z', tbd=True, long=True)
@@ -215,6 +215,21 @@ class TipoffFormattingTests(unittest.TestCase):
         """Midnight UTC converts to the PREVIOUS EVENING in Eastern, so a
         Saturday game would otherwise read 'Friday'."""
         self.assertTrue(loaders.format_tipoff('2026-01-17T00:00Z', tbd=True, long=True).startswith('Saturday'))
+
+    def test_times_are_central_and_labelled_with_the_zone_in_force(self):
+        """A basketball season straddles the DST boundary, so one hardcoded
+        label would be wrong for part of every season: November tips are
+        CST, March/April tournament games are CDT."""
+        november = loaders.format_tipoff('2025-11-04T01:00Z')      # 7:00 PM CST
+        april = loaders.format_tipoff('2026-04-07T00:50Z')         # 7:50 PM CDT
+        self.assertEqual(november, 'Mon 7:00 PM CST')
+        self.assertEqual(april, 'Mon 7:50 PM CDT')
+
+    def test_display_tz_is_central_not_eastern(self):
+        local, label = loaders._to_display_tz(
+            __import__('datetime').datetime.fromisoformat('2026-04-07T00:50+00:00'))
+        self.assertEqual(label, 'CDT')
+        self.assertEqual(local.hour, 19)     # 7pm, not 8pm
 
     def test_unparseable_input_degrades_quietly(self):
         self.assertEqual(loaders.format_tipoff('not a date'), '')
@@ -232,7 +247,7 @@ class CardMarkupTests(unittest.TestCase):
         self.assertIn(">63<", out)
         # The date and the weekday must agree: 04/06/2026 IS the Monday.
         self.assertIn('04/06/2026', out)
-        self.assertIn('Monday at 8:50 PM ET', out)
+        self.assertIn('Monday at 7:50 PM CDT', out)
 
     def test_keyed_style_binds_both_team_colors(self):
         row = _normalize(_raw_game()).iloc[0]
