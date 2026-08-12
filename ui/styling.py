@@ -222,7 +222,29 @@ def inject_theme():
 
         .block-container {{
             padding-top: 4.5rem !important;
-            padding-bottom: 2rem !important;
+            /* Scroll headroom, NOT decoration - at 2rem the bottom of the
+               page was genuinely unreachable (reported: "half the bottom
+               row of Game Slate cards gets cut off", and the same in the
+               sibling apps, which share this rule).
+
+               Cause: the `.stApp` zoom above. The zoom-independent chrome
+               above the scroll area grows with the zoom factor while this
+               padding is the only thing holding space at the other end, so
+               the taller the zoom, the less room is left at the bottom.
+               Measured in a real browser on a 24-card slate, headroom below
+               the last card:
+
+                   padding   zoom 1.08   1.18    1.242   1.357
+                   2rem       +100px    +26px    +8px    -45px  <- clipped
+                   6rem                          +87px   +42px
+                   10rem                        +167px  +129px
+
+               Headroom moves linearly with this value (16px x zoom per
+               rem), so it is a straightforward shortfall rather than a
+               clipping bug - 10rem clears the worst case with room for
+               engines that lose more than Chromium does. Re-measure with
+               ui/styling.py's own numbers above before lowering it. */
+            padding-bottom: 10rem !important;
             padding-left: 2.5rem !important;
             padding-right: 2.5rem !important;
             max-width: none !important;
