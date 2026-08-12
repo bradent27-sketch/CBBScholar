@@ -678,6 +678,171 @@ def inject_theme():
             .gs-team .gs-conf {{ display: none; }}
         }}
 
+        /* ===================================================================
+           GAME SLATE box score panel (ui/tabs/game_slate.py).
+
+           Full-width, rendered above the card grid rather than inside a
+           card, for two reasons: Streamlit's single level of column
+           nesting is already spent inside a card (grid column -> button
+           row), and a two-team box is unreadable at half width.
+
+           Player names are real st.buttons (they fire switch_tab into
+           Player Search - raw HTML can't), styled here to read as inline
+           links rather than buttons. Scoped to the panel's keyed container
+           so it doesn't restyle buttons anywhere else.
+           =================================================================== */
+        div[class*="st-key-bs_panel"] {{
+            background: {_panel_tint};
+            border: 1px solid {C['outline_variant']};
+            border-radius: {R['md']};
+            padding: 16px 18px 10px 18px;
+            margin-bottom: 18px;
+        }}
+        .bs-head {{
+            display: flex; align-items: center; justify-content: center;
+            gap: 18px; flex-wrap: wrap; margin-bottom: 4px;
+        }}
+        .bs-head .bs-side {{ display: flex; align-items: center; gap: 10px; }}
+        .bs-head .bs-side.bs-away {{ flex-direction: row; }}
+        .bs-head .bs-side.bs-home {{ flex-direction: row-reverse; }}
+        .bs-head .bs-logo {{
+            height: 42px; width: 42px; object-fit: contain;
+            filter: drop-shadow(0 1px 3px {_logo_shadow});
+        }}
+        .bs-head .bs-name {{
+            font-family: {F['display']}; font-size: 16px; font-weight: 800;
+            color: {C['on_surface']}; line-height: 1.1;
+        }}
+        .bs-head .bs-rec {{
+            font-size: 10px; font-weight: 700; letter-spacing: 0.06em;
+            color: {C['on_surface_variant']}; text-transform: uppercase;
+        }}
+        .bs-head .bs-pts {{
+            font-family: {F['mono']}; font-size: 30px; font-weight: 700;
+            color: {C['on_surface_variant']}; line-height: 1;
+        }}
+        .bs-head .bs-pts.bs-w {{ color: {C['on_surface']}; }}
+        .bs-head .bs-vs {{
+            font-size: 10px; font-weight: 700; letter-spacing: 0.1em;
+            color: {C['on_surface_variant']}; text-transform: uppercase;
+        }}
+        .bs-sub {{
+            text-align: center; font-size: 10.5px; font-weight: 600;
+            letter-spacing: 0.05em; text-transform: uppercase;
+            color: {C['on_surface_variant']}; margin-bottom: 14px;
+        }}
+
+        /* Head-to-head comparison bars: one shared track per stat, split
+           by each side's share of the pair. The point is instant "who won
+           this category", which a two-column number table doesn't give. */
+        .bs-cmp {{ display: flex; flex-direction: column; gap: 7px; margin-bottom: 14px; }}
+        .bs-cmp-row {{ display: flex; flex-direction: column; gap: 2px; }}
+        .bs-cmp-vals {{
+            display: flex; align-items: baseline; justify-content: space-between;
+            font-family: {F['mono']}; font-size: 11.5px; font-weight: 700;
+            color: {C['on_surface']};
+        }}
+        .bs-cmp-label {{
+            font-family: {F['body']}; font-size: 9.5px; font-weight: 800;
+            letter-spacing: 0.09em; text-transform: uppercase;
+            color: {C['on_surface_variant']};
+        }}
+        .bs-cmp-track {{
+            display: flex; height: 6px; border-radius: {R['full']};
+            overflow: hidden; background: {C['surface_container_high']};
+        }}
+        .bs-cmp-bar {{ height: 100%; }}
+        .bs-cmp-bar.bs-lead {{ box-shadow: inset 0 0 0 1px rgba(255,255,255,0.18); }}
+        .bs-cmp-gap {{ width: 2px; flex: 0 0 2px; background: {C['surface']}; }}
+
+        .bs-chips {{ display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; margin-bottom: 16px; }}
+        .bs-chip {{
+            background: {C['surface_container_high']}; border: 1px solid {C['outline_variant']};
+            border-radius: {R['full']}; padding: 3px 11px; font-size: 10.5px;
+            color: {C['on_surface_variant']}; font-weight: 600;
+        }}
+        .bs-chip b {{ font-family: {F['mono']}; color: {C['on_surface']}; font-weight: 700; }}
+
+        .bs-team-head {{
+            display: flex; align-items: center; gap: 8px;
+            border-left: 3px solid var(--bs-color, {C['outline']});
+            padding: 4px 10px; margin: 14px 0 6px 0;
+            background: {C['surface_container']}; border-radius: {R['default']};
+        }}
+        .bs-team-head img {{ height: 20px; width: 20px; object-fit: contain; }}
+        .bs-team-head .bs-t-name {{
+            font-size: 13px; font-weight: 800; color: {C['on_surface']};
+            font-family: {F['display']}; flex: 1 1 auto;
+        }}
+        .bs-team-head .bs-t-line {{
+            font-family: {F['mono']}; font-size: 10.5px; color: {C['on_surface_variant']}; font-weight: 700;
+        }}
+
+        /* Stat strip. Header and data rows share these classes so the
+           columns line up without a table element. */
+        .bs-strip {{ display: flex; align-items: center; gap: 2px; min-height: 26px; }}
+        .bs-strip .bs-c {{
+            flex: 1 1 0; min-width: 0; text-align: right;
+            font-family: {F['mono']}; font-size: 11.5px; font-weight: 600;
+            color: {C['on_surface']};
+        }}
+        .bs-strip .bs-c.bs-wide {{ flex: 1.45 1 0; }}
+        .bs-strip .bs-c.bs-pos {{ flex: 0 0 22px; text-align: left; color: {C['on_surface_variant']}; font-size: 10px; }}
+        .bs-strip .bs-c.bs-dim {{ color: {C['on_surface_variant']}; opacity: 0.75; }}
+        .bs-strip-head .bs-c {{
+            font-family: {F['body']}; font-size: 9px; font-weight: 800;
+            letter-spacing: 0.06em; text-transform: uppercase;
+            color: {C['on_surface_variant']};
+        }}
+        /* Points heat bar: a scoring line reads at a glance instead of
+           needing the eye to scan a column of numbers. */
+        .bs-strip.bs-heat {{
+            border-radius: {R['default']};
+            padding-right: 4px;
+        }}
+        .bs-lead-pill {{
+            flex: 0 0 auto; font-size: 8.5px; font-weight: 800; letter-spacing: 0.05em;
+            color: {C['on_primary']}; background: {C['primary']};
+            border-radius: {R['full']}; padding: 0 5px;
+        }}
+        .bs-dnp {{
+            font-size: 10.5px; color: {C['on_surface_variant']};
+            padding: 6px 2px 2px 2px; line-height: 1.5;
+        }}
+        .bs-dnp b {{ color: {C['on_surface']}; font-weight: 600; }}
+
+        /* Player-name buttons -> inline links. Descendant selector and
+           !important for the same two reasons the slate cards' buttons
+           need them (tooltip wrapper spans; emotion injecting at runtime). */
+        div[class*="st-key-bs_panel"] .stButton button {{
+            background: transparent !important;
+            border: none !important;
+            box-shadow: none !important;
+            color: {C['on_surface']} !important;
+            font-size: 12px !important;
+            font-weight: 600 !important;
+            text-align: left !important;
+            justify-content: flex-start !important;
+            padding: 0 2px !important;
+            min-height: 26px !important;
+            height: 26px !important;
+        }}
+        div[class*="st-key-bs_panel"] .stButton button:hover {{
+            color: {C['primary']} !important;
+            text-decoration: underline;
+            background: transparent !important;
+        }}
+        div[class*="st-key-bs_panel"] .stButton button:disabled {{
+            color: {C['on_surface_variant']} !important;
+            text-decoration: none; opacity: 0.7;
+        }}
+        div[class*="st-key-bs_panel"] div[data-testid="stHorizontalBlock"] {{ gap: 4px; }}
+        @media (max-width: 767px) {{
+            .bs-strip .bs-c.bs-opt {{ display: none; }}
+            .bs-head .bs-pts {{ font-size: 24px; }}
+            .bs-head .bs-name {{ font-size: 13px; }}
+        }}
+
         div[data-testid="stExpander"] {{
             background: {_card_tint} !important;
             border: 1px solid {C['outline_variant']} !important;

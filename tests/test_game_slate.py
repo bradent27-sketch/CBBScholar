@@ -478,6 +478,42 @@ class DefaultDateTests(unittest.TestCase):
         self.assertIsNotNone(loaders.default_slate_date(2024, []))
 
 
+def _player_buttons(calls):
+    """Only the two '<TEAM> players' buttons - a completed card also
+    renders a 'Box score' button, which these tests aren't about."""
+    return [c for c in calls if 'players' in str(c[0][0])]
+
+
+class BoxScoreButtonTests(unittest.TestCase):
+    def test_completed_game_offers_a_box_score_button(self):
+        calls = SwitchTabSeedingTests()._capture({}, row=_normalize(_raw_game()).iloc[0])
+        labels = [str(c[0][0]) for c in calls]
+        self.assertIn('Box score', labels)
+
+    def test_unplayed_game_offers_no_box_score_button(self):
+        row = _normalize(_raw_game(
+            status_type_name='STATUS_SCHEDULED', status_type_state='pre',
+            home_score=0, away_score=0, home_winner=None, away_winner=None,
+        )).iloc[0]
+        labels = [str(c[0][0]) for c in SwitchTabSeedingTests()._capture({}, row=row)]
+        self.assertNotIn('Box score', labels)
+
+    def test_game_the_source_says_has_no_box_offers_no_button(self):
+        """The schedule file stamps this per row - False for exactly the
+        postponed/canceled games. A button opening an empty panel is worse
+        than no button."""
+        row = _normalize(_raw_game(player_box=False)).iloc[0]
+        self.assertFalse(row['Has Box'])
+        labels = [str(c[0][0]) for c in SwitchTabSeedingTests()._capture({}, row=row)]
+        self.assertNotIn('Box score', labels)
+
+    def test_box_button_opens_the_right_game(self):
+        calls = SwitchTabSeedingTests()._capture({}, row=_normalize(_raw_game()).iloc[0])
+        box = [c for c in calls if str(c[0][0]) == 'Box score'][0]
+        self.assertIs(box[1]['on_click'], game_slate._open_box)
+        self.assertEqual(box[1]['args'], ('401856600',))
+
+
 class SwitchTabSeedingTests(unittest.TestCase):
     """Verifies the button wiring by calling the card renderer directly
     with st.button monkeypatched to capture its arguments.
@@ -490,7 +526,7 @@ class SwitchTabSeedingTests(unittest.TestCase):
     the call-argument level instead.
     """
 
-    def _capture(self, bridge):
+    def _capture(self, bridge, row=None):
         calls = []
 
         class _FakeCol:
@@ -510,14 +546,14 @@ class SwitchTabSeedingTests(unittest.TestCase):
         st_mod.columns = lambda n, **k: [_FakeCol() for _ in range(n if isinstance(n, int) else len(n))]
         st_mod.button = lambda *a, **k: calls.append((a, k))
         try:
-            row = _normalize(_raw_game()).iloc[0]
+            row = _normalize(_raw_game()).iloc[0] if row is None else row
             game_slate._render_card(0, row, 2026, bridge, True)
         finally:
             st_mod.container, st_mod.markdown, st_mod.columns, st_mod.button = originals
         return calls
 
     def test_each_button_seeds_its_own_team_and_the_opponents_defense(self):
-        calls = self._capture({'Michigan': 'Michigan', 'UConn': 'Connecticut'})
+        calls = _player_buttons(self._capture({'Michigan': 'Michigan', 'UConn': 'Connecticut'}))
         self.assertEqual(len(calls), 2)
 
         (away_args, away_kw), (home_args, home_kw) = calls
@@ -534,7 +570,7 @@ class SwitchTabSeedingTests(unittest.TestCase):
         })
 
     def test_unbridged_team_disables_both_buttons_rather_than_seeding_a_null(self):
-        calls = self._capture({'Michigan': 'Michigan'})   # UConn missing
+        calls = _player_buttons(self._capture({'Michigan': 'Michigan'}))   # UConn missing
         for _, kw in calls:
             self.assertTrue(kw['disabled'])
             self.assertIsNone(kw['on_click'])
@@ -544,10 +580,119 @@ class SwitchTabSeedingTests(unittest.TestCase):
         """The destination's pickers are keyed on CBBD's school names; a
         mismatch here is silent - the seeded value just isn't a valid
         option and the tab quietly opens on its default."""
-        calls = self._capture({'Michigan': 'Michigan', 'UConn': 'Connecticut'})
+        calls = _player_buttons(self._capture({'Michigan': 'Michigan', 'UConn': 'Connecticut'}))
         seeded = {c[1]['kwargs']['ma_player_team'] for c in calls}
         self.assertEqual(seeded, {'Michigan', 'Connecticut'})
         self.assertNotIn('UConn', seeded)
+
+
+class BoxScoreRenderTests(unittest.TestCase):
+    """The box panel's markup, same reasoning as the card tests: these
+    requirements are visual and fail silently."""
+
+    def _teams(self):
+        away = pd.Series({'Team': 'UConn', 'Score': 63, 'FGM': 21, 'FGA': 68, 'FG%': 30.88,
+                          '3PM': 9, '3PA': 33, '3P%': 27.27, 'FTM': 12, 'FTA': 16, 'FT%': 75.0,
+                          'REB': 46, 'AST': 9, 'TOV': 11, 'PIP': 22, 'Fast Break': 4,
+                          'Off TO': 8, 'Largest Lead': 3, 'Lead Changes': 6})
+        home = pd.Series({'Team': 'Michigan', 'Score': 69, 'FGM': 21, 'FGA': 55, 'FG%': 38.18,
+                          '3PM': 2, '3PA': 15, '3P%': 13.33, 'FTM': 25, 'FTA': 28, 'FT%': 89.29,
+                          'REB': 39, 'AST': 7, 'TOV': 10, 'PIP': 36, 'Fast Break': 2,
+                          'Off TO': 4, 'Largest Lead': 11, 'Lead Changes': 6})
+        return away, home
+
+    def test_comparison_bars_compare_shooting_by_percentage_not_makes(self):
+        """21-68 and 21-55 are the same makes and very different games."""
+        a, h = self._teams()
+        out = game_slate._comparison_html(a, h, '#0c2340', '#00274c')
+        # Michigan shot better, so its bar leads despite equal makes.
+        fg_block = out.split("3PT")[0]
+        self.assertIn('bs-lead', fg_block.split('bs-cmp-track')[1])
+        self.assertIn('21-68', out)
+        self.assertIn('21-55', out)
+
+    def test_equal_values_split_the_track_evenly(self):
+        bar = game_slate._split_bar(10, 10, '#111111', '#222222')
+        self.assertIn('width:50.0%', bar)
+        self.assertNotIn('bs-lead', bar)
+
+    def test_zero_zero_does_not_collapse_the_track(self):
+        bar = game_slate._split_bar(0, 0, '#111111', '#222222')
+        self.assertIn('width:50.0%', bar)
+
+    def test_missing_stat_renders_a_dash_never_nan(self):
+        a, h = self._teams()
+        a['PIP'] = float('nan'); h['PIP'] = float('nan')
+        out = game_slate._comparison_html(a, h, '#0c2340', '#00274c') + \
+              game_slate._chips_html(a, h, 'CONN', 'MICH')
+        self.assertNotIn('nan', out.lower())
+        self.assertNotIn('Paint', out)      # chip skipped entirely, not blank
+
+    def test_player_strip_never_prints_nan_for_a_dnp_row(self):
+        p = pd.Series({'PosAbbr': 'F', 'Minutes': float('nan'), 'Points': float('nan'),
+                       'Rebounds': float('nan'), 'Assists': float('nan'), 'Steals': float('nan'),
+                       'Blocks': float('nan'), 'Turnovers': float('nan'), 'Fouls': float('nan'),
+                       'FGM': float('nan'), 'FGA': float('nan'), '3PM': float('nan'),
+                       '3PA': float('nan'), 'FTM': float('nan'), 'FTA': float('nan')})
+        out = game_slate._player_strip_html(p, 20.0, '#00274c')
+        self.assertNotIn('nan', out.lower())
+        self.assertNotIn('linear-gradient', out)   # no heat bar for no points
+
+    def test_points_heat_bar_scales_to_the_games_top_scorer(self):
+        p = pd.Series({'PosAbbr': 'G', 'Points': 10.0, 'Minutes': 30.0})
+        self.assertIn('50%', game_slate._player_strip_html(p, 20.0, '#00274c'))
+
+    def test_header_escapes_and_marks_the_winner(self):
+        row = _normalize(_raw_game(home_location='Texas A&M', home_winner=True)).iloc[0]
+        out = game_slate._box_header_html(row, None, True)
+        self.assertIn('Texas A&amp;M', out)
+        self.assertEqual(out.count('bs-pts bs-w'), 1)
+
+    def test_malformed_color_cannot_reach_the_bar_style(self):
+        bar = game_slate._split_bar(1, 1, "red;}</style><script>", None)
+        self.assertNotIn('<script>', bar)
+        self.assertIn('&lt;', bar)
+
+
+class PlayerLinkSeedingTests(unittest.TestCase):
+    def _capture_seed(self, pos):
+        captured = {}
+        st_mod = game_slate.st
+        original = st_mod.button
+        st_mod.button = lambda *a, **k: captured.update(k)
+        try:
+            row = _normalize(_raw_game()).iloc[0]
+            p = pd.Series({'name': 'Elliot Cadeau', 'PosAbbr': pos})
+            game_slate._player_button('Elliot Cadeau', 'Elliot Cadeau', p, row, 'Home', 2026, 'k')
+        finally:
+            st_mod.button = original
+        return captured
+
+    def test_seeds_all_three_layers(self):
+        """Player Search resolves a player through two different widget
+        paths, and an exact label match is not guaranteed - so the team +
+        name query must be able to land the player on their own."""
+        kw = self._capture_seed('G')
+        self.assertIs(kw['on_click'], game_slate.switch_tab)
+        self.assertEqual(kw['args'], (game_slate.TAB_PLAYER_SEARCH,))
+        self.assertEqual(kw['kwargs'], {
+            'ps_season': 2026,
+            'ps_team': 'Michigan',                      # ESPN spelling, matches the slate
+            'ps_player_query_team': 'Elliot Cadeau',    # layer 1: narrows the roster
+            'ps_player_select': 'Elliot Cadeau (G)',    # layer 2: exact label
+            'ps_player_query': 'Elliot Cadeau',         # layer 3: All-Teams fallback
+        })
+
+    def test_label_uses_the_abbreviation_not_the_full_position_name(self):
+        """load_espn_roster emits position ABBREVIATIONS, which is what
+        Player Search's labels are built from - 'Guard' would never match."""
+        self.assertEqual(self._capture_seed('G')['kwargs']['ps_player_select'], 'Elliot Cadeau (G)')
+
+    def test_missing_position_still_seeds_a_usable_label(self):
+        kw = self._capture_seed(None)
+        self.assertEqual(kw['kwargs']['ps_player_select'], 'Elliot Cadeau (?)')
+        # Layers 1 and 3 are unaffected, so the player is still reachable.
+        self.assertEqual(kw['kwargs']['ps_player_query_team'], 'Elliot Cadeau')
 
 
 class SwitchTabCallbackTests(unittest.TestCase):

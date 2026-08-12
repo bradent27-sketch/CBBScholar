@@ -83,6 +83,7 @@ Fantasy correction above.
 | Tab | Source | Status |
 |---|---|---|
 | Game Slate | PAST dates: SportsDataverse/hoopR's published season schedule file (`espn_mens_college_basketball_schedules` / `mbb_schedule_{season}.parquet`) — same GitHub Releases namespace the box-score pipeline already uses. TODAY/FUTURE dates: ESPN's public scoreboard endpoint, one call per date. No CBBD call except the team-name bridge behind the jump buttons, which reuses `load_teams`' already-cached list | **Live**, no key needed for the games themselves. The schedule file was verified live end-to-end while it was wired (2026 = 6,318 games × 86 columns, 1.72MB, republished daily upstream — confirmed via the release asset's own Last-Modified in the off-season). The ESPN scoreboard path is **not** independently live-verified — see the caveat below |
+| Game Slate → box score | PLAYER side: the **same** `player_box_{season}.parquet` Player Search / Compare / Matchup Analyzer already download — no new fetch. TEAM side: `team_box_{season}.parquet` from the same namespace (~728KB, new) | **Live**, free, keyless, zero CBBD calls. Verified live: both join to a slate row on `game_id` at 100%, and **all 5,752 completed D-I games in 2026 have both a team and a player box**. The schedule row itself carries `player_box`/`team_box` availability stamps, so a card only offers the button when a box really exists |
 | Player Search | ESPN public endpoints (team list, roster) + a free SportsDataverse season box-score file — NOT CollegeBasketballData.com | **Live** — the one deliberately CBBD-free tab in this app (see HANDOFF.md); season stats/game log both come from the same box-score file, summed locally. Net Rating dropped (not buildable from box scores alone); Usage% computed locally from box-score totals instead of a precomputed API field |
 | Team Efficiency | CollegeBasketballData.com API `/ratings/adjusted` | **Live** |
 | Rankings → NET & Resume | ncaa.com (manual fetch — see below) + CollegeBasketballData.com API `/rankings` (AP/Coaches poll) | **Live** |
@@ -134,6 +135,37 @@ plus one keyless scoreboard call per date viewed (cached one hour, short
 on purpose — tip times move late and live scores change by the minute).
 Zero CBBD calls for the games themselves. The jump buttons' team-name
 bridge reads `load_teams`, which every other CBBD tab has already cached.
+
+### Box scores
+
+Opening a completed game's box costs **one extra ~728KB file per season**
+(the team box) and nothing at all for the player side — that's the same
+season file three other tabs already download. Measured: 3.0s to open the
+first box of a session (the one-time team-box download), **0.33s for every
+box after it**. Zero CBBD calls.
+
+Two things worth knowing if this is ever revisited:
+
+- **Team totals are not the sum of the player rows.** Team rebounds and
+  team turnovers belong to no player, so summing understates both —
+  measured on the real 2026 championship, Michigan OREB 10 by sum vs 12
+  actual, UConn turnovers 10 vs 11. That's why the team box is downloaded
+  rather than derived. It also carries points in paint, fast-break points,
+  points off turnovers, largest lead and lead changes, which aren't
+  derivable at all.
+- **Freshness is the player file's, not the schedule's.** The schedule
+  refreshes daily but the player box is on this app's shared twice-weekly
+  bucket, so a game that finished last night can legitimately have no box
+  yet. The panel says so plainly, and "Refresh slate" clears that file too
+  so it can be forced. Moving the box file to a daily bucket is a one-line
+  change (`_twice_weekly_bucket` → `_daily_bucket` in `load_game_box`);
+  it wasn't done by default because the file is 3.4MB and disk-persisted
+  cache entries are keyed per bucket, so daily buckets accumulate roughly
+  four times the disk over a season.
+
+Play-by-play is published in the same namespace and covers 99.8% of D-I
+finals, if a win-probability or scoring-run chart is ever wanted. Not
+wired — it's a much larger file than either box.
 
 ## Correction: recruiting rankings gap (resolved)
 

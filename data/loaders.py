@@ -1409,6 +1409,29 @@ def _fetch_espn_season_box_raw_cached(season, _bucket):
         'athleteSourceId': col('athlete_id'),
         'name': col('athlete_display_name'),
         'Position': col('athlete_position_name'),
+        # --- Box-score-only columns (added for the Game Slate's per-game
+        # box score, ui/tabs/game_slate.py). Additive: every existing
+        # consumer of this frame selects its columns explicitly, and
+        # _resolve_espn_box_team_names below pins its own output to the
+        # column set it always returned, so nothing downstream of it sees
+        # these at all. They live HERE rather than in a second download
+        # because this file is already fetched once and shared by Player
+        # Search, Player Compare and the Matchup Analyzer.
+        #
+        # `PosAbbr` is the one that matters for cross-tab linking: it's
+        # ESPN's 'G'/'F'/'C' form, which is the SAME format
+        # load_espn_roster emits for `position` (it prefers the position
+        # object's `abbreviation`) - and therefore the format Player
+        # Search's player labels are built from. The full
+        # `athlete_position_name` ('Guard') would not match those labels.
+        'PosAbbr': col('athlete_position_abbreviation'),
+        'Jersey': col('athlete_jersey'),
+        # ESPN's own explicit flags - better than inferring a DNP from zero
+        # minutes, which can't tell "didn't play" from "played and did
+        # nothing measurable".
+        'Starter': col('starter'),
+        'DNP': col('did_not_play'),
+        'Fouls': pd.to_numeric(col('fouls'), errors='coerce'),
         'Minutes': pd.to_numeric(col('minutes'), errors='coerce'),
         'Points': pd.to_numeric(col('points'), errors='coerce'),
         'Rebounds': pd.to_numeric(col('rebounds'), errors='coerce'),
@@ -1464,7 +1487,20 @@ def _resolve_espn_box_team_names(raw_box, canonical_names):
     out = out.drop(columns=['TeamRaw', 'OpponentRaw'])
     out = out.dropna(subset=['Team', 'Opponent', 'Date'])
     out = out[pd.to_numeric(out['Minutes'], errors='coerce') > 0]
-    return out.sort_values('Date').reset_index(drop=True) if not out.empty else out
+    if out.empty:
+        return out
+    # Pinned to the exact column set this function has always returned.
+    # _fetch_espn_season_box_raw_cached now also carries box-score-only
+    # columns (Starter/DNP/Jersey/PosAbbr/Fouls) for the Game Slate, which
+    # reads the RAW frame directly and needs no name resolution at all -
+    # this keeps them from leaking into Player Search / Compare / Matchup
+    # Analyzer, whose behavior is unchanged by that addition.
+    keep = [c for c in [
+        'GameId', 'Date', 'Team', 'Opponent', 'Home/Away', 'athleteSourceId', 'name', 'Position',
+        'Minutes', 'Points', 'Rebounds', 'OREB', 'DREB', 'Assists', 'Steals', 'Blocks',
+        'Turnovers', 'FGM', 'FGA', '3PM', '3PA', 'FTM', 'FTA',
+    ] if c in out.columns]
+    return out[keep].sort_values('Date').reset_index(drop=True)
 
 
 @st.cache_data(show_spinner=False, persist="disk")
@@ -2275,6 +2311,15 @@ def _normalize_slate_frame(raw, conf_map=None, source='local'):
         # 728 distinct names, and 5,767 of 6,318 games (91.3%) with both
         # sides in D-I.
         'D-I Matchup': home_conf_id.notna() & away_conf_id.notna(),
+        # The schedule file stamps each row with whether the published box
+        # files actually contain this game - so a card can decide whether
+        # to offer a box score without loading anything. Measured: True for
+        # all 5,752 completed D-I games in 2026, and False for exactly the
+        # 18 postponed/canceled ones. Defaults True when absent (the live
+        # scoreboard has no such stamp), which lets a just-finished game
+        # offer the button and get an honest "not published yet" panel
+        # rather than silently having no button at all.
+        'Has Box': _col(raw, 'player_box', True).fillna(True).astype(bool),
         '_source': source,
     })
     out['Away Logo Dark'] = out['Away Logo'].map(dark_logo_variant)
@@ -2604,6 +2649,145 @@ def slate_team_bridge(games, season=None):
     return out
 
 
+# -----------------------------------------------------------------------
+# Per-game BOX SCORES for the Game Slate's completed games.
+#
+# Both sides join to a slate row on `game_id` at 100% - measured, not
+# assumed: all 5,752 completed D-I games in the real 2026 season have both
+# a team box and a player box. The schedule file even stamps each row with
+# `team_box`/`player_box` booleans, so a card can know whether a box exists
+# before anything is loaded.
+#
+# The PLAYER side costs nothing new: it's the same season file Player
+# Search, Player Compare and the Matchup Analyzer already download
+# (_fetch_espn_season_box_raw_cached). The TEAM side is a small extra file
+# (~728KB) and is NOT redundant with it - see _season_team_box.
+# -----------------------------------------------------------------------
+HOOPR_MBB_TEAM_BOX_URL = (
+    "https://github.com/sportsdataverse/sportsdataverse-data/releases/download/"
+    "espn_mens_college_basketball_team_boxscores/team_box_{season}.parquet"
+)
+
+
+@st.cache_data(show_spinner=False, persist="disk")
+def _fetch_season_team_box_cached(season, _bucket):
+    """Raw download + parse of the published season TEAM box file (~728KB,
+    two rows per game). Raises on a real failure, returns empty on a 404
+    (a season not published yet) - same contract as the schedule fetch."""
+    resp = requests.get(HOOPR_MBB_TEAM_BOX_URL.format(season=season), timeout=60)
+    if resp.status_code == 404:
+        return pd.DataFrame()
+    resp.raise_for_status()
+    return pd.read_parquet(io.BytesIO(resp.content))
+
+
+def _season_team_box(season):
+    """
+    Public wrapper - never raises.
+
+    Worth a separate download rather than summing the player rows, which is
+    the obvious shortcut and is WRONG: team rebounds and team turnovers
+    belong to no player, so player sums silently undercount both. Measured
+    on the real 2026 championship - Michigan OREB 10 by sum vs 12 actual,
+    UConn turnovers 10 by sum vs 11 actual. Anything four-factors-shaped
+    built on summed rows inherits that error invisibly. This file also
+    carries points in paint, fast-break points, points off turnovers,
+    largest lead and lead changes, none of which are derivable at all.
+    """
+    try:
+        return _fetch_season_team_box_cached(season, _daily_bucket())
+    except Exception:
+        return pd.DataFrame()
+
+
+def _pct(made, att):
+    made, att = pd.to_numeric(made, errors='coerce'), pd.to_numeric(att, errors='coerce')
+    return (made / att * 100) if (pd.notna(att) and att) else None
+
+
+def load_game_box(game_id, season=None):
+    """
+    One completed game's box score: {'teams': DataFrame, 'players':
+    DataFrame, 'team_totals': bool}. Empty frames when the game isn't in
+    the published files yet - never raises.
+
+    `game_id` is compared AS A STRING on both sides. That cast is
+    load-bearing, not defensive: the published files type `game_id` as
+    int32 while the slate frame stringifies it, so the natural
+    `box['GameId'] == row['GameId']` comparison matches NOTHING and returns
+    an empty box with no error anywhere. Confirmed live before this
+    function was written.
+
+    Reads the RAW box frame rather than load_espn_season_player_box_native,
+    for two reasons that both matter here:
+      * that loader resolves team names against ESPN's standings endpoint,
+        which a box score does not need at all - the raw file's
+        `team_location` already IS the slate's own Away/Home spelling, so
+        the two join directly. It also means the box still works when the
+        standings endpoint is unreachable, which is not hypothetical (it
+        was down for the whole build of this feature).
+      * that loader drops DNP rows, and a box score should list who didn't
+        play rather than pretend they weren't on the roster.
+    """
+    season = season or current_cbb_season()
+    gid = str(game_id)
+
+    try:
+        raw_players = _fetch_espn_season_box_raw_cached(season, _twice_weekly_bucket())
+    except Exception:
+        raw_players = pd.DataFrame()
+
+    players = pd.DataFrame()
+    if not raw_players.empty and 'GameId' in raw_players.columns:
+        players = raw_players[raw_players['GameId'].astype(str) == gid].copy()
+
+    if not players.empty:
+        players['Starter'] = players.get('Starter', False).fillna(False).astype(bool)
+        players['DNP'] = players.get('DNP', False).fillna(False).astype(bool)
+        # Starters first, then by minutes - the order a box score is read in.
+        players = players.sort_values(
+            ['TeamRaw', 'DNP', 'Starter', 'Minutes'], ascending=[True, True, False, False],
+        ).reset_index(drop=True)
+
+    tb = _season_team_box(season)
+    teams = pd.DataFrame()
+    if not tb.empty and 'game_id' in tb.columns:
+        rows = tb[tb['game_id'].astype(str) == gid]
+        if not rows.empty:
+            teams = pd.DataFrame({
+                'Team': rows['team_location'],
+                'Score': pd.to_numeric(rows['team_score'], errors='coerce'),
+                'FGM': rows['field_goals_made'], 'FGA': rows['field_goals_attempted'],
+                '3PM': rows['three_point_field_goals_made'],
+                '3PA': rows['three_point_field_goals_attempted'],
+                'FTM': rows['free_throws_made'], 'FTA': rows['free_throws_attempted'],
+                'OREB': rows['offensive_rebounds'], 'DREB': rows['defensive_rebounds'],
+                'REB': rows['total_rebounds'], 'AST': rows['assists'],
+                'STL': rows['steals'], 'BLK': rows['blocks'],
+                'TOV': rows['total_turnovers'], 'PF': rows['fouls'],
+                'PIP': _num_col(rows, 'points_in_paint'),
+                'Fast Break': _num_col(rows, 'fast_break_points'),
+                'Off TO': _num_col(rows, 'turnover_points'),
+                'Largest Lead': _num_col(rows, 'largest_lead'),
+                'Lead Changes': _num_col(rows, 'lead_changes'),
+            }).reset_index(drop=True)
+            for made, att, out_col in (('FGM', 'FGA', 'FG%'), ('3PM', '3PA', '3P%'), ('FTM', 'FTA', 'FT%')):
+                teams[made] = pd.to_numeric(teams[made], errors='coerce')
+                teams[att] = pd.to_numeric(teams[att], errors='coerce')
+                teams[out_col] = [_pct(m, a) for m, a in zip(teams[made], teams[att])]
+
+    return {'teams': teams, 'players': players, 'team_totals': not teams.empty}
+
+
+def _num_col(df, name):
+    """Numeric column, or an all-None column when the file for this season
+    doesn't carry it - the team box has the same per-season schema drift
+    the schedule file does (see _col)."""
+    if name not in df.columns:
+        return pd.Series([None] * len(df), index=df.index)
+    return pd.to_numeric(df[name], errors='coerce')
+
+
 def refresh_slate():
     """Drops every cached layer behind the slate - the published season
     file AND every per-day scoreboard call. Wired to the tab's own refresh
@@ -2615,6 +2799,14 @@ def refresh_slate():
     # still served from the stale normalized copy.
     _season_slate_cached.clear()
     _fetch_scoreboard_cached.clear()
+    _fetch_season_team_box_cached.clear()
+    # The player box file too, deliberately: it's shared with Player Search
+    # and refreshes on a twice-weekly bucket, so last night's box score can
+    # legitimately be missing from an otherwise-current cache. "Refresh
+    # slate" is exactly the gesture someone makes when a completed game
+    # shows no box, so it has to be able to re-pull this. Costs one file
+    # re-download, no API quota.
+    _fetch_espn_season_box_raw_cached.clear()
 
 
 def clear_league_wide_caches():
