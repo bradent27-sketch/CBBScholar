@@ -5,6 +5,8 @@ uses. Pattern ported from NFL Scholar / CFB Scholar, trimmed to what this
 shell pass actually has callers for. No PFF-related helpers here at all
 (unlike CFB Scholar) - there is no PFF product for college basketball.
 """
+import datetime
+
 import streamlit as st
 
 from config import THEME
@@ -223,6 +225,123 @@ def switch_tab(tab_label, **sticky_state):
     st.session_state['active_tab'] = tab_label
     for key, value in sticky_state.items():
         seed_sticky_value(key, value)
+
+
+def open_box_score(season, game_id, date_iso=None):
+    """
+    Callback: jump to the Game Slate with one game's full box score open.
+
+    The cross-tab entry point for every "this stat came from a real game"
+    link in the app - a player's game log row, a point on a trend chart, a
+    defensive matchup. Same on_click-callback rule as switch_tab, which it
+    delegates to.
+
+    Seeds the slate's own season and date so the grid underneath the box
+    lands on that game's day rather than wherever the visitor last left it,
+    and clears the incidental filters (conference, ranked-only, paging).
+    That clearing is deliberate: arriving here is a request to look at ONE
+    named game, and leaving a stale conference filter on would show the
+    box above an empty, confusing "no games match those filters" slate.
+    `gs_di_only` is left alone - it's on by default and can't hide a game
+    that this app had stats for in the first place.
+
+    `gs_box_game` is plain session state, not a widget key, so it's set
+    directly rather than through the sticky mirror.
+    """
+    from config import TAB_SLATE
+    extra = {'gs_season': season}
+    if date_iso:
+        try:
+            extra['gs_date'] = datetime.date.fromisoformat(str(date_iso)[:10])
+        except (TypeError, ValueError):
+            pass
+    switch_tab(TAB_SLATE, **extra)
+    st.session_state['gs_box_game'] = str(game_id)
+    for key, cleared in (('gs_conferences', []), ('gs_ranked_only', False)):
+        seed_sticky_value(key, cleared)
+    st.session_state.pop('_sticky__gs_page', None)
+    st.session_state.pop('gs_page', None)
+
+
+def open_slate_date(season, date_iso):
+    """
+    Callback: jump to the Game Slate on a given date, WITHOUT opening a box
+    score. For games that haven't been played - an upcoming game on the
+    odds board has no box to show, but "what else is on that night, and who
+    are these two teams" is still a real question the slate answers.
+
+    Same filter-clearing rationale as open_box_score: arriving here is a
+    request to look at a specific day, so a stale conference filter left on
+    would show an empty slate for no reason the visitor can see.
+    """
+    from config import TAB_SLATE
+    extra = {'gs_season': season}
+    try:
+        extra['gs_date'] = datetime.date.fromisoformat(str(date_iso)[:10])
+    except (TypeError, ValueError):
+        pass
+    switch_tab(TAB_SLATE, **extra)
+    st.session_state.pop('gs_box_game', None)
+    for key, cleared in (('gs_conferences', []), ('gs_ranked_only', False)):
+        seed_sticky_value(key, cleared)
+    st.session_state.pop('_sticky__gs_page', None)
+    st.session_state.pop('gs_page', None)
+
+
+_GAME_LINKS_PER_ROW = 8
+
+
+def render_game_links(entries, season, key_prefix, label="Open a game's full box score"):
+    """
+    A compact strip of one-click links, one per game, each opening that
+    game's box score in the Game Slate.
+
+    These have to be real `st.button`s: the tables and charts they sit
+    under are hand-rolled HTML and inline SVG, and neither can fire the
+    Python callback this navigation needs (see switch_tab). A strip below
+    the visual is the honest way to get per-game clicks without rewriting
+    every table in the app into widgets.
+
+    Laid out with `st.columns` in fixed-width rows rather than a CSS
+    flex-wrap on the container: columns are the predictable, supported way
+    to get a horizontal run of buttons, and the wrap trick depends on
+    Streamlit's internal DOM structure. NOTE the consequence - this spends
+    one level of column nesting, and Streamlit allows exactly one, so this
+    helper cannot be called from inside another `st.columns` block. Callers
+    that live in a column (the Matchup Analyzer's panels) must render it
+    outside theirs.
+
+    Wins/losses tint via the `won` flag so the strip doubles as a
+    season-shape readout: a run of losses is visible before anything is
+    clicked.
+    """
+    if not entries:
+        return
+    st.caption(label)
+    with st.container(key=f"gamelinks_{key_prefix}"):
+        for start in range(0, len(entries), _GAME_LINKS_PER_ROW):
+            chunk = entries[start:start + _GAME_LINKS_PER_ROW]
+            cols = st.columns(_GAME_LINKS_PER_ROW)
+            for col, entry in zip(cols, chunk):
+                with col:
+                    won = entry.get('won')
+                    tone = 'n' if won is None else ('w' if won else 'l')
+                    st.button(
+                        entry['label'],
+                        # The `gl_<tone>_` token is what the win/loss tint
+                        # in ui/styling.py keys off: Streamlit puts
+                        # `st-key-<button key>` on each button's own element
+                        # container, so a substring selector on that class
+                        # is the only handle for styling ONE button
+                        # differently from its neighbours. Verified in a
+                        # real browser with getComputedStyle, not assumed -
+                        # per-widget key classes are not documented API.
+                        key=f"gl_{tone}_{key_prefix}_{entry['game_id']}",
+                        width="stretch",
+                        help=entry.get('help'),
+                        on_click=open_box_score,
+                        args=(season, entry['game_id'], entry.get('date')),
+                    )
 
 
 def render_header():

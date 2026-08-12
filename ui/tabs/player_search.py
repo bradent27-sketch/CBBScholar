@@ -77,12 +77,16 @@ from config import AVAILABLE_SEASONS
 from data.loaders import (
     current_cbb_season, load_espn_teams, load_espn_roster, load_espn_season_player_box_native,
     load_espn_di_player_stats, load_espn_athlete_bio, load_teams, load_team_roster,
+    season_slate,
 )
-from data.transforms import last_n_form, player_percentile_rows, espn_player_season_stats_for_teams, espn_player_result_map
+from data.transforms import (
+    last_n_form, player_percentile_rows, espn_player_season_stats_for_teams,
+    espn_player_result_map, game_link_rows,
+)
 from data.utils import fuzzy_filter_names, match_player_name, resolve_team_name
 from ui.components import (
     render_coming_soon, render_team_banner, render_bio_strip, render_metric_tiles,
-    sticky_selectbox, sticky_text_input, sticky_checkbox,
+    sticky_selectbox, sticky_text_input, sticky_checkbox, render_game_links,
 )
 from ui.charts import render_relative_bars
 from ui.styling import render_sticky_footer_table
@@ -395,7 +399,7 @@ def render():
     else:
         st.caption(f"No comparison group available. {games} games played.")
 
-    _render_game_log_section(box_df, team, source_id, colors)
+    _render_game_log_section(box_df, team, source_id, colors, season)
 
 
 _GAME_LOG_COLS = ['Date', 'Result', 'Home/Away', 'Opponent', 'Minutes', 'Points', 'Rebounds', 'Assists',
@@ -403,7 +407,7 @@ _GAME_LOG_COLS = ['Date', 'Result', 'Home/Away', 'Opponent', 'Minutes', 'Points'
 _GAME_LOG_NON_NUMERIC = ('Date', 'Result', 'Home/Away', 'Opponent')
 
 
-def _render_game_log_section(box_df, team, source_id, colors):
+def _render_game_log_section(box_df, team, source_id, colors, season):
     """Full game log table (every completed game this source has a box
     score for) with a season-averages row rendered as a real, pinned
     FOOTER of the same table (ui.styling.render_sticky_footer_table). Plus
@@ -456,4 +460,15 @@ def _render_game_log_section(box_df, team, source_id, colors):
         mine[table_cols], avg_row, numeric_cols=numeric_cols, team_color_map=colors,
         opponent_col='Opponent', win_loss_col='Result', height=360,
         mobile_headline_cols=['Date', 'Opponent', 'Result', 'Points'],
+    )
+
+    # Every row above came from a real game - these open that game's full
+    # box score in the Game Slate, which is the context a single stat line
+    # can't give (was this a blowout? did he play 12 minutes because the
+    # game was over?). A strip rather than clickable rows because the table
+    # above is hand-rolled HTML, which cannot fire a Python callback.
+    render_game_links(
+        game_link_rows(mine, season_slate(season), team=team),
+        season, key_prefix='ps_boxlink',
+        label="Open a game's full box score",
     )

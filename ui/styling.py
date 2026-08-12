@@ -843,6 +843,49 @@ def inject_theme():
             .bs-head .bs-name {{ font-size: 13px; }}
         }}
 
+        /* ===================================================================
+           Cross-tab game links (ui.components.render_game_links) - the chip
+           strips under a game log or trend chart that open that game's box
+           score in the Game Slate.
+
+           Sized down to chip proportions: these are navigation, not calls
+           to action, and a season log is 30+ of them. Descendant selector
+           and !important for the same two reasons every other button block
+           in this file needs them - the tooltip wrapper spans break
+           `.stButton > button`, and Streamlit injects its own button styles
+           with emotion at runtime, after this block.
+           =================================================================== */
+        div[class*="st-key-gamelinks_"] .stButton button {{
+            background: {C['surface_container']} !important;
+            border: 1px solid {C['outline_variant']} !important;
+            color: {C['on_surface_variant']} !important;
+            font-family: {F['mono']} !important;
+            font-size: 10.5px !important;
+            font-weight: 600 !important;
+            padding: 1px 4px !important;
+            min-height: 26px !important;
+            height: 26px !important;
+        }}
+        div[class*="st-key-gamelinks_"] .stButton button:hover {{
+            background: {C['primary']} !important;
+            border-color: {C['primary']} !important;
+            color: {C['on_primary']} !important;
+        }}
+        div[class*="st-key-gamelinks_"] div[data-testid="stHorizontalBlock"] {{ gap: 4px; }}
+        /* Win/loss tint, keyed off the `gl_<tone>_` token each button's own
+           key carries. Streamlit stamps `st-key-<key>` on every widget's
+           element container - confirmed in a real browser with
+           getComputedStyle rather than assumed, since per-widget key
+           classes aren't documented API. Left border only: enough to read
+           a season's shape at a glance without turning the strip into a
+           block of color. */
+        div[class*="st-key-gl_w_"] .stButton button {{
+            border-left: 3px solid {C['positive']} !important;
+        }}
+        div[class*="st-key-gl_l_"] .stButton button {{
+            border-left: 3px solid {C['negative']} !important;
+        }}
+
         div[data-testid="stExpander"] {{
             background: {_card_tint} !important;
             border: 1px solid {C['outline_variant']} !important;

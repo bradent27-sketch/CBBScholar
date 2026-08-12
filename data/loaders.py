@@ -2611,6 +2611,42 @@ def load_slate(season, date_iso, di_only=True):
     return games.reset_index(drop=True)
 
 
+def slate_date_for_timestamp(iso_str):
+    """The slate DATE (SLATE_DISPLAY_TZ) a UTC timestamp belongs to - so a
+    caller holding only a kickoff/tip timestamp (Live Odds' commence_time)
+    can navigate to the right day without re-deriving the timezone rule
+    that _local_date already owns."""
+    return _local_date(iso_str) or None
+
+
+def season_slate(season=None):
+    """
+    The whole normalized season as one frame - the public accessor behind
+    every cross-tab "which real game did this stat come from" lookup
+    (data.transforms.game_link_rows). Already cached and shared with the
+    slate itself, so annotating a game log with box-score links costs no
+    additional fetch.
+    """
+    return _season_slate(season or current_cbb_season())
+
+
+def find_slate_game(season, game_id):
+    """
+    One normalized slate row by game id, or None.
+
+    Deliberately resolved against the WHOLE season rather than whatever the
+    Game Slate happens to be showing: a box score opened from another tab
+    names a specific game, and requiring it to also survive the slate's
+    current date, filters and page would make the link fail for reasons
+    that have nothing to do with the game.
+    """
+    df = _season_slate(season or current_cbb_season())
+    if df.empty:
+        return None
+    match = df[df['GameId'].astype(str) == str(game_id)]
+    return match.iloc[0] if not match.empty else None
+
+
 def slate_team_bridge(games, season=None):
     """
     {espn_team_name: cbbd_team_name} for every team on this slate.

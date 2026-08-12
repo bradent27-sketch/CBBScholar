@@ -33,11 +33,14 @@ import html
 import pandas as pd
 import streamlit as st
 
-from config import AVAILABLE_SEASONS, TAB_MATCHUP, TAB_PLAYER_SEARCH
+from config import (
+    AVAILABLE_SEASONS, TAB_MATCHUP, TAB_PLAYER_SEARCH, TAB_EFFICIENCY, TAB_RANKINGS,
+)
 from data.loaders import (
     current_cbb_season, load_slate, slate_dates, default_slate_date, slate_source,
-    refresh_slate, slate_team_bridge, load_game_box,
+    refresh_slate, slate_team_bridge, load_game_box, find_slate_game, list_conferences,
 )
+from data.utils import resolve_team_name, CONFERENCE_NAME_ALIASES
 from ui.components import (
     switch_tab, set_sticky_value, sticky_date_input,
     sticky_selectbox, sticky_multiselect, sticky_checkbox,
@@ -492,6 +495,8 @@ def _render_team_box(row, side, box, season, dark_mode, key_prefix):
         unsafe_allow_html=True,
     )
 
+    _render_team_jump_buttons(row, side, season)
+
     if squad.empty:
         st.caption("No player box score published for this team yet.")
         return
@@ -520,6 +525,98 @@ def _render_team_box(row, side, box, season, dark_mode, key_prefix):
     if not dnp.empty:
         names = ", ".join(f"<b>{_esc(n)}</b>" for n in dnp['name'].dropna())
         st.markdown(f"<div class='bs-dnp'>Did not play: {names}</div>", unsafe_allow_html=True)
+
+
+def _render_team_jump_buttons(row, side, season):
+    """
+    Outbound links from a box score's team section, so a game is a starting
+    point rather than a dead end - the box answers "what happened", these
+    answer the questions it provokes.
+
+    Three destinations, each a real question someone asks while reading a
+    box: how good is this team overall (Team Efficiency), what does the
+    team they just played do defensively (Matchup Analyzer's TEAM DEFENSE,
+    seeded with the OPPONENT - that's the side that explains this team's
+    shooting line), and how does this team's conference stack up
+    (Rankings -> Conference Standings).
+
+    Team Efficiency and the Matchup Analyzer both key on CBBD's school
+    names, so both need the bridge; a team that doesn't resolve gets a
+    disabled button rather than a jump to the wrong team. Conference
+    Standings is ESPN-native and needs no bridge at all.
+    """
+    team = row.get(side)
+    other = row.get('Home' if side == 'Away' else 'Away')
+    bridge = slate_team_bridge(pd.DataFrame([row]), season)
+    team_cbbd, other_cbbd = bridge.get(team), bridge.get(other)
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.button(
+            "Team efficiency", key=f"bs_eff_{side}", width="stretch",
+            disabled=not team_cbbd,
+            help=(f"See {team}'s adjusted efficiency ratings" if team_cbbd
+                  else f"Couldn't match {team} to a CollegeBasketballData.com team"),
+            on_click=switch_tab if team_cbbd else None,
+            args=(TAB_EFFICIENCY,) if team_cbbd else None,
+            kwargs={'te_season': season, 'te_highlight': [team_cbbd]} if team_cbbd else None,
+        )
+    with c2:
+        st.button(
+            f"Scout {_abbrev(row, 'Home' if side == 'Away' else 'Away')} defense",
+            key=f"bs_def_{side}", width="stretch",
+            disabled=not (team_cbbd and other_cbbd),
+            help=(f"Open Matchup Analyzer: {team}'s players vs {other}'s defense"
+                  if (team_cbbd and other_cbbd) else
+                  f"Couldn't match {team if not team_cbbd else other} to a CollegeBasketballData.com team"),
+            on_click=switch_tab if (team_cbbd and other_cbbd) else None,
+            args=(TAB_MATCHUP,) if (team_cbbd and other_cbbd) else None,
+            kwargs={'ma_season': season, 'ma_player_team': team_cbbd, 'ma_def_team': other_cbbd}
+            if (team_cbbd and other_cbbd) else None,
+        )
+    with c3:
+        conf = row.get(f'{side} Conf')
+        # The slate's conference names come from the schedule file's own
+        # short forms ('Big Ten', 'A-10'); Conference Standings' picker is
+        # keyed on ESPN's standings labels ('Big Ten Conference'). Resolved
+        # through the alias table this app already keeps for exactly this
+        # cross-source mismatch. Unresolvable -> disabled, rather than a
+        # jump that silently lands on some other conference.
+        conf_label = _espn_conference_label(conf, season)
+        st.button(
+            "Conference standings", key=f"bs_conf_{side}", width="stretch",
+            disabled=not conf_label,
+            help=(f"See the {conf_label} standings" if conf_label
+                  else "Couldn't match this conference to ESPN's standings list"),
+            on_click=_open_conference_standings if conf_label else None,
+            args=(season, conf_label) if conf_label else None,
+        )
+
+
+def _espn_conference_label(conf, season):
+    """The slate's short conference name -> the exact label Conference
+    Standings' picker uses, or None. `list_conferences` is the same cached
+    ESPN standings payload that tab already reads, so this is a dict build,
+    not an extra network round trip."""
+    if not conf or pd.isna(conf):
+        return None
+    try:
+        labels = [name for name, _ in list_conferences(season)]
+    except Exception:
+        return None
+    if not labels:
+        return None
+    return resolve_team_name(str(conf), labels, aliases=CONFERENCE_NAME_ALIASES)
+
+
+def _open_conference_standings(season, conf_label):
+    """Lands on Rankings -> CONFERENCE STANDINGS with the conference
+    already picked. `rk_subtab` is a raw `st.tabs` key, not a sticky
+    widget, so it's assigned directly rather than through the sticky
+    mirror - and legally, because a callback runs before any script run
+    that would instantiate those tabs."""
+    switch_tab(TAB_RANKINGS, cs_season=season, cs_conference=conf_label)
+    st.session_state['rk_subtab'] = "CONFERENCE STANDINGS"
 
 
 def _player_button(label, name, p, row, side, season, key):
@@ -576,17 +673,28 @@ def _open_box(game_id):
 
 
 def _render_box_panel(games, season, dark_mode):
-    """Renders the open box score, if any. `games` is the CURRENT page, so
-    a box stays open only while its game is on screen - closing the panel
-    implicitly when the date or filters move off it, rather than showing a
-    box for a game the visitor can no longer see."""
+    """
+    Renders the open box score, if any.
+
+    Resolves the game against the WHOLE season, not the page on screen.
+    That matters because this panel is also the destination for every
+    cross-tab box-score link in the app (a game log row in Player Search, a
+    point on a Matchup Analyzer trend) - requiring the game to survive the
+    slate's current date, filters and paging would make those links fail
+    for reasons that have nothing to do with the game they name.
+    """
     gid = st.session_state.get('gs_box_game')
     if not gid:
         return
-    match = games[games['GameId'].astype(str) == str(gid)]
-    if match.empty:
+    row = None
+    if games is not None and not games.empty:
+        match = games[games['GameId'].astype(str) == str(gid)]
+        if not match.empty:
+            row = match.iloc[0]
+    if row is None:
+        row = find_slate_game(season, gid)
+    if row is None:
         return
-    row = match.iloc[0]
 
     with st.container(key="bs_panel"):
         head, close = st.columns([9, 1])
@@ -692,6 +800,13 @@ def render():
     with st.spinner("Loading slate..."):
         games = load_slate(season, date_iso, di_only=di_only)
 
+    dark_mode = st.session_state.get('theme_mode', 'dark') != 'light'
+    # BEFORE the empty-day early return, and before any filtering: an open
+    # box score is a specific game someone asked for, often from another
+    # tab entirely, and it must not disappear because the day it belongs to
+    # is filtered down to nothing or because the picker moved.
+    _render_box_panel(games, season, dark_mode)
+
     if games.empty:
         source = slate_source(season, date_iso)
         if source is None:
@@ -748,11 +863,6 @@ def render():
         games = games.iloc[page * _CARDS_PER_PAGE:(page + 1) * _CARDS_PER_PAGE].reset_index(drop=True)
 
     bridge = slate_team_bridge(games, season)
-    dark_mode = st.session_state.get('theme_mode', 'dark') != 'light'
-
-    # Above the grid: clicking a card's "Box score" reruns and scrolls to
-    # the top, so the panel has to be where the eye lands.
-    _render_box_panel(games, season, dark_mode)
 
     # Row by row, NOT column by column. Filling column 0 with the first half
     # of the slate and column 1 with the second half makes the two halves of

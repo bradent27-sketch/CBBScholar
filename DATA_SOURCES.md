@@ -167,6 +167,37 @@ Play-by-play is published in the same namespace and covers 99.8% of D-I
 finals, if a win-probability or scoring-run chart is ever wanted. Not
 wired — it's a much larger file than either box.
 
+### Cross-tab links (no new sources)
+
+Every place this app shows a stat from a specific game now links back to
+that game's box score, and the box score links out to the analysis tabs.
+Zero new data: it's `data.transforms.game_link_rows` resolving a game log
+row against the already-cached season slate frame.
+
+| From | To |
+|---|---|
+| Player Search → game log | that game's box score |
+| Matchup Analyzer → player last-10 / elasticity / game-script charts | each charted game's box score |
+| Matchup Analyzer → positional defense trend | each opponent game's box score |
+| Live Odds → selected game | the Game Slate on that game's date |
+| Box score → player name | that player's Player Search profile |
+| Box score → team | Team Efficiency, the opponent's Matchup Analyzer defense profile, conference standings |
+
+**The one real hazard is a link to the WRONG game**, which is silent — the
+destination renders a perfectly good box score for a game nobody asked
+about. Two guards, both tested: resolution prefers the ESPN game id but
+falls back to date-plus-team whenever the log came from CBBD (whose
+`gameId` is an unrelated namespace), and a row that resolves to nothing is
+dropped rather than rendered as a dead link. Verified against a real
+40-game season log: 100% resolved, and the date fallback picked the
+identical games as the id path.
+
+**Not wired, deliberately:** a Game Slate → Live Odds link. Live Odds'
+game picker is keyed on a label string built from Odds API team names plus
+a formatted tip time, which is a third team-name namespace and a format
+that changes if either side's rendering does. The reverse direction (odds
+→ slate date) needs no name matching at all, so only that one exists.
+
 ## Correction: recruiting rankings gap (resolved)
 
 This doc originally claimed there was no clean free composite recruiting

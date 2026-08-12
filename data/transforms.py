@@ -1076,3 +1076,143 @@ def game_script_sensitivity(player_games, team_games, stat_col='Points', close_m
         'stat': stat_col, 'season_mean': round(season_mean, 1), 'n_games': int(len(work)),
         'close_margin': close_margin, 'blowout_margin': blowout_margin, 'tiers': tiers,
     }
+
+
+# ---------------------------------------------------------------------------
+# Cross-tab game links - resolving a per-game stat row back to the real game
+# it came from, so anywhere this app shows "20 points on Feb 7" can open that
+# game's full box score in the Game Slate.
+#
+# Pure compute over an already-loaded slate frame (data.loaders._season_slate)
+# and an already-loaded game log, so it's directly unit-testable without
+# touching a cache or the network.
+# ---------------------------------------------------------------------------
+
+def _slate_team_pool(slate_df):
+    return sorted(set(slate_df['Away'].dropna()) | set(slate_df['Home'].dropna()))
+
+
+def game_link_rows(log_df, slate_df, team=None, id_col='GameId', date_col='Date', limit=None):
+    """
+    [{'game_id', 'date', 'label', 'help', 'won', 'opponent'}] - one entry per
+    row of `log_df` that resolves to a real game in `slate_df`, in the log's
+    own order (so a chronological log yields chronological links).
+
+    TWO resolution paths, because this app's per-game data comes from two
+    sources with DIFFERENT game-id namespaces:
+
+      1. By id, when `log_df[id_col]` holds ESPN game ids - the case for
+         everything sourced from the published box file (Player Search's
+         game log, the Matchup Analyzer's ESPN path). Compared as strings
+         on both sides; the published files type the id as int32 while the
+         slate frame stringifies it, so an untyped comparison matches
+         nothing at all.
+      2. By date + team, as the fallback - the case for CBBD-sourced logs,
+         whose `gameId` is CBBD's own id and has NOTHING to do with ESPN's.
+         Silently mis-linking those would be far worse than not linking
+         them, hence a real second path rather than a hopeful id match.
+
+    `team` may be spelled in either source's convention; it's resolved
+    against the slate's own team pool first (data.utils.resolve_team_name),
+    which is what lets a CBBD-spelled 'Connecticut' find ESPN's 'UConn'.
+
+    Rows that resolve to nothing are DROPPED, not emitted with a null id -
+    a dead link that navigates nowhere is worse than no link. `limit` keeps
+    the most RECENT n entries (the tail), matching how the trend charts
+    these annotate already window their data.
+    """
+    if log_df is None or log_df.empty or slate_df is None or slate_df.empty:
+        return []
+
+    resolved_team = resolve_team_name(team, _slate_team_pool(slate_df)) if team else None
+
+    by_id = {}
+    if id_col in log_df.columns and 'GameId' in slate_df.columns:
+        by_id = {str(g): i for i, g in enumerate(slate_df['GameId'])}
+
+    by_date = {}
+    if resolved_team:
+        mask = (slate_df['Away'] == resolved_team) | (slate_df['Home'] == resolved_team)
+        for i, d in zip(slate_df.index[mask], slate_df.loc[mask, 'Date']):
+            by_date.setdefault(str(d), slate_df.index.get_loc(i))
+
+    out = []
+    seen = set()
+    for _, row in log_df.iterrows():
+        pos = None
+        raw_id = row.get(id_col)
+        if by_id and raw_id is not None and pd.notna(raw_id):
+            pos = by_id.get(str(raw_id))
+        if pos is None and by_date:
+            date_key = str(row.get(date_col) or '')[:10]
+            pos = by_date.get(date_key)
+        if pos is None:
+            continue
+        game = slate_df.iloc[pos]
+        gid = str(game['GameId'])
+        if gid in seen:
+            continue
+        seen.add(gid)
+        out.append(_link_entry(game, resolved_team))
+    return out[-limit:] if limit else out
+
+
+def game_link_rows_for_dates(dates, slate_df, team):
+    """
+    Same output as game_link_rows, for a series that only knows DATES - the
+    Matchup Analyzer's positional-defense trend aggregates opponents by
+    game date, so a date is genuinely all it has. Requires `team` (a date
+    alone identifies ~150 games in college basketball, not one).
+    """
+    if not dates or slate_df is None or slate_df.empty or not team:
+        return []
+    resolved = resolve_team_name(team, _slate_team_pool(slate_df))
+    if not resolved:
+        return []
+    mask = (slate_df['Away'] == resolved) | (slate_df['Home'] == resolved)
+    scoped = slate_df[mask]
+    by_date = {str(d): i for i, d in enumerate(scoped['Date'])}
+    out = []
+    for d in dates:
+        pos = by_date.get(str(d)[:10])
+        if pos is not None:
+            out.append(_link_entry(scoped.iloc[pos], resolved))
+    return out
+
+
+def _link_entry(game, team=None):
+    """One button's worth of data for a resolved game. The label is built
+    to stay legible at chip size: M/D plus the OPPONENT's abbreviation,
+    with @/vs marking the side, and the full matchup left to the tooltip."""
+    away, home = game.get('Away'), game.get('Home')
+    is_away = (team == away) if team else True
+    opponent = home if is_away else away
+    opp_abbr = game.get('Home Abbr') if is_away else game.get('Away Abbr')
+    if not opp_abbr or pd.isna(opp_abbr):
+        opp_abbr = str(opponent or '?')[:4].upper()
+
+    date_txt = ''
+    raw_date = str(game.get('Date') or '')
+    if len(raw_date) >= 10:
+        date_txt = f"{int(raw_date[5:7])}/{int(raw_date[8:10])}"
+
+    # '@TCU' reads fine closed up; 'vsOAK' does not, so 'vs' keeps a space.
+    prefix = '@' if (team and is_away and not game.get('Neutral Site')) else (
+        'vs ' if team else '')
+    won = None
+    winner = game.get('Winner')
+    if team and winner is not None and pd.notna(winner):
+        won = (winner == team)
+
+    away_pts, home_pts = game.get('Away Pts'), game.get('Home Pts')
+    score_txt = ''
+    if pd.notna(away_pts) and pd.notna(home_pts):
+        score_txt = f" ({int(away_pts)}-{int(home_pts)})"
+    return {
+        'game_id': str(game.get('GameId')),
+        'date': str(game.get('Date') or ''),
+        'opponent': opponent,
+        'won': won,
+        'label': f"{date_txt} {prefix}{opp_abbr}".strip(),
+        'help': f"Box score — {away} @ {home}{score_txt}, {game.get('Date Display') or ''}",
+    }

@@ -9,8 +9,10 @@ import pandas as pd
 import streamlit as st
 
 from config import ODDS_API_PLAYER_PROP_MARKETS
-from data.loaders import fetch_ncaab_odds, fetch_ncaab_player_props
-from ui.components import render_coming_soon, sticky_selectbox, sticky_multiselect
+from data.loaders import (
+    fetch_ncaab_odds, fetch_ncaab_player_props, slate_date_for_timestamp, current_cbb_season,
+)
+from ui.components import render_coming_soon, sticky_selectbox, sticky_multiselect, open_slate_date
 from ui.charts import render_prop_line_shop
 from ui.styling import df_auto_height, render_responsive_table
 
@@ -124,6 +126,20 @@ def render():
 
     st.markdown(f"<div class='custom-section-header'>{game.get('away_team')} @ {game.get('home_team')}</div>", unsafe_allow_html=True)
     st.caption(f"Tip-off: {_fmt_tipoff(game.get('commence_time',''))}")
+
+    # Outbound link to the Game Slate for this game's DATE. Deliberately
+    # the date and not the game itself: an upcoming game on the odds board
+    # has no box score to open, and matching an Odds API team name to a
+    # slate row would be a third team-name namespace to reconcile for very
+    # little gain. "What else is on that night, and who are these two
+    # teams" is the question the slate actually answers here.
+    slate_date = slate_date_for_timestamp(game.get('commence_time'))
+    if slate_date:
+        st.button(
+            "📅 See this date on the Game Slate", key="odds_to_slate",
+            help="Opens the Game Slate on this game's date, with both teams' cards.",
+            on_click=open_slate_date, args=(current_cbb_season(), slate_date),
+        )
 
     lines_df = _build_lines_table(game)
     if not lines_df.empty:

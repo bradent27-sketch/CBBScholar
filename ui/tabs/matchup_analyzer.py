@@ -55,17 +55,18 @@ from data.loaders import (
     get_player_season_profile, load_player_game_logs, load_conference_player_season_stats,
     load_all_player_season_stats, load_teams, load_espn_teams, load_espn_di_player_stats,
     load_espn_season_player_box_native, load_efficiency_ratings, load_team_games,
+    season_slate,
 )
 from data.transforms import (
     position_bucket, positional_defense_summary, positional_defense_trend,
     player_percentile_rows, player_trend_series, team_defense_profile_rows,
     espn_player_season_stats_for_teams, last_n_form_deltas,
     positional_vulnerability_ranking, defensive_tendency_rows,
-    stat_elasticity, game_script_sensitivity,
+    stat_elasticity, game_script_sensitivity, game_link_rows, game_link_rows_for_dates,
 )
 from data.utils import match_player_name, resolve_team_name
 from ui.components import (
-    render_coming_soon, sticky_selectbox, sticky_slider, sticky_checkbox,
+    render_coming_soon, sticky_selectbox, sticky_slider, sticky_checkbox, render_game_links,
 )
 from ui.charts import render_trend_line, render_relative_bars, render_game_script_curve, render_stat_elasticity_curve
 from ui.styling import df_auto_height, render_responsive_table
@@ -131,13 +132,29 @@ def render():
             _render_defensive_profile(defense_team, season)
 
     # Row 2: last-10-games trend beside positional matchup defense.
+    player_links, defense_links = [], []
     col_c, col_d = st.columns(2)
     with col_c:
         if player_ctx:
-            _render_player_trend(season, player_ctx, defense_team)
+            player_links = _render_player_trend(season, player_ctx, defense_team) or []
     with col_d:
         if defense_team:
-            _render_positional_defense(defense_team, season)
+            defense_links = _render_positional_defense(defense_team, season) or []
+
+    # Full width, BELOW the columns - both panels above already sit inside
+    # one, and render_game_links opens columns of its own (Streamlit allows
+    # exactly one level of nesting). Wider is better here anyway: these are
+    # chip rows, and they get the whole page instead of half of it.
+    if player_links:
+        render_game_links(
+            player_links, season, key_prefix='ma_plr_boxlink',
+            label=f"{player_ctx['sel_row']['name']} — open a game's full box score",
+        )
+    if defense_links:
+        render_game_links(
+            defense_links, season, key_prefix='ma_def_boxlink',
+            label=f"{defense_team} — open a game's full box score",
+        )
 
 
 def _pick_player(season, teams_df):
@@ -293,6 +310,11 @@ def _render_tendency_profile(season, ctx):
 
 
 def _render_player_trend(season, ctx, defense_team=None):
+    """Charts the player's last-10 trend, and RETURNS the game-link entries
+    for the games it charted so render() can lay them out full width below
+    the two-column row. They can't be rendered here: this function already
+    runs inside one of render()'s columns, and render_game_links spends a
+    level of column nesting - Streamlit allows exactly one, and this is it."""
     team_choice, sel_row, stats, source, box_df, athlete_source_id = (
         ctx['team_choice'], ctx['sel_row'], ctx['stats'], ctx['source'], ctx['box_df'], ctx['athlete_source_id']
     )
@@ -317,7 +339,7 @@ def _render_player_trend(season, ctx, defense_team=None):
             mine = logs[logs['name'] == sel_row['name']]
     if mine.empty:
         st.info("No per-game data for this player yet this season.")
-        return
+        return []
     mine = mine.sort_values('Date').reset_index(drop=True)
     # 3P% isn't a column load_player_game_logs returns directly (it has
     # 3PM/3PA, makes and attempts, not a precomputed percentage) - derived
@@ -369,6 +391,19 @@ def _render_player_trend(season, ctx, defense_team=None):
     if defense_team:
         _render_stat_elasticity_chart(mine, defense_team, season, stat_col)
     _render_game_script_curve(mine, team_choice, season, stat_col)
+
+    # Resolve the charted games back to the box score each point came from.
+    # The ESPN branch's `mine` carries real ESPN game ids; the CBBD
+    # branch's ids are a DIFFERENT namespace entirely, so game_link_rows
+    # falls back to matching on date + team rather than mis-linking on a
+    # coincidental id collision (see its docstring).
+    # No limit: the trend charts above window to 10, but the elasticity
+    # and game-script charts below this function read the WHOLE log, so
+    # capping the strip at 10 would leave games this panel visibly
+    # references with no way to open them.
+    return game_link_rows(
+        mine, season_slate(season), team=stats.get('Team') or team_choice,
+    )
 
 
 _ELASTICITY_STAT_OPTIONS = ('Points', 'Rebounds', 'Assists')
@@ -555,6 +590,8 @@ def _render_defensive_profile(team, season):
 
 
 def _render_positional_defense(team, season):
+    """Same contract as _render_player_trend: returns game-link entries for
+    render() to lay out below the columns, because this runs inside one."""
     st.markdown(f"**{team} — positional matchup defense**")
     recent_games_cap = sticky_slider(
         "Games to include (most recent)", key="ma_pos_defense_window", default_value=20,
@@ -574,13 +611,13 @@ def _render_positional_defense(team, season):
             # session_state-timing explanation).
             st.rerun()
         st.info(f"Click above to pull it — free where possible, up to ~{recent_games_cap} CBBD calls otherwise.")
-        return
+        return []
 
     with st.spinner(f"Loading {team}'s opponent game logs..."):
         matchup_df = load_positional_matchup_data(team, season, max_recent_games=recent_games_cap)
     if matchup_df.empty:
         st.info(f"No opponent game log data available for {team} yet.")
-        return
+        return []
     # load_positional_matchup_data carries a real Position value on every
     # row when the free ESPN file was used, and sets it to None on every
     # row for the CBBD fallback (see that function's docstring) - the
@@ -596,7 +633,7 @@ def _render_positional_defense(team, season):
             f"No position-bucketed data for {team} yet — either not enough opponent games loaded, or the "
             "roster position field didn't match a recognized Guard/Forward/Center pattern (see HANDOFF.md)."
         )
-        return
+        return []
     display = summary.set_index('Bucket')
     render_responsive_table(
         f"positional_defense_{team}", display, primary_col=None,
@@ -641,3 +678,12 @@ def _render_positional_defense(team, season):
             render_trend_line(dates, values, avg=baseline, avg_label='avg', height=150, corner_stats=corner_stats)
         else:
             st.caption("Not enough games yet for a trend.")
+
+    # This series is aggregated BY GAME DATE (positional_defense_trend
+    # groups opposing players by date), so a date is genuinely all it has
+    # to identify a game with - hence the by-date resolver rather than the
+    # id-first one. A date alone matches ~150 games in college basketball,
+    # which is why it's always scoped to this team.
+    return game_link_rows_for_dates(
+        sorted(matchup_df['Date'].dropna().unique()), season_slate(season), team,
+    )
