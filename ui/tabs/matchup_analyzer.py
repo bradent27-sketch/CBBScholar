@@ -66,7 +66,8 @@ from data.transforms import (
 )
 from data.utils import match_player_name, resolve_team_name
 from ui.components import (
-    render_coming_soon, sticky_selectbox, sticky_slider, sticky_checkbox, render_game_links,
+    render_coming_soon, sticky_selectbox, sticky_slider, sticky_checkbox,
+    render_trend_with_point_links,
 )
 from ui.charts import render_trend_line, render_relative_bars, render_game_script_curve, render_stat_elasticity_curve
 from ui.styling import df_auto_height, render_responsive_table
@@ -132,29 +133,18 @@ def render():
             _render_defensive_profile(defense_team, season)
 
     # Row 2: last-10-games trend beside positional matchup defense.
-    player_links, defense_links = [], []
     col_c, col_d = st.columns(2)
     with col_c:
         if player_ctx:
-            player_links = _render_player_trend(season, player_ctx, defense_team) or []
+            _render_player_trend(season, player_ctx, defense_team)
     with col_d:
         if defense_team:
-            defense_links = _render_positional_defense(defense_team, season) or []
+            _render_positional_defense(defense_team, season)
 
-    # Full width, BELOW the columns - both panels above already sit inside
-    # one, and render_game_links opens columns of its own (Streamlit allows
-    # exactly one level of nesting). Wider is better here anyway: these are
-    # chip rows, and they get the whole page instead of half of it.
-    if player_links:
-        render_game_links(
-            player_links, season, key_prefix='ma_plr_boxlink',
-            label=f"{player_ctx['sel_row']['name']} — open a game's full box score",
-        )
-    if defense_links:
-        render_game_links(
-            defense_links, season, key_prefix='ma_def_boxlink',
-            label=f"{defense_team} — open a game's full box score",
-        )
+    # No chip strips here: the trend charts' own DATA POINTS are clickable
+    # (see render_trend_with_point_links), which is the direct gesture -
+    # clicking the dot for the game you're looking at. A strip underneath
+    # would be a second, redundant control for the same games.
 
 
 def _pick_player(season, teams_df):
@@ -310,11 +300,11 @@ def _render_tendency_profile(season, ctx):
 
 
 def _render_player_trend(season, ctx, defense_team=None):
-    """Charts the player's last-10 trend, and RETURNS the game-link entries
-    for the games it charted so render() can lay them out full width below
-    the two-column row. They can't be rendered here: this function already
-    runs inside one of render()'s columns, and render_game_links spends a
-    level of column nesting - Streamlit allows exactly one, and this is it."""
+    """Charts the player's last-10 trend for each stat, with every DATA
+    POINT clickable - a dot opens that game's full box score in the Game
+    Slate (see ui.components.render_trend_with_point_links). Clicking the
+    dot for the game you're already looking at is the direct gesture; a
+    chip strip underneath would be a second control for the same games."""
     team_choice, sel_row, stats, source, box_df, athlete_source_id = (
         ctx['team_choice'], ctx['sel_row'], ctx['stats'], ctx['source'], ctx['box_df'], ctx['athlete_source_id']
     )
@@ -352,6 +342,14 @@ def _render_player_trend(season, ctx, defense_team=None):
         makes = pd.to_numeric(mine['3PM'], errors='coerce')
         mine['3P%'] = (makes / attempts.where(attempts > 0)) * 100
 
+    # Resolved once for the whole panel and indexed BY DATE, because each
+    # stat's series drops its own NaN games (a 0-attempt game has no 3P%),
+    # so the charts below don't all plot the same set of games.
+    all_links = game_link_rows(
+        mine, season_slate(season), team=stats.get('Team') or team_choice,
+    )
+    link_by_date = {e['date']: e for e in all_links}
+
     for stat, suffix in _PLAYER_TREND_STATS:
         if stat not in mine.columns:
             continue
@@ -367,9 +365,15 @@ def _render_player_trend(season, ctx, defense_team=None):
                 (label, f"{avg_n:.1f}{suffix}", is_above)
                 for label, avg_n, is_above in last_n_form_deltas(values, avg)
             ]
-            render_trend_line(
-                dates, values, avg=avg, avg_label='season avg', y_suffix=suffix, height=150,
-                corner_stats=corner_stats,
+            # Invisible hit strips are laid over the dots inside this
+            # helper - click a point, get that game's box score.
+            render_trend_with_point_links(
+                lambda: render_trend_line(
+                    dates, values, avg=avg, avg_label='season avg', y_suffix=suffix,
+                    height=150, corner_stats=corner_stats,
+                ),
+                [link_by_date.get(str(d)) for d in dates], season,
+                key_suffix=f"plr_{stat.replace('%', 'pct')}", chart_height=150,
             )
         else:
             st.caption("Not enough games yet for a trend.")
@@ -397,13 +401,7 @@ def _render_player_trend(season, ctx, defense_team=None):
     # branch's ids are a DIFFERENT namespace entirely, so game_link_rows
     # falls back to matching on date + team rather than mis-linking on a
     # coincidental id collision (see its docstring).
-    # No limit: the trend charts above window to 10, but the elasticity
-    # and game-script charts below this function read the WHOLE log, so
-    # capping the strip at 10 would leave games this panel visibly
-    # references with no way to open them.
-    return game_link_rows(
-        mine, season_slate(season), team=stats.get('Team') or team_choice,
-    )
+
 
 
 _ELASTICITY_STAT_OPTIONS = ('Points', 'Rebounds', 'Assists')
@@ -590,8 +588,6 @@ def _render_defensive_profile(team, season):
 
 
 def _render_positional_defense(team, season):
-    """Same contract as _render_player_trend: returns game-link entries for
-    render() to lay out below the columns, because this runs inside one."""
     st.markdown(f"**{team} — positional matchup defense**")
     recent_games_cap = sticky_slider(
         "Games to include (most recent)", key="ma_pos_defense_window", default_value=20,
@@ -657,6 +653,11 @@ def _render_positional_defense(team, season):
     selected_bucket = sticky_selectbox(
         "Position group", bucket_options, key=f"ma_pos_defense_bucket_{team}_{season}_{recent_games_cap}",
     )
+    defense_links = game_link_rows_for_dates(
+        sorted(matchup_df['Date'].dropna().unique()), season_slate(season), team,
+    )
+    defense_link_by_date = {e['date']: e for e in defense_links}
+
     for stat in ('Points', 'Rebounds', 'Assists'):
         dates, values = positional_defense_trend(matchup_df, pos_map, selected_bucket, stat)
         st.markdown(f"_{selected_bucket}s — {stat.lower()} allowed, over time_")
@@ -675,7 +676,14 @@ def _render_positional_defense(team, season):
                 (label, f"{avg_n:.1f}", is_above)
                 for label, avg_n, is_above in last_n_form_deltas(values, baseline)
             ]
-            render_trend_line(dates, values, avg=baseline, avg_label='avg', height=150, corner_stats=corner_stats)
+            render_trend_with_point_links(
+                lambda: render_trend_line(
+                    dates, values, avg=baseline, avg_label='avg', height=150,
+                    corner_stats=corner_stats,
+                ),
+                [defense_link_by_date.get(str(d)) for d in dates], season,
+                key_suffix=f"def_{stat}", chart_height=150,
+            )
         else:
             st.caption("Not enough games yet for a trend.")
 
@@ -684,6 +692,3 @@ def _render_positional_defense(team, season):
     # to identify a game with - hence the by-date resolver rather than the
     # id-first one. A date alone matches ~150 games in college basketball,
     # which is why it's always scoped to this team.
-    return game_link_rows_for_dates(
-        sorted(matchup_df['Date'].dropna().unique()), season_slate(season), team,
-    )

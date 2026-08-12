@@ -196,7 +196,7 @@ def seed_sticky_value(key, value):
     st.session_state.pop(key, None)
 
 
-def switch_tab(tab_label, **sticky_state):
+def switch_tab(tab_label, _record=True, **sticky_state):
     """
     Switches the app's active top-level tab AND pre-seeds the destination's
     own widgets, so the target opens already pointed at whatever the caller
@@ -222,9 +222,120 @@ def switch_tab(tab_label, **sticky_state):
     widget key across a tab boundary turns an unresolvable team name into
     a traceback instead of a harmless fallback.
     """
+    if _record:
+        # Both the mirror AND the raw widget key, since seed_sticky_value
+        # writes one and pops the other - Back has to undo both.
+        touched = [k for key in sticky_state for k in (key, _sticky_mirror_key(key))]
+        push_nav_history(touched)
     st.session_state['active_tab'] = tab_label
     for key, value in sticky_state.items():
         seed_sticky_value(key, value)
+
+
+# ---------------------------------------------------------------------------
+# Navigation history - a single "Back" control for every cross-tab jump in
+# the app, so following a link somewhere doesn't mean re-navigating by hand
+# to get back to what you were reading.
+#
+# A history ENTRY is not just a tab name: a jump also seeds the destination's
+# pickers and can clear the origin's filters, so going back has to restore
+# the exact values it overwrote. Each navigation therefore snapshots the
+# keys it is ABOUT to touch, and Back replays that snapshot - restoring a
+# key that was absent by deleting it, not by writing a None that would then
+# look like a real remembered value to the sticky wrappers.
+# ---------------------------------------------------------------------------
+
+_NAV_STACK_KEY = '_nav_stack'
+_NAV_MARKER_KEY = '_nav_marker'
+_NAV_LAST_TAB_KEY = '_nav_last_tab'
+_NAV_MAX_DEPTH = 20
+
+
+class _Absent:
+    """Marks a key that did not exist when the snapshot was taken, so Back
+    can delete it again rather than resurrect it as None."""
+
+
+_ABSENT = _Absent()
+
+
+def _snapshot(keys):
+    return {k: (st.session_state[k] if k in st.session_state else _ABSENT) for k in keys}
+
+
+def push_nav_history(keys):
+    """Record where we are, and the prior value of every key the pending
+    navigation will overwrite. Called by the navigation helpers themselves,
+    never by a tab."""
+    entry = {
+        'tab': st.session_state.get('active_tab'),
+        'state': _snapshot(list(keys) + ['active_tab']),
+    }
+    stack = st.session_state.get(_NAV_STACK_KEY) or []
+    stack.append(entry)
+    st.session_state[_NAV_STACK_KEY] = stack[-_NAV_MAX_DEPTH:]
+    st.session_state[_NAV_MARKER_KEY] = True
+
+
+def go_back():
+    """Callback: undo the most recent in-app jump. Same on_click rule as
+    switch_tab - it reassigns `active_tab`."""
+    stack = st.session_state.get(_NAV_STACK_KEY) or []
+    if not stack:
+        return
+    entry = stack.pop()
+    st.session_state[_NAV_STACK_KEY] = stack
+    for key, value in entry['state'].items():
+        if isinstance(value, _Absent):
+            st.session_state.pop(key, None)
+        else:
+            st.session_state[key] = value
+    st.session_state[_NAV_MARKER_KEY] = True
+
+
+def sync_nav_history():
+    """
+    Drops the history when the visitor changes tabs BY HAND.
+
+    Without this, Back lingers after manual navigation and sends someone
+    somewhere they have no memory of asking for. A jump sets a marker in
+    its callback (which runs before the script), so a tab change with no
+    marker is a manual one. MUST be called before `st.tabs()` renders, for
+    the same reason switch_tab must be a callback.
+    """
+    current = st.session_state.get('active_tab')
+    if st.session_state.pop(_NAV_MARKER_KEY, False):
+        st.session_state[_NAV_LAST_TAB_KEY] = current
+        return
+    if st.session_state.get(_NAV_LAST_TAB_KEY) not in (None, current):
+        st.session_state[_NAV_STACK_KEY] = []
+    st.session_state[_NAV_LAST_TAB_KEY] = current
+
+
+def render_back_button():
+    """The one Back control, rendered above the tab bar so it sits in the
+    same place no matter which jump got you here - a browser back button,
+    not a per-tab one."""
+    stack = st.session_state.get(_NAV_STACK_KEY) or []
+    if not stack:
+        return
+    previous = stack[-1].get('tab') or 'where you were'
+    st.button(
+        f"\u2190 Back to {previous.title()}",
+        key='nav_back',
+        help="Return to whatever you followed the last link from.",
+        on_click=go_back,
+    )
+
+
+_SLATE_NAV_KEYS = [
+    'gs_box_game',
+    'gs_season', '_sticky__gs_season',
+    'gs_date', '_sticky__gs_date',
+    'gs_conferences', '_sticky__gs_conferences',
+    'gs_ranked_only', '_sticky__gs_ranked_only',
+    'gs_page', '_sticky__gs_page',
+]
 
 
 def open_box_score(season, game_id, date_iso=None):
@@ -249,13 +360,14 @@ def open_box_score(season, game_id, date_iso=None):
     directly rather than through the sticky mirror.
     """
     from config import TAB_SLATE
+    push_nav_history(_SLATE_NAV_KEYS)
     extra = {'gs_season': season}
     if date_iso:
         try:
             extra['gs_date'] = datetime.date.fromisoformat(str(date_iso)[:10])
         except (TypeError, ValueError):
             pass
-    switch_tab(TAB_SLATE, **extra)
+    switch_tab(TAB_SLATE, _record=False, **extra)
     st.session_state['gs_box_game'] = str(game_id)
     for key, cleared in (('gs_conferences', []), ('gs_ranked_only', False)):
         seed_sticky_value(key, cleared)
@@ -275,17 +387,95 @@ def open_slate_date(season, date_iso):
     would show an empty slate for no reason the visitor can see.
     """
     from config import TAB_SLATE
+    push_nav_history(_SLATE_NAV_KEYS)
     extra = {'gs_season': season}
     try:
         extra['gs_date'] = datetime.date.fromisoformat(str(date_iso)[:10])
     except (TypeError, ValueError):
         pass
-    switch_tab(TAB_SLATE, **extra)
+    switch_tab(TAB_SLATE, _record=False, **extra)
     st.session_state.pop('gs_box_game', None)
     for key, cleared in (('gs_conferences', []), ('gs_ranked_only', False)):
         seed_sticky_value(key, cleared)
     st.session_state.pop('_sticky__gs_page', None)
     st.session_state.pop('gs_page', None)
+
+
+_CHART_VIEWBOX_W = 860
+
+
+def render_trend_with_point_links(render_chart, entries, season, key_suffix, chart_height):
+    """
+    Renders a trend chart with its DATA POINTS clickable - click a dot, open
+    that game's box score.
+
+    `render_chart` is a zero-arg callable that draws the chart; `entries` is
+    one item per plotted point in the chart's own order, each a game-link
+    dict (see data.transforms.game_link_rows) or None for a point with no
+    resolvable game.
+
+    HOW: the chart and a row of transparent `st.button`s go into one
+    relatively-positioned container; the button row is absolutely positioned
+    over the chart, so each button is an invisible hit strip sitting on its
+    own data point and a click fires a real Python callback.
+
+    WHY NOT an <a> inside the SVG, which is the obvious approach: it works,
+    but a query-string link is a real page navigation, and that starts a NEW
+    Streamlit session - every picker, every sticky mirror and the back stack
+    wiped. Confirmed in a browser rather than reasoned about: a session
+    token printed before and after the click came back different.
+
+    WHY NOT a Vega/Altair chart with on_select: native point selection, but
+    only by replacing this app's hand-built SVG charts (reference line,
+    per-point coloring, corner badges) with a different rendering stack.
+    This leaves the chart untouched.
+
+    WHY one wrapper rather than pulling the row up with a negative margin:
+    the margin has to cancel Streamlit's own inter-element gap as well as
+    the chart's height, and that gap is not a number this code can know -
+    measured at 39px in a real browser, not the 16 you'd guess. Absolute
+    positioning inside a shared parent has nothing to cancel.
+
+    THE ALIGNMENT IS EXACT, not eyeballed: render_trend_line places point i
+    at i/(n-1) of the plot width, and column i spans [i/n, (i+1)/n]. The
+    point falls inside its own column for every i and every n, since
+    i/(n-1) <= (i+1)/n reduces to i <= n-1. Column gaps are zeroed in CSS so
+    the bands stay flush.
+
+    The chart is `width:100%; height:auto` over a fixed viewBox, so its
+    rendered height is width * H/860 - unknown in Python. The overlay's
+    height therefore comes from `padding-bottom` as a PERCENTAGE, which CSS
+    resolves against the container's width, emitted as a one-line <style>
+    scoped to this row's key class (the technique the Game Slate's cards
+    already use to get per-instance values onto a Streamlit-owned element).
+    """
+    usable = [e for e in entries if e]
+    with st.container(key=f"cpl_wrap_{key_suffix}"):
+        render_chart()
+        if not usable:
+            return
+        row_key = f"cpl_row_{key_suffix}"
+        st.markdown(
+            f"<style>.st-key-{row_key}{{padding-bottom:{chart_height / _CHART_VIEWBOX_W * 100:.4f}%;}}</style>",
+            unsafe_allow_html=True,
+        )
+        with st.container(key=row_key):
+            cols = st.columns(len(entries))
+            for col, entry in zip(cols, entries):
+                with col:
+                    if not entry:
+                        # An unresolvable point still needs its column, or
+                        # every point after it shifts onto the wrong dot.
+                        st.markdown("<div class='cpl-gap'></div>", unsafe_allow_html=True)
+                        continue
+                    st.button(
+                        "\u200b",  # zero-width space: a real button, no glyph
+                        key=f"cpl_{key_suffix}_{entry['game_id']}",
+                        width="stretch",
+                        help=entry.get('help'),
+                        on_click=open_box_score,
+                        args=(season, entry['game_id'], entry.get('date')),
+                    )
 
 
 _GAME_LINKS_PER_ROW = 8

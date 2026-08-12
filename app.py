@@ -9,7 +9,9 @@ import streamlit as st
 
 from config import TAB_LABELS
 from ui.styling import inject_theme
-from ui.components import render_setup_status_sidebar, render_header
+from ui.components import (
+    render_setup_status_sidebar, render_header, render_back_button, sync_nav_history,
+)
 from ui.tabs import (
     game_slate, player_search, team_efficiency, rankings, transfer_portal, matchup_analyzer, live_odds, compare,
 )
@@ -35,6 +37,14 @@ inject_theme()
 
 render_setup_status_sidebar()
 render_header()
+
+# Both of these MUST run before st.tabs() below. sync_nav_history decides
+# whether the back stack is still meaningful by comparing the active tab to
+# the last one a jump set, and render_back_button's callback reassigns
+# `active_tab` - which Streamlit forbids during the same script run that
+# already read it to render the tabs (see ui.components.switch_tab).
+sync_nav_history()
+render_back_button()
 
 # key= + on_change="rerun" (Streamlit >=1.59) makes each tab's .open property
 # real (True only for the active tab), so only the visible tab's render()

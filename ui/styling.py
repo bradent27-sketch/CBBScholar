@@ -160,6 +160,10 @@ def inject_theme():
     _card_shadow = 'rgba(23, 20, 38, 0.16)' if is_light else 'rgba(0, 0, 0, 0.45)'
     _logo_shadow = 'rgba(23, 20, 38, 0.25)' if is_light else 'rgba(0, 0, 0, 0.55)'
     _won_tint = 'rgba(109, 40, 217, 0.10)' if is_light else 'rgba(192, 132, 252, 0.10)'
+    # Hover wash for the invisible hit strips laid over a trend chart's data
+    # points (ui.components.render_chart_point_links) - has to be faint
+    # enough that the chart underneath still reads through it.
+    _chart_hit_tint = 'rgba(109, 40, 217, 0.10)' if is_light else 'rgba(192, 132, 252, 0.12)'
     # Streamlit's own unchecked-checkbox box has no stable testid of its
     # own to target (confirmed live: it's an unnamed emotion-hashed div,
     # a sibling of the real <input>, not a descendant of any [role] or
@@ -842,6 +846,73 @@ def inject_theme():
             .bs-head .bs-pts {{ font-size: 24px; }}
             .bs-head .bs-name {{ font-size: 13px; }}
         }}
+
+        /* ===================================================================
+           Clickable trend-chart points (ui.components.render_chart_point_links).
+           An invisible row of hit strips laid over a chart's data points, so
+           clicking a dot opens that game's box score. The negative pull-up
+           margin and the row's aspect-ratio are emitted per instance (they
+           depend on the chart's height); everything shape-independent lives
+           here.
+           =================================================================== */
+        div[class*="st-key-cpl_wrap_"] {{ position: relative; }}
+        /* Height comes from padding-bottom as a PERCENTAGE OF WIDTH (emitted
+           per instance), which is the only way to match a `height:auto` SVG
+           whose rendered height this code can't know. */
+        div[class*="st-key-cpl_row_"] {{
+            position: absolute;
+            top: 0; left: 0; right: 0;
+            height: 0;
+            z-index: 2;
+            pointer-events: none;   /* only the strips themselves are clickable */
+        }}
+        /* The keyed container IS the vertical block (not a parent of one),
+           and Streamlit puts a layout wrapper between it and the column row -
+           confirmed by walking the real DOM, since an assumed structure here
+           silently collapses the strips to button height. `inset: 0` rather
+           than `height: 100%`: the parent's height comes entirely from
+           padding, and a percentage height resolves against CONTENT height
+           (zero), while an absolutely positioned child resolves against the
+           PADDING box. Targets any direct child so a future Streamlit
+           version renaming that wrapper doesn't break it. */
+        div[class*="st-key-cpl_row_"] > div {{
+            position: absolute; inset: 0; gap: 0 !important;
+        }}
+        div[class*="st-key-cpl_row_"] div[data-testid="stHorizontalBlock"] {{
+            gap: 0 !important;      /* keeps each strip flush over its own point */
+            height: 100%;
+        }}
+        div[class*="st-key-cpl_row_"] div[data-testid="stColumn"] {{ height: 100%; }}
+        div[class*="st-key-cpl_row_"] div[data-testid="stElementContainer"] {{ height: 100%; }}
+        /* Every level between .stButton and the <button> has to stretch,
+           including an UNNAMED wrapper div and the two tooltip spans
+           Streamlit inserts for a button carrying help= (the same wrappers
+           that break `.stButton > button` selectors elsewhere in this
+           file). Any one of them left at its natural height collapses the
+           strip back to button height - found by walking the real DOM, not
+           by reading markup. Hence the subtree selector rather than a list
+           of testids that a Streamlit upgrade could rename. */
+        div[class*="st-key-cpl_row_"] .stButton,
+        div[class*="st-key-cpl_row_"] .stButton * {{
+            height: 100% !important;
+            min-height: 0 !important;
+        }}
+        div[class*="st-key-cpl_row_"] .stButton button {{
+            pointer-events: auto;
+            background: transparent !important;
+            border: none !important;
+            box-shadow: none !important;
+            border-radius: {R['sm']} !important;
+            padding: 0 !important;
+            cursor: pointer;
+        }}
+        /* Quiet until hovered - a chart shouldn't look like a row of
+           buttons, but a dot has to advertise that it's clickable. */
+        div[class*="st-key-cpl_row_"] .stButton button:hover {{
+            background: {_chart_hit_tint} !important;
+            box-shadow: inset 0 0 0 1px {C['primary']} !important;
+        }}
+        div[class*="st-key-cpl_row_"] .cpl-gap {{ height: 100%; }}
 
         /* ===================================================================
            Cross-tab game links (ui.components.render_game_links) - the chip

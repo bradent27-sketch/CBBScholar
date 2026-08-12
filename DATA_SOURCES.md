@@ -176,12 +176,33 @@ row against the already-cached season slate frame.
 
 | From | To |
 |---|---|
-| Player Search → game log | that game's box score |
-| Matchup Analyzer → player last-10 / elasticity / game-script charts | each charted game's box score |
-| Matchup Analyzer → positional defense trend | each opponent game's box score |
+| Player Search → game log (chip strip under the table) | that game's box score |
+| Matchup Analyzer → **the dots on every trend chart** | that game's box score |
 | Live Odds → selected game | the Game Slate on that game's date |
 | Box score → player name | that player's Player Search profile |
 | Box score → team | Team Efficiency, the opponent's Matchup Analyzer defense profile, conference standings |
+
+Plus a single **← Back** control above the tab bar, which restores the tab
+*and* every picker value the jump overwrote. It drops itself when you
+change tabs by hand, since a Back that survives manual navigation sends
+you somewhere you never asked to go.
+
+**Trend-chart dots are clickable via an invisible overlay**, not via links
+in the SVG. The obvious approach — an `<a href="?game=…">` around each
+`<circle>` — does work, but a query-string link is a real page navigation
+and that starts a **new Streamlit session**: every picker, every sticky
+mirror and the back stack are wiped. Confirmed in a browser rather than
+reasoned about (a session token printed before and after the click came
+back different). Instead a row of transparent `st.button`s is absolutely
+positioned over the chart, one per data point, so a click fires a real
+Python callback and the session survives.
+
+The alignment is arithmetic, not eyeballing: `render_trend_line` puts
+point *i* at `i/(n-1)` of the plot width and column *i* spans
+`[i/n, (i+1)/n]`, and `i/(n-1) ≤ (i+1)/n` reduces to `i ≤ n-1`, so every
+point falls inside its own column for every *n*. Verified in a real
+browser at 10/10 dots, with clicks at each dot's exact coordinates firing
+that dot's game.
 
 **The one real hazard is a link to the WRONG game**, which is silent — the
 destination renders a perfectly good box score for a game nobody asked

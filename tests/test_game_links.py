@@ -196,6 +196,168 @@ class NavigationCallbackTests(unittest.TestCase):
         self.assertEqual(str(state['_sticky__gs_date']), '2026-02-07')
 
 
+class NavHistoryTests(unittest.TestCase):
+    """Back has to restore the exact state a jump overwrote, not just the
+    tab. A jump seeds the destination's pickers and clears the origin's
+    filters; returning to a tab whose controls have silently moved is worse
+    than not offering Back at all."""
+
+    def _state(self, initial=None):
+        state = _FakeState(initial or {})
+        components.st = type('S', (), {'session_state': state})()
+        return state
+
+    def setUp(self):
+        self._original_st = components.st
+
+    def tearDown(self):
+        components.st = self._original_st
+
+    def test_back_restores_the_tab_and_the_overwritten_values(self):
+        state = self._state({
+            'active_tab': 'PLAYER SEARCH',
+            '_sticky__ma_player_team': 'Duke',
+        })
+        components.switch_tab('MATCHUP ANALYZER', ma_player_team='Kansas')
+        self.assertEqual(state['active_tab'], 'MATCHUP ANALYZER')
+        self.assertEqual(state['_sticky__ma_player_team'], 'Kansas')
+
+        components.go_back()
+        self.assertEqual(state['active_tab'], 'PLAYER SEARCH')
+        self.assertEqual(state['_sticky__ma_player_team'], 'Duke')
+
+    def test_a_key_that_did_not_exist_is_deleted_again_not_set_to_none(self):
+        """A None left behind would read as a real remembered value to the
+        sticky wrappers, which check membership rather than nullness."""
+        state = self._state({'active_tab': 'PLAYER SEARCH'})
+        components.switch_tab('MATCHUP ANALYZER', ma_def_team='Kansas')
+        self.assertIn('_sticky__ma_def_team', state)
+        components.go_back()
+        self.assertNotIn('_sticky__ma_def_team', state)
+
+    def test_back_through_a_box_score_jump_clears_the_open_box(self):
+        state = self._state({'active_tab': 'PLAYER SEARCH'})
+        components.open_box_score(2026, '401856600', '2026-04-06')
+        self.assertEqual(state['gs_box_game'], '401856600')
+        components.go_back()
+        self.assertEqual(state['active_tab'], 'PLAYER SEARCH')
+        self.assertNotIn('gs_box_game', state)
+
+    def test_a_box_jump_records_exactly_one_entry_not_two(self):
+        """open_box_score delegates to switch_tab; only one of them may
+        push, or a single click would need two Backs to undo."""
+        state = self._state({'active_tab': 'PLAYER SEARCH'})
+        components.open_box_score(2026, '1', '2026-04-06')
+        self.assertEqual(len(state['_nav_stack']), 1)
+
+    def test_history_nests(self):
+        state = self._state({'active_tab': 'MATCHUP ANALYZER'})
+        components.open_box_score(2026, '1', '2026-04-06')
+        components.switch_tab('PLAYER SEARCH', ps_team='Michigan')
+        self.assertEqual(len(state['_nav_stack']), 2)
+        components.go_back()
+        self.assertEqual(state['active_tab'], 'GAME SLATE')
+        components.go_back()
+        self.assertEqual(state['active_tab'], 'MATCHUP ANALYZER')
+        self.assertEqual(state['_nav_stack'], [])
+
+    def test_back_on_an_empty_stack_is_a_no_op(self):
+        state = self._state({'active_tab': 'PLAYER SEARCH'})
+        components.go_back()
+        self.assertEqual(state['active_tab'], 'PLAYER SEARCH')
+
+    def test_history_is_depth_capped(self):
+        state = self._state({'active_tab': 'PLAYER SEARCH'})
+        for i in range(components._NAV_MAX_DEPTH + 5):
+            components.switch_tab('MATCHUP ANALYZER', ma_season=i)
+        self.assertEqual(len(state['_nav_stack']), components._NAV_MAX_DEPTH)
+
+    def test_a_manual_tab_change_drops_the_history(self):
+        """Otherwise Back lingers after hand navigation and sends someone
+        somewhere they never asked to go."""
+        state = self._state({'active_tab': 'PLAYER SEARCH'})
+        components.switch_tab('MATCHUP ANALYZER', ma_season=2026)
+        components.sync_nav_history()             # the run right after the jump
+        self.assertEqual(len(state['_nav_stack']), 1)
+
+        state['active_tab'] = 'LIVE ODDS'         # user clicks a tab by hand
+        components.sync_nav_history()
+        self.assertEqual(state['_nav_stack'], [])
+
+    def test_a_rerun_on_the_same_tab_keeps_the_history(self):
+        state = self._state({'active_tab': 'PLAYER SEARCH'})
+        components.switch_tab('MATCHUP ANALYZER', ma_season=2026)
+        components.sync_nav_history()
+        components.sync_nav_history()             # an ordinary widget rerun
+        self.assertEqual(len(state['_nav_stack']), 1)
+
+
+class ChartPointLinkTests(unittest.TestCase):
+    """The invisible hit strips laid over a trend chart's data points."""
+
+    def _capture(self, entries):
+        calls = []
+        markdown = []
+
+        class _Ctx:
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, *a):
+                return False
+
+        st_mod = components.st
+        originals = (st_mod.container, st_mod.columns, st_mod.button, st_mod.markdown)
+        st_mod.container = lambda *a, **k: _Ctx()
+        st_mod.columns = lambda n, **k: [_Ctx() for _ in range(n)]
+        st_mod.button = lambda *a, **k: calls.append((a, k))
+        st_mod.markdown = lambda *a, **k: markdown.append(a[0] if a else '')
+        drawn = []
+        try:
+            components.render_trend_with_point_links(
+                lambda: drawn.append(True), entries, 2026, 'plr_Points', 150,
+            )
+        finally:
+            st_mod.container, st_mod.columns, st_mod.button, st_mod.markdown = originals
+        return calls, markdown, drawn
+
+    def _entry(self, i):
+        return {'game_id': f"g{i}", 'date': f"2026-01-{i + 1:02d}", 'help': f"Box {i}"}
+
+    def test_one_strip_per_resolvable_point_opening_its_own_game(self):
+        calls, _, _ = self._capture([self._entry(0), self._entry(1)])
+        self.assertEqual([k['args'] for _, k in calls], [
+            (2026, 'g0', '2026-01-01'), (2026, 'g1', '2026-01-02'),
+        ])
+        self.assertTrue(all(k['on_click'] is components.open_box_score for _, k in calls))
+
+    def test_an_unresolvable_point_still_consumes_its_column(self):
+        """Skipping the column entirely would slide every later strip onto
+        the wrong dot - the alignment depends on column index matching
+        point index exactly."""
+        calls, _, _ = self._capture([self._entry(0), None, self._entry(2)])
+        self.assertEqual(len(calls), 2)
+        self.assertEqual([k['args'][1] for _, k in calls], ['g0', 'g2'])
+
+    def test_the_chart_still_renders_when_no_point_resolves(self):
+        calls, _, drawn = self._capture([None, None])
+        self.assertEqual(calls, [])
+        self.assertEqual(drawn, [True])
+
+    def test_the_chart_is_drawn_before_the_overlay(self):
+        _, _, drawn = self._capture([self._entry(0)])
+        self.assertEqual(drawn, [True])
+
+    def test_height_is_emitted_as_a_percentage_of_the_viewbox_width(self):
+        """The chart is width:100%/height:auto over a fixed viewBox, so the
+        overlay's height can only be expressed relative to width."""
+        _, markdown, _ = self._capture([self._entry(0)])
+        style = [m for m in markdown if 'padding-bottom' in str(m)]
+        self.assertEqual(len(style), 1)
+        self.assertIn(f"{150 / 860 * 100:.4f}%", style[0])
+        self.assertIn('.st-key-cpl_row_plr_Points', style[0])
+
+
 class GameLinkButtonTests(unittest.TestCase):
     def _capture(self, entries):
         calls = []
