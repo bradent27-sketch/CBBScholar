@@ -360,13 +360,54 @@ def inject_theme():
            for every combination of the two brackets and the three text
            scales. The selector must stay in lockstep with each zoom value,
            so both live in the same rule. */
+        /* The second thing the zoom breaks, and its correction.
+
+           st.dataframe is glide-data-grid: the rows are painted into a
+           <canvas>, sized in JS from a measurement of the available space.
+           That measurement comes back in PHYSICAL pixels (already multiplied
+           by the zoom) and is then applied as a CSS width, which the zoom
+           multiplies a second time. The grid ends up exactly `zoom` times
+           too wide, hanging off the right edge of the window - and because
+           the grid believes it fits (its scroller reports scrollWidth ==
+           clientWidth), it offers NO horizontal scrollbar, so the
+           overhanging columns cannot be reached at all. Measured on a
+           1920px window at zoom 1.18: the canvas painted 289px past the
+           right edge of the window.
+
+           That is the reported "can't see the right side" on all three
+           tables named - Team Efficiency's Def Rating, NET & Resume's 1st
+           Place Votes, Conference Standings' Streak. They're the same
+           widget, and it's always the LAST column that goes missing.
+
+           Dividing the wrapper's CSS width by the zoom cancels the grid's
+           doubled multiplication: the grid then measures C (not C x zoom),
+           paints a canvas C CSS px wide, and the zoom scales that back up
+           to exactly the C x zoom of real estate it actually has. Verified
+           in a browser - the canvas lands 41px INSIDE the window with the
+           last column's values fully rendered.
+
+           Scoped with :has() so it only touches frames that really contain
+           a grid; the inline-SVG charts in ui.charts share this wrapper and
+           are already correct under zoom (plain DOM, no JS measurement), so
+           narrowing them would be a regression.
+
+           Constraining the OUTER element instead (width: 100% !important)
+           was tried first and does nothing: the canvas keeps its own px
+           width and simply spills out of the smaller box - still 289px past
+           the window. The measurement has to be corrected, not the box. */
         @media (min-width: 768px) and (max-width: 1599px) {{
             .stApp {{ zoom: {_zoom_laptop}; }}
             section[data-testid="stMain"] {{ height: calc(100dvh / {_zoom_laptop}) !important; }}
+            [data-testid="stFullScreenFrame"]:has([data-testid="stDataFrame"]) {{
+                width: calc(100% / {_zoom_laptop}) !important;
+            }}
         }}
         @media (min-width: 1600px) {{
             .stApp {{ zoom: {_zoom_desktop}; }}
             section[data-testid="stMain"] {{ height: calc(100dvh / {_zoom_desktop}) !important; }}
+            [data-testid="stFullScreenFrame"]:has([data-testid="stDataFrame"]) {{
+                width: calc(100% / {_zoom_desktop}) !important;
+            }}
         }}
 
         header[data-testid="stHeader"] {{
