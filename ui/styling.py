@@ -473,6 +473,46 @@ def inject_theme():
             flex: 0 0 auto;
         }}
 
+        /* Invisible spacers that stand in for a control the OTHER column
+           has and this one doesn't, so the Matchup Analyzer's two side-by-
+           side panels actually line up row for row.
+
+           st.columns only guarantees both sides START level. One extra
+           control on one side pushes everything below it down on that side
+           alone, and the tab's two columns each have controls the other
+           doesn't:
+             .ma-align-checkbox (32px) - the PLAYER column's "Compare
+               against all of Division I" checkbox, which has no defense-
+               side equivalent; without it the defensive profile floated a
+               checkbox-height above the tendency profile (measured: 52px).
+             .ma-align-controls (68px) - the DEFENSE column's games/position
+               control row, which the player column has nothing opposite;
+               without it every "allowed over time" chart sat 91px below the
+               player chart it pairs with, landing halfway between two of
+               them.
+
+           Both numbers are Streamlit's own element-container heights,
+           measured in a browser (31.97px and 67.97px), not guessed. The
+           16px flex gap between elements comes free - each spacer is a real
+           element in the same vertical block, so it gets the same gap the
+           control it stands in for was getting.
+
+           The height goes on the ELEMENT CONTAINER, not just the inner div.
+           Setting it on the div alone does nothing useful: the div does
+           grow, but Streamlit's stMarkdown wrapper does not grow with it
+           (measured at 16px around a 34px child), so the flex item the
+           vertical block actually lays out stays 16px and the spacer comes
+           up exactly one gap short. The container is the flex item, so
+           that's what has to be sized. Both skews measure 0 after. */
+        [data-testid="stElementContainer"]:has(> [data-testid="stMarkdown"] .ma-align-checkbox) {{
+            height: 32px;
+        }}
+        [data-testid="stElementContainer"]:has(> [data-testid="stMarkdown"] .ma-align-controls) {{
+            height: 68px;
+        }}
+        .ma-align-checkbox {{ height: 32px; }}
+        .ma-align-controls {{ height: 68px; }}
+
         div[data-testid="stTabs"] [role="tablist"] {{
             gap: 4px;
             border-bottom: 1px solid {C['outline_variant']};

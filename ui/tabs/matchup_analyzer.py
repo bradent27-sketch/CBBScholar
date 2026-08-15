@@ -350,6 +350,16 @@ def _render_player_trend(season, ctx, defense_team=None):
     )
     link_by_date = {e['date']: e for e in all_links}
 
+    # Nothing is reordered here - this is an invisible spacer standing in
+    # for the games/position control row the TEAM DEFENSE column carries
+    # above its own charts. Without it the defense charts start 91px lower
+    # than these, so each one lands halfway between two player charts
+    # instead of beside its own stat. Only when there IS a defense panel to
+    # line up against; a player looked at on their own isn't padded for a
+    # column that isn't there. See .ma-align-controls in ui.styling.
+    if defense_team:
+        st.markdown("<div class='ma-align-controls'></div>", unsafe_allow_html=True)
+
     for stat, suffix in _PLAYER_TREND_STATS:
         if stat not in mine.columns:
             continue
@@ -557,6 +567,16 @@ def _positional_vulnerability_rows(team, season):
 
 
 def _render_defensive_profile(team, season):
+    # The PLAYER column opens Row 1 with a "Compare against all of Division
+    # I" checkbox that this column has no equivalent of, so without this the
+    # defensive profile's bars sit a checkbox-height ABOVE the tendency
+    # profile's and the two panels read as unrelated - measured at 52px of
+    # skew. st.columns only guarantees both sides start level; anything
+    # extra on one side pushes only that side down. The spacer's height is
+    # Streamlit's real checkbox block height (see .ma-align-checkbox in
+    # ui.styling), which puts the two profiles' headers on the same line.
+    st.markdown("<div class='ma-align-checkbox'></div>", unsafe_allow_html=True)
+
     team_stats = load_all_team_season_stats(season)
     if team_stats.empty:
         st.info("Team defense profile needs /stats/team/season data, which isn't available right now.")
@@ -588,12 +608,43 @@ def _render_defensive_profile(team, season):
 
 
 def _render_positional_defense(team, season):
+    """
+    ORDER HERE IS THE POINT, and it mirrors the PLAYER column beside it:
+    header, then the three stat trends, then the extra analysis - so each
+    "allowed over time" chart sits level with the player's own last-10 chart
+    for the SAME stat, and the two columns read as three matched pairs
+    rather than two unrelated stacks.
+
+    Two things were in the way and both moved:
+      * the summary table used to render BEFORE the trends, pushing them
+        421px (measured) below the player charts they pair with. It now
+        renders after them - it summarizes those same three stats, so it
+        reads as a wrap-up rather than a preamble.
+      * the two controls sat on their own stacked rows. They share one row
+        now, which is the one nested-column level Streamlit allows and this
+        function has left unspent (render_trend_with_point_links needs it
+        for the hit strips, but that's a sibling, not a parent).
+
+    The stat ORDER also matches the player column's (Points, Assists,
+    Rebounds - see _PLAYER_TREND_STATS) instead of the Points/Rebounds/
+    Assists it used before. Same three charts, reordered so each one is
+    beside its own counterpart; lining them up is the whole request.
+    """
     st.markdown(f"**{team} — positional matchup defense**")
-    recent_games_cap = sticky_slider(
-        "Games to include (most recent)", key="ma_pos_defense_window", default_value=20,
-        min_value=5, max_value=30, step=5,
-        help="Lower = fewer CBBD calls (only matters on the fallback) and a more current read; higher = more complete.",
-    )
+    # ONE control row for both pickers, opened here and filled from two
+    # different points in this function: the games slider has to exist
+    # before the load gate below (its value is part of the gate's key),
+    # while the position picker's options don't exist until the data has
+    # loaded. Streamlit lets a column context be re-entered later in the
+    # script, which is what keeps them on the same line instead of costing
+    # two stacked rows above the charts.
+    ctl_games, ctl_bucket = st.columns(2)
+    with ctl_games:
+        recent_games_cap = sticky_slider(
+            "Games to include (most recent)", key="ma_pos_defense_window", default_value=20,
+            min_value=5, max_value=30, step=5,
+            help="Lower = fewer CBBD calls (only matters on the fallback) and a more current read; higher = more complete.",
+        )
     trigger_key = f"ma_pos_defense_loaded_{season}_{team}_{recent_games_cap}"
     if not st.session_state.get(trigger_key, False):
         if st.button("Load positional matchup defense", key="ma_load_pos_defense"):
@@ -621,7 +672,6 @@ def _render_positional_defense(team, season):
     # actually used, without needing a second return value threaded
     # through the whole call chain.
     used_espn = 'Position' in matchup_df.columns and matchup_df['Position'].notna().any()
-    st.caption("Source: free ESPN season file." if used_espn else "Source: CollegeBasketballData.com (CBBD API calls used).")
     pos_map = _position_map_for_matchup(matchup_df, season)
     summary = positional_defense_summary(matchup_df, pos_map)
     if summary.empty:
@@ -630,16 +680,6 @@ def _render_positional_defense(team, season):
             "roster position field didn't match a recognized Guard/Forward/Center pattern (see HANDOFF.md)."
         )
         return []
-    display = summary.set_index('Bucket')
-    render_responsive_table(
-        f"positional_defense_{team}", display, primary_col=None,
-        diverging_cols={
-            'Points Delta': _safe_max_abs(display['Points Delta']),
-            'Rebounds Delta': _safe_max_abs(display['Rebounds Delta']),
-            'Assists Delta': _safe_max_abs(display['Assists Delta']),
-        },
-        height=df_auto_height(len(display)),
-    )
 
     # Position-group picker + all three stats for whichever bucket is
     # selected, rather than every bucket's Points-only trend stacked at
@@ -650,15 +690,20 @@ def _render_positional_defense(team, season):
     # incorporates team/season/games-cap so switching teams can't leave a
     # stale bucket selection that isn't in the new options list.
     bucket_options = summary['Bucket'].tolist()
-    selected_bucket = sticky_selectbox(
-        "Position group", bucket_options, key=f"ma_pos_defense_bucket_{team}_{season}_{recent_games_cap}",
-    )
+    with ctl_bucket:
+        selected_bucket = sticky_selectbox(
+            "Position group", bucket_options, key=f"ma_pos_defense_bucket_{team}_{season}_{recent_games_cap}",
+        )
     defense_links = game_link_rows_for_dates(
         sorted(matchup_df['Date'].dropna().unique()), season_slate(season), team,
     )
     defense_link_by_date = {e['date']: e for e in defense_links}
 
-    for stat in ('Points', 'Rebounds', 'Assists'):
+    # Points, Assists, Rebounds - the PLAYER column's own order (see
+    # _PLAYER_TREND_STATS), not the Points/Rebounds/Assists this used
+    # before, so each chart lands beside the player's chart for the same
+    # stat rather than one stat off.
+    for stat in ('Points', 'Assists', 'Rebounds'):
         dates, values = positional_defense_trend(matchup_df, pos_map, selected_bucket, stat)
         st.markdown(f"_{selected_bucket}s — {stat.lower()} allowed, over time_")
         if len(values) >= 2:
@@ -686,6 +731,25 @@ def _render_positional_defense(team, season):
             )
         else:
             st.caption("Not enough games yet for a trend.")
+
+    # The wrap-up: the same three stats the charts above just walked
+    # through, as one per-position table. It used to render BEFORE them,
+    # which pushed every chart 421px (measured) below the player chart it
+    # pairs with - the reported misalignment. Reading it after the trends
+    # also matches what it is: a summary of what was just shown.
+    display = summary.set_index('Bucket')
+    render_responsive_table(
+        f"positional_defense_{team}", display, primary_col=None,
+        diverging_cols={
+            'Points Delta': _safe_max_abs(display['Points Delta']),
+            'Rebounds Delta': _safe_max_abs(display['Rebounds Delta']),
+            'Assists Delta': _safe_max_abs(display['Assists Delta']),
+        },
+        height=df_auto_height(len(display)),
+    )
+    # Sits with the table rather than above the charts, where it was one
+    # more line separating them from the player charts they line up with.
+    st.caption("Source: free ESPN season file." if used_espn else "Source: CollegeBasketballData.com (CBBD API calls used).")
 
     # This series is aggregated BY GAME DATE (positional_defense_trend
     # groups opposing players by date), so a date is genuinely all it has
