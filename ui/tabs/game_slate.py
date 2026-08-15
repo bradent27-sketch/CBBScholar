@@ -45,6 +45,7 @@ from ui.components import (
     switch_tab, set_sticky_value, sticky_date_input,
     sticky_selectbox, sticky_multiselect, sticky_checkbox,
 )
+from ui.styling import readable_on, ink_on, _card_backdrop_rgb
 
 # Two per row: wide enough for full school names plus a two-button row,
 # and it halves the scroll on a slate this size.
@@ -110,8 +111,25 @@ def _team_row_html(row, side, is_winner, show_score, dark_mode):
     elif is_winner is False:
         state_cls = ' gs-lost'
 
+    # TWO color properties, deliberately. `--gs-color` is the team's brand
+    # color exactly as published; `--gs-ink` is that same color lightened or
+    # darkened just enough to be legible on this card (see
+    # ui.styling.readable_on). Anything that has to be READ - the score, the
+    # W flag, the accent bar - uses the ink. Roughly a third of D-I's brand
+    # colors are near-black or deep navy, and printed raw on a dark card
+    # those scores sat at ~1.05:1 against their own background, which is the
+    # reported "can barely see it" bug. Correcting rather than replacing
+    # keeps Duke's score Duke blue instead of turning every winner white,
+    # which is the only reason to color a score at all.
     color = row.get(f'{side} Color')
-    style = f" style='--gs-color:{html.escape(str(color), quote=True)};'" if color else ''
+    decls = []
+    if color:
+        decls.append(f"--gs-color:{html.escape(str(color), quote=True)};")
+        ink = readable_on(color, _card_backdrop_rgb(dark_mode))
+        if ink:
+            decls.append(f"--gs-ink:{ink};")
+            decls.append(f"--gs-on-ink:{ink_on(ink)};")
+    style = f" style='{''.join(decls)}'" if decls else ''
 
     logo = _logo_for(row, side, dark_mode)
     logo_html = (

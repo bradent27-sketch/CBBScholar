@@ -7,6 +7,7 @@ effect, this version computes the same rgba string from config.THEME's
 primary color instead, so the accent is driven entirely by config.py.
 """
 import base64
+import colorsys
 import html
 import os
 import re
@@ -102,6 +103,131 @@ def _font_face_css():
             f"font-display: swap; src: url(data:font/woff2;base64,{b64}) format('woff2'); }}"
         )
     return '\n        '.join(rules)
+
+
+# ---------------------------------------------------------------------------
+# Team-color contrast correction.
+#
+# A team's brand color is the right color to print its score in - it says
+# whose 78 that is without a legend. The problem is that brand colors are
+# not chosen for legibility on THIS app's surface, and a large share of
+# college basketball's are near-black or deep navy (Duke #001a57, Butler
+# #13294b, Army black). Printed raw on a dark card those scores are close
+# to invisible, which is the reported bug.
+#
+# The fix is to keep the HUE and only move the LIGHTNESS until the color
+# clears a contrast threshold against the surface it's actually drawn on.
+# Duke navy becomes a bright Duke blue, not white - the team is still
+# identifiable, which is the whole point of coloring the score. Snapping to
+# plain white/black instead would be trivially legible and would throw away
+# the information the color carries.
+# ---------------------------------------------------------------------------
+
+def _srgb_channel(c):
+    """One 0-255 channel -> its linear-light value, per WCAG 2.x."""
+    c = c / 255.0
+    return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+
+
+def _relative_luminance(rgb):
+    r, g, b = (_srgb_channel(c) for c in rgb)
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def contrast_ratio(rgb_a, rgb_b):
+    """WCAG contrast ratio between two RGB triples, 1.0 (identical) to 21.0
+    (black on white)."""
+    la, lb = _relative_luminance(rgb_a), _relative_luminance(rgb_b)
+    hi, lo = max(la, lb), min(la, lb)
+    return (hi + 0.05) / (lo + 0.05)
+
+
+def _blend(top_rgb, bottom_rgb, alpha):
+    """`top` painted over `bottom` at `alpha` - the flat color a browser
+    actually composites for an rgba() fill, which is what contrast has to be
+    measured against. Measuring against the un-blended surface underneath
+    would misjudge every tinted panel in the app."""
+    return tuple(round(t * alpha + b * (1 - alpha)) for t, b in zip(top_rgb, bottom_rgb))
+
+
+def _card_backdrop_rgb(dark_mode):
+    """The flat color a Game Slate team row is really drawn on.
+
+    Kept in sync with _panel_tint / _won_tint / 'surface' in apply_theme_mode
+    below by construction: the same alphas and the same two literals, rather
+    than a hand-transcribed guess at the composite. The winner row also
+    carries _won_tint on top of the panel tint, so both layers are applied -
+    it's the lighter of the two states and therefore the harder contrast
+    test for a dark brand color, which is the case that actually failed.
+    """
+    if dark_mode:
+        base = _blend(_hex_to_rgb('#131b38'), _hex_to_rgb('#050921'), 0.55)
+        return _blend(_hex_to_rgb('#c084fc'), base, 0.10)
+    base = _blend(_hex_to_rgb('#eae6f5'), _hex_to_rgb('#f7f5fb'), 0.85)
+    return _blend(_hex_to_rgb('#6d28d9'), base, 0.10)
+
+
+def readable_on(color, backdrop_rgb, min_ratio=4.5):
+    """
+    `color`, lightened or darkened just enough to clear `min_ratio` against
+    `backdrop_rgb`, with its hue and saturation preserved.
+
+    Moves in the direction that ADDS contrast (lighter on a dark backdrop,
+    darker on a light one) in small steps, stopping at the first step that
+    clears the bar - so a color that already passes is returned untouched
+    and one that barely fails is barely moved. A color that can't clear the
+    bar even at the end of its range (a mid-tone yellow on a light backdrop
+    never reaches 4.5:1 without going nearly black) returns the best step
+    found rather than failing or snapping to a neutral.
+
+    Returns a '#rrggbb' string, or None if `color` isn't a usable hex - so
+    callers can fall back to their own default rather than emit a broken
+    CSS value.
+    """
+    rgb = _safe_hex_to_rgb(color)
+    if rgb is None:
+        return None
+    if contrast_ratio(rgb, backdrop_rgb) >= min_ratio:
+        return '#%02x%02x%02x' % rgb
+
+    h, l, s = colorsys.rgb_to_hls(*(c / 255.0 for c in rgb))
+    lighten = _relative_luminance(backdrop_rgb) < 0.5
+    best, best_ratio = rgb, contrast_ratio(rgb, backdrop_rgb)
+    for step in range(1, 101):
+        adj = l + (1 - l) * (step / 100.0) if lighten else l * (1 - step / 100.0)
+        candidate = tuple(round(c * 255) for c in colorsys.hls_to_rgb(h, adj, s))
+        ratio = contrast_ratio(candidate, backdrop_rgb)
+        if ratio >= min_ratio:
+            return '#%02x%02x%02x' % candidate
+        if ratio > best_ratio:
+            best, best_ratio = candidate, ratio
+    return '#%02x%02x%02x' % best
+
+
+def ink_on(color):
+    """Black or white - whichever reads better ON `color`. For text sitting
+    on a solid team-colored chip (the win flag), where the CHIP is the brand
+    color and the text just has to survive it. A fixed theme ink can't do
+    this job: it's unreadable on roughly half of D-I's brand colors, since
+    they span near-black navy to bright gold."""
+    rgb = _safe_hex_to_rgb(color)
+    if rgb is None:
+        return None
+    dark, light = _hex_to_rgb('#0b0f24'), (255, 255, 255)
+    return '#ffffff' if contrast_ratio(rgb, light) >= contrast_ratio(rgb, dark) else '#0b0f24'
+
+
+def _safe_hex_to_rgb(value):
+    """'#001a57'/'001a57' -> (0, 26, 87). None for anything that isn't a
+    real 6-digit hex - team colors arrive from a third-party feed and a
+    malformed one must never reach a CSS custom property."""
+    s = str(value or '').strip().lstrip('#')
+    if len(s) != 6:
+        return None
+    try:
+        return tuple(int(s[i:i + 2], 16) for i in (0, 2, 4))
+    except ValueError:
+        return None
 
 
 # Hover-tooltip text for column headers, keyed by exact displayed column
@@ -593,7 +719,11 @@ def inject_theme():
             gap: 8px;
             padding: 6px 8px;
             border-radius: {R['default']};
-            border-left: 3px solid var(--gs-color, {C['outline']});
+            /* --gs-ink, not --gs-color: a 3px bar in a near-black brand
+               color is as invisible on this surface as the score was. Both
+               properties are set inline per row (see _team_row_html); the
+               nested fallback covers a row whose color didn't parse. */
+            border-left: 3px solid var(--gs-ink, var(--gs-color, {C['outline']}));
             margin-bottom: 4px;
             background: {_panel_tint};
         }}
@@ -650,12 +780,19 @@ def inject_theme():
             min-width: 30px;
             text-align: right;
         }}
+        /* The W chip is a SOLID team-colored pill, so it has two contrast
+           problems, not one: the pill against the card, and the letter
+           against the pill. --gs-ink fixes the first; --gs-on-ink is black
+           or white picked per team (ui.styling.ink_on) for the second. A
+           single fixed theme ink can't work here - it's unreadable on
+           roughly half of D-I's brand colors, which run from near-black
+           navy to bright gold. */
         .gs-team .gs-win-flag {{
             flex: 0 0 auto;
             font-size: 9px;
             font-weight: 800;
-            color: {C['on_primary']};
-            background: var(--gs-color, {C['outline']});
+            color: var(--gs-on-ink, {C['on_primary']});
+            background: var(--gs-ink, var(--gs-color, {C['outline']}));
             border-radius: {R['full']};
             padding: 1px 6px;
         }}
@@ -663,7 +800,7 @@ def inject_theme():
            renderer passes None rather than False for "no winner", so a tie
            can't dim both teams (see _team_row_html). */
         .gs-team.gs-won {{ background: {_won_tint}; }}
-        .gs-team.gs-won .gs-score {{ color: var(--gs-color, {C['on_surface']}); }}
+        .gs-team.gs-won .gs-score {{ color: var(--gs-ink, var(--gs-color, {C['on_surface']})); }}
         .gs-team.gs-lost .gs-name {{ color: {C['on_surface_variant']}; opacity: 0.72; }}
         .gs-team.gs-lost .gs-score {{ color: {C['on_surface_variant']}; opacity: 0.72; }}
 
