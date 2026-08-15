@@ -332,11 +332,41 @@ def inject_theme():
             font-variant-numeric: tabular-nums;
         }}
 
+        /* The `zoom` above, and the height correction that HAS to travel
+           with it.
+
+           Streamlit's scroll container is `section[data-testid="stMain"]`,
+           and Streamlit sizes it `height: 100dvh`. Chromium adjusts `vh`
+           units for an ancestor `zoom` (which is why .stApp's own 100vh
+           correctly resolves to 100vh/zoom) but does NOT adjust the dynamic
+           viewport units - `dvh`, `svh`, `lvh`. So 100dvh resolves to the
+           raw viewport height in the zoomed subtree's local units, and the
+           zoom then scales it: on a 900px window at zoom 1.08 the scroll
+           container's box ends at 972px, i.e. 72px BELOW the bottom of the
+           window. Measured, not inferred - stMain's rect bottom read 972
+           against a window height of 900.
+
+           Those last `viewportHeight x (zoom - 1)` pixels are unreachable:
+           the container is already fully scrolled (scrollTop == scrollHeight
+           - clientHeight) while its final stripe is still rendered off-
+           screen. That is the reported "can't see the bottom row", and it
+           scales with the zoom, which is why raising .block-container's
+           padding only ever masked it - at desktop zoom the shortfall is
+           900 x 0.18 = 162px, already past the 10rem (160px) that was
+           holding it, and at zoom 1.357 (large text) it's 321px.
+
+           Dividing the height by the same factor the zoom multiplies by
+           lands the container's painted box exactly on the window bottom,
+           for every combination of the two brackets and the three text
+           scales. The selector must stay in lockstep with each zoom value,
+           so both live in the same rule. */
         @media (min-width: 768px) and (max-width: 1599px) {{
             .stApp {{ zoom: {_zoom_laptop}; }}
+            section[data-testid="stMain"] {{ height: calc(100dvh / {_zoom_laptop}) !important; }}
         }}
         @media (min-width: 1600px) {{
             .stApp {{ zoom: {_zoom_desktop}; }}
+            section[data-testid="stMain"] {{ height: calc(100dvh / {_zoom_desktop}) !important; }}
         }}
 
         header[data-testid="stHeader"] {{
@@ -348,29 +378,21 @@ def inject_theme():
 
         .block-container {{
             padding-top: 4.5rem !important;
-            /* Scroll headroom, NOT decoration - at 2rem the bottom of the
-               page was genuinely unreachable (reported: "half the bottom
-               row of Game Slate cards gets cut off", and the same in the
-               sibling apps, which share this rule).
+            /* Ordinary breathing room under the last element - no longer
+               load-bearing.
 
-               Cause: the `.stApp` zoom above. The zoom-independent chrome
-               above the scroll area grows with the zoom factor while this
-               padding is the only thing holding space at the other end, so
-               the taller the zoom, the less room is left at the bottom.
-               Measured in a real browser on a 24-card slate, headroom below
-               the last card:
-
-                   padding   zoom 1.08   1.18    1.242   1.357
-                   2rem       +100px    +26px    +8px    -45px  <- clipped
-                   6rem                          +87px   +42px
-                   10rem                        +167px  +129px
-
-               Headroom moves linearly with this value (16px x zoom per
-               rem), so it is a straightforward shortfall rather than a
-               clipping bug - 10rem clears the worst case with room for
-               engines that lose more than Chromium does. Re-measure with
-               ui/styling.py's own numbers above before lowering it. */
-            padding-bottom: 10rem !important;
+               This was 10rem, chosen to buy back the pixels the scroll
+               container was losing off the bottom of the window. That was
+               treating the symptom: the shortfall grew with the zoom
+               factor, so no fixed padding could cover every case, and the
+               largest one (zoom 1.357) still clipped by 45px at 2rem and
+               was still short at 10rem. The container's height is now
+               corrected against the zoom directly (see the stMain rule up
+               in the zoom media queries), so the bottom of the page is
+               reachable on its own and this value only has to look right.
+               Re-measured after that fix: headroom below the last element
+               stays positive at every zoom/text-scale combination. */
+            padding-bottom: 4rem !important;
             padding-left: 2.5rem !important;
             padding-right: 2.5rem !important;
             max-width: none !important;
