@@ -320,7 +320,9 @@ def load_espn_teams(season=None):
     a new shape, same standard this file holds every other addition to.
 
     Returns columns: Team, DisplayName, EspnId, Conference, Color,
-    AltColor. Empty DataFrame if the standings payload is empty/unreachable.
+    AltColor. Falls back to the published season SCHEDULE file when the
+    standings payload is empty - see `_espn_teams_from_schedule` for why
+    that fallback is what makes historical seasons work at all.
     """
     season = season or current_cbb_season()
     data = _safe_standings(season)
@@ -345,7 +347,86 @@ def load_espn_teams(season=None):
                 'Color': f"#{color}" if color else None,
                 'AltColor': f"#{alt}" if alt else None,
             })
-    return pd.DataFrame(rows)
+    if rows:
+        return pd.DataFrame(rows)
+    return _espn_teams_from_schedule(season)
+
+
+def _espn_teams_from_schedule(season):
+    """
+    The same team list, rebuilt from the published season SCHEDULE parquet
+    instead of the standings endpoint.
+
+    This is what makes SEASONS OTHER THAN THE CURRENT ONE work. The
+    standings endpoint is a STANDINGS endpoint: it answers "where do things
+    stand", and the app has only ever confirmed it live for the season in
+    progress. Everything downstream of `load_espn_teams` treats an empty
+    team list as "no data for this season" rather than "no team NAMES for
+    this season", because `_resolve_espn_box_team_names` maps every box row
+    through that list and drops what doesn't resolve - so an empty list
+    silently turns a perfectly good 196,589-row historical box file into an
+    empty DataFrame, and Player Search says "No season box-score data
+    available for 2023 yet" about a file that downloaded and parsed fine.
+    That collapse is the whole reason box scores appeared to exist only for
+    the current season.
+
+    The schedule parquet is the right fallback because it is ALREADY
+    downloaded and cached for the Game Slate (no new fetch, no new host, no
+    API key), it publishes for every season this app offers (2023-2026,
+    verified by download), and it carries the same fields off ESPN's own
+    embedded team object that the standings payload does -
+    home_location/home_id/home_color/home_alternate_color/
+    home_conference_id, mirrored on the away side.
+
+    Two details it shares with the rest of this module rather than
+    inventing:
+      * `location` is the canonical 'Team' name, never `display_name` -
+        that's the exact bug HANDOFF.md records as making the whole box
+        pipeline resolve to nothing.
+      * D-I membership is "carries an ESPN conference id", the same
+        measurable test `_normalize_slate` already uses for 'D-I Matchup'.
+        Without it this list would include every non-D-I exhibition
+        opponent in the file and put them in Player Search's team picker.
+
+    Conference NAMES come from `_conference_id_name_map`, which derives
+    them from the schedule file itself - so the fallback needs no second
+    source for them either.
+    """
+    raw = _season_schedule(season)
+    if raw is None or raw.empty:
+        return pd.DataFrame()
+    conf_map = _conference_id_name_map(raw)
+
+    frames = []
+    for side in ('home', 'away'):
+        conf_id = pd.to_numeric(_col(raw, f'{side}_conference_id'), errors='coerce')
+        frames.append(pd.DataFrame({
+            'Team': _col(raw, f'{side}_location').astype('object'),
+            'DisplayName': _col(raw, f'{side}_display_name').astype('object'),
+            'EspnId': _col(raw, f'{side}_id').astype('object'),
+            'ConfId': conf_id,
+            'Color': _col(raw, f'{side}_color').map(_hex_color),
+            'AltColor': _col(raw, f'{side}_alternate_color').map(_hex_color),
+        }))
+    teams = pd.concat(frames, ignore_index=True)
+    teams = teams.dropna(subset=['Team', 'ConfId'])
+    if teams.empty:
+        return pd.DataFrame()
+
+    # A team appears on hundreds of rows; keep the FIRST complete-looking
+    # one per school. Sorting nulls last first means a row that happens to
+    # be missing a color doesn't win over one that has it.
+    teams = teams.sort_values(
+        ['Team', 'Color', 'EspnId'], na_position='last',
+    ).drop_duplicates(subset=['Team'], keep='first')
+
+    teams['Conference'] = teams['ConfId'].map(
+        lambda v: conf_map.get(int(v)) if pd.notna(v) else None
+    )
+    teams['DisplayName'] = teams['DisplayName'].fillna(teams['Team'])
+    teams['EspnId'] = teams['EspnId'].map(lambda v: str(v) if pd.notna(v) else None)
+    return teams[['Team', 'DisplayName', 'EspnId', 'Conference', 'Color', 'AltColor']].sort_values(
+        'Team').reset_index(drop=True)
 
 
 ESPN_ROSTER_URL = "https://site.api.espn.com/apis/site/v2/sports/basketball/mens-college-basketball/teams/{team_id}/roster"
@@ -1480,10 +1561,26 @@ def _resolve_espn_box_team_names(raw_box, canonical_names):
     if raw_box is None or raw_box.empty:
         return pd.DataFrame()
     distinct_names = set(raw_box['TeamRaw'].dropna()) | set(raw_box['OpponentRaw'].dropna())
-    name_map = {n: resolve_team_name(n, canonical_names) for n in distinct_names} if canonical_names else {}
     out = raw_box.copy()
-    out['Team'] = out['TeamRaw'].map(name_map) if name_map else None
-    out['Opponent'] = out['OpponentRaw'].map(name_map) if name_map else None
+    if canonical_names:
+        name_map = {n: resolve_team_name(n, canonical_names) for n in distinct_names}
+        out['Team'] = out['TeamRaw'].map(name_map)
+        out['Opponent'] = out['OpponentRaw'].map(name_map)
+    else:
+        # NO canonical list at all - keep the box file's own names rather
+        # than mapping every row to None and dropping the lot.
+        #
+        # The old `else {}` did the latter, which made "the name reference
+        # is unavailable" indistinguishable from "this season has no box
+        # scores" at every call site. That's not a hypothetical: it is
+        # exactly how a fully-downloaded historical season presented
+        # itself (see _espn_teams_from_schedule). Passing the raw names
+        # through is safe because they're ESPN's own `team_location`
+        # strings - the same spelling the canonical list resolves TO, and
+        # already what load_game_box joins the Game Slate on directly
+        # without any resolution step.
+        out['Team'] = out['TeamRaw']
+        out['Opponent'] = out['OpponentRaw']
     out = out.drop(columns=['TeamRaw', 'OpponentRaw'])
     out = out.dropna(subset=['Team', 'Opponent', 'Date'])
     out = out[pd.to_numeric(out['Minutes'], errors='coerce') > 0]
