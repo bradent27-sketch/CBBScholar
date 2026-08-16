@@ -5,6 +5,90 @@ Sibling app to NFL Scholar (`C:\FantasyF`) and CFB Scholar
 college basketball. This doc follows NFL Scholar's own HANDOFF.md section
 structure on purpose, so all three stay easy to cross-reference.
 
+**Game Slate: always-visible calendar, selectors moved left, and the
+"no game logs for older seasons" report root-caused to a stale date, not a
+data bug (this doc's most recent update):**
+
+Walked through Game Slate tab-by-tab with the user against real (not
+synthetic) data this session - this environment's GitHub-release-asset
+access turned out to work this time (`github.com/sportsdataverse/
+sportsdataverse-data/releases/download/...` returned real 200s + parquet
+bodies for every season 2023-2026; only ESPN's own direct API - standings/
+scoreboard - stayed blocked, same as every prior pass), so verification
+below is against the real hoopR/SportsDataverse files, not a synthetic
+harness.
+
+1. **Calendar no longer requires a click to see or use.** The old
+   `st.date_input` was a click-to-open popup. New `_render_calendar` in
+   `ui/tabs/game_slate.py` is a real, always-rendered month grid (prev/
+   next-month paging, a weekday header, a 6-week day grid of real
+   `st.button`s) plus the existing prev/next-DAY arrows underneath.
+   `gs_date` (the existing sticky date) stays the single source of truth
+   for the selection; a new plain `gs_cal_view` session_state entry (same
+   non-widget pattern as `gs_box_game`) tracks which month is BROWSED,
+   independently of the selection. Per-cell state (selected / today /
+   has-a-D-I-game, from the same `slate_dates()` list `default_slate_date`
+   already uses) is set as CSS custom properties on a tiny scoped
+   `<style>` tag per special cell - the same technique `_card_html`
+   already used for per-card team colors, since a Streamlit-owned button
+   has no other per-instance styling hook beyond its own `key=`.
+
+2. **Season, Division I/Ranked-only and Conferences moved into a left
+   column**, so the calendar gets the right column's full width instead of
+   a cramped inline row - requested specifically to make room for #1.
+
+3. **Picking an older season used to leave the date wherever it already
+   was** (often today's real date, well outside that season's window
+   entirely) - which read as "this season has no games" even though it
+   does, and was the user's own diagnosis before any code was touched. A
+   new `gs_last_season` plain session_state entry detects an actual season
+   change (vs. an ordinary rerun) and jumps the date to
+   `default_slate_date`'s own last-real-game-date logic - the same default
+   a first visit already gets, now re-applied whenever the year changes.
+
+4. **The "no game logs for older seasons" report traced back to #3, not a
+   data-loading bug.** `load_game_box` (this tab's box-score reader) never
+   depended on the team-name-resolution path a previous pass's commit
+   (`e123201`) fixed for Player Search/Matchup Analyzer - it joins the raw
+   season box file to a game purely by `GameId`, no team list involved.
+   Verified directly against the real files: full `GameId` overlap between
+   the published schedule and player-box files for all four seasons
+   (6221/6261 for 2023, 6300/6318 for 2026 - the small gap is genuinely
+   postponed/uncounted games, matching the schedule's own `Has Box` flag
+   exactly), and a real end-to-end Playwright run switching to 2022-23,
+   2023-24 and 2024-25 each opened a real box score (the actual 2022-23
+   national championship: San Diego State 59, UConn 76, Lamont Butler 13
+   points included) with zero "try Refresh slate" failures. The fix in #3
+   is what actually resolves the report: without it, the date desync meant
+   most attempts to browse an older season landed on a date with no games
+   in it at all, which is a different (also now-fixed) symptom than a
+   broken box-score pipeline.
+
+**Two real bugs caught live during this pass's own Playwright
+verification, not just reasoned about**: the month-nav prev/next callback
+initially fell back to computing from TODAY's real month (rather than
+whatever month was actually on screen) on its first-ever click, because
+`gs_cal_view` wasn't persisted until AFTER the callback could read it -
+fixed by having `_render_calendar` persist its resolved value immediately.
+And `st.columns`' own default mobile behavior (stacks to one-per-row under
+~640px, relied on elsewhere in this app) turned the calendar's 7-wide day
+grid into a 40+ row scroll of full-width buttons on a phone viewport -
+fixed with a `min-width:0`/`flex-wrap:nowrap` override in `ui/styling.py`,
+scoped to just this calendar's own `st.container(key="gs_cal_grid")` so no
+other tab's mobile layout is affected (the same scoping technique
+`render_sticky_footer_table`'s own mobile fix already established).
+
+**Verified**: full unit suite (187 tests) passing, `py_compile` clean, and
+a real `streamlit run` + headless-Chromium Playwright pass against the
+real network - season switching across all four seasons (date jump,
+correct real box scores), direct day-cell clicks, month paging across a
+year boundary (April -> December), the Conferences filter (7 games -> 1
+on a real A-10 pick), light mode, and a 390px mobile viewport (calendar
+grid confirmed to stay a real 7-column row, not stacked) - console clean
+throughout (only Streamlit's own expected telemetry-beacon noise).
+
+---
+
 **Season-readiness audit for 26-27: a real, app-wide state-loss bug found
 and fixed (every tab), the unsatisfiable `numpy>=2.5` pin, and the first
 genuine live-Playwright walkthrough against synthetic data this session
