@@ -945,6 +945,106 @@ def inject_theme():
         }}
 
         /* ===================================================================
+           GAME SLATE always-visible calendar (ui/tabs/game_slate.py,
+           _render_calendar). Replaces the old click-to-open st.date_input -
+           month header, weekday row and a 6-week day grid of real
+           st.buttons, so the whole thing reads at a glance with no popup.
+
+           Per-cell STATE (selected / today / has-games) is set as CSS
+           custom properties on a tiny scoped <style> tag per special cell
+           (`div[class*='st-key-gs_cal_d_...']`, exactly the `_card_html`
+           per-card-color technique above) - the rules here just consume
+           those variables with a plain fallback, so an ordinary day with
+           no state at all still renders a complete, themed button.
+           =================================================================== */
+        .gs-cal-month {{
+            text-align: center;
+            font-family: {F['mono']};
+            font-size: 13px;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+            color: {C['on_surface']};
+            padding: 6px 0;
+        }}
+        .gs-cal-wd {{
+            text-align: center;
+            font-size: 10px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            color: {C['on_surface_variant']};
+            padding: 2px 0 6px 0;
+        }}
+        .gs-cal-blank {{ height: 34px; }}
+        .gs-cal-selected {{
+            text-align: center;
+            font-size: 11.5px;
+            font-weight: 600;
+            color: {C['on_surface_variant']};
+            margin: 10px 0 4px 0;
+        }}
+        div[class*="st-key-gs_cal_prev_month"] button,
+        div[class*="st-key-gs_cal_next_month"] button,
+        div[class*="st-key-gs_cal_prev_day"] button,
+        div[class*="st-key-gs_cal_next_day"] button {{
+            background: {C['surface_container_high']} !important;
+            border: 1px solid {C['outline_variant']} !important;
+            color: {C['on_surface_variant']} !important;
+            font-size: 11px !important;
+            font-weight: 700 !important;
+        }}
+        div[class*="st-key-gs_cal_prev_month"] button:hover,
+        div[class*="st-key-gs_cal_next_month"] button:hover,
+        div[class*="st-key-gs_cal_prev_day"] button:hover,
+        div[class*="st-key-gs_cal_next_day"] button:hover {{
+            background: {C['primary']} !important;
+            border-color: {C['primary']} !important;
+            color: {C['on_primary']} !important;
+        }}
+        /* The day grid itself - every cell not one of the four nav buttons
+           above. A plain day gets the fallback values (muted surface, thin
+           outline); --gs-cal-bg/-fg/-border override per cell for the
+           selected/today/has-games states (see _render_calendar). */
+        div[class*="st-key-gs_cal_d_"] button {{
+            background: var(--gs-cal-bg, {C['surface_container_high']}) !important;
+            border: 1px solid var(--gs-cal-border, {C['outline_variant']}) !important;
+            color: var(--gs-cal-fg, {C['on_surface_variant']}) !important;
+            font-family: {F['mono']};
+            font-size: 12px !important;
+            font-weight: 700 !important;
+            min-height: 34px !important;
+            padding: 2px !important;
+        }}
+        div[class*="st-key-gs_cal_d_"] button:hover {{
+            border-color: {C['primary']} !important;
+            color: {C['on_surface']} !important;
+        }}
+        /* Streamlit stacks st.columns to one-per-row under ~640px by
+           default (see ui.styling's own MOBILE RESPONSIVENESS block above
+           for the general convention that IS wanted elsewhere) - fine for
+           a couple of wide columns, but it would turn this calendar's
+           7-wide day grid into a 40+ row scroll of full-width buttons.
+           Scoped to gs_cal_grid's own container only, so every OTHER
+           st.columns usage in the app keeps stacking on mobile exactly as
+           designed. min-width: 0 is what actually breaks the stack (see
+           the identical fix on render_sticky_footer_table's mobile card
+           layout above); flex-wrap: nowrap keeps the 7 columns from
+           wrapping once they're narrow instead of tall. */
+        @media (max-width: 767px) {{
+            div[class*="st-key-gs_cal_grid"] [data-testid="stColumn"] {{
+                min-width: 0 !important;
+                flex: 1 1 0 !important;
+            }}
+            div[class*="st-key-gs_cal_grid"] [data-testid="stHorizontalBlock"] {{
+                flex-wrap: nowrap !important;
+            }}
+            div[class*="st-key-gs_cal_d_"] button {{
+                min-height: 30px !important;
+                font-size: 11px !important;
+            }}
+        }}
+
+        /* ===================================================================
            GAME SLATE box score panel (ui/tabs/game_slate.py).
 
            Full-width, rendered above the card grid rather than inside a

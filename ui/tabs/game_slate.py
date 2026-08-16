@@ -27,6 +27,7 @@ than football's (the 2026 season peaked at 169 games on a single day,
 against CFB Scholar's worst case of 46), which is why the filters and
 paging below are load-bearing rather than decorative.
 """
+import calendar
 import datetime
 import html
 
@@ -34,7 +35,7 @@ import pandas as pd
 import streamlit as st
 
 from config import (
-    AVAILABLE_SEASONS, TAB_MATCHUP, TAB_PLAYER_SEARCH, TAB_EFFICIENCY, TAB_RANKINGS,
+    AVAILABLE_SEASONS, TAB_MATCHUP, TAB_PLAYER_SEARCH, TAB_EFFICIENCY, TAB_RANKINGS, THEME,
 )
 from data.loaders import (
     current_cbb_season, load_slate, slate_dates, default_slate_date, slate_source,
@@ -42,10 +43,16 @@ from data.loaders import (
 )
 from data.utils import resolve_team_name, CONFERENCE_NAME_ALIASES
 from ui.components import (
-    switch_tab, set_sticky_value, sticky_date_input,
+    switch_tab, set_sticky_value,
     sticky_selectbox, sticky_multiselect, sticky_checkbox,
 )
 from ui.styling import readable_on, ink_on, _card_backdrop_rgb
+
+# Looked up fresh (never cached into a module-level value) everywhere it's
+# used below - THEME['colors'] is mutated IN PLACE on a light/dark toggle
+# (see config.apply_theme_mode), and this dict is the same object every
+# other file's own `C = THEME['colors']` already binds to.
+C = THEME['colors']
 
 # Two per row: wide enough for full school names plus a two-button row,
 # and it halves the scroll on a slate this size.
@@ -760,8 +767,159 @@ def _shift_date(key, current, days):
     """on_click callback for the prev/next-day arrows. Drives the date
     picker on THIS tab, which is open and therefore instantiated - so the
     widget key has to be written too, not just the sticky mirror (see
-    ui.components.set_sticky_value)."""
-    set_sticky_value(key, current + datetime.timedelta(days=days))
+    ui.components.set_sticky_value). Also keeps the calendar's browsed
+    month in step, so stepping across a month boundary doesn't leave the
+    grid showing a month the selected day isn't even in."""
+    new_date = current + datetime.timedelta(days=days)
+    set_sticky_value(key, new_date)
+    st.session_state['gs_cal_view'] = new_date.replace(day=1)
+
+
+# ---------------------------------------------------------------------------
+# Always-visible month calendar, replacing the old click-to-open
+# st.date_input. Requested specifically so the date picker doesn't cost an
+# extra click just to see: a real month grid sits in the tab at all times,
+# `gs_date` (the sticky date already used everywhere else in this file)
+# stays the single source of truth for what's actually selected, and
+# `gs_cal_view` (a plain, non-widget session_state entry - same pattern as
+# `gs_box_game`/`gs_last_season` below) tracks which month is currently
+# BROWSED, independently of the selection (so paging to a different month
+# doesn't change what's showing below until a day is actually clicked).
+# ---------------------------------------------------------------------------
+_WEEKDAY_LABELS = ('Su', 'Mo', 'Tu', 'We', 'Th', 'Fr', 'Sa')
+
+
+def _add_months(d, delta):
+    m = d.month - 1 + delta
+    y = d.year + m // 12
+    m = m % 12 + 1
+    return datetime.date(y, m, 1)
+
+
+def _pick_calendar_day(date_obj):
+    set_sticky_value('gs_date', date_obj)
+    st.session_state['gs_cal_view'] = date_obj.replace(day=1)
+
+
+def _shift_calendar_month(delta):
+    """on_click for the month-nav arrows. `_render_calendar` always
+    persists `gs_cal_view` before these buttons can even be clicked, so the
+    `today()` fallback below only matters if this ever fires before the
+    calendar has rendered once - which a button click can't do."""
+    view = st.session_state.get('gs_cal_view')
+    if not isinstance(view, datetime.date):
+        view = datetime.date.today()
+    st.session_state['gs_cal_view'] = _add_months(view.replace(day=1), delta)
+
+
+def _render_calendar(current, dates):
+    """The calendar itself: a month header with prev/next-MONTH paging, a
+    weekday row, and a 6-week day grid - plus the prev/next-DAY arrows
+    underneath, since those were already a real feature and nothing asked
+    for them to go away, just for the calendar not to need a click to see.
+
+    `dates` is this SEASON's own `slate_dates()` output (already loaded by
+    the caller either way), used only to tint days that actually have a
+    D-I game - the same 'di_games > 0' test `default_slate_date` uses, so
+    the highlighted days match what "jump to the last real game date"
+    would land on.
+
+    Selection changes (a day click, an arrow, a month page) all go through
+    session_state + st.rerun's normal cycle, same as every other widget in
+    this file - this function doesn't return a new value, it just renders
+    `current` (and queues the NEXT run's value via the on_click callbacks
+    above), exactly like the prev/next-day arrows already did before this
+    replaced st.date_input.
+    """
+    view = st.session_state.get('gs_cal_view')
+    view = view.replace(day=1) if isinstance(view, datetime.date) else current.replace(day=1)
+    # Persisted immediately, not just held locally: _shift_calendar_month's
+    # own callback reads this same key with no access to `current` at all
+    # (a plain on_click callback, called before this function ever runs on
+    # that rerun) - leaving it unset here until the bottom of this function
+    # would let a FIRST click page relative to today's real date instead of
+    # whatever month is actually on screen.
+    st.session_state['gs_cal_view'] = view
+
+    # Keyed so the mobile override below (ui/styling.py) can target ONLY
+    # this grid's columns - st.columns stacks to one-per-row under ~640px
+    # by default (this app relies on that elsewhere), which is fine for a
+    # handful of wide columns but turns a 7-wide day grid into a 40+ row
+    # scroll of full-width buttons. A calendar is exactly the case where
+    # narrow-but-many beats few-but-stacked, so this container's columns
+    # are pinned back to a real row on every viewport width.
+    with st.container(key="gs_cal_grid"):
+        h1, h2, h3 = st.columns([1, 5, 1])
+        with h1:
+            st.button("◀", key="gs_cal_prev_month", width="stretch", help="Previous month",
+                      on_click=_shift_calendar_month, args=(-1,))
+        with h2:
+            st.markdown(f"<div class='gs-cal-month'>{view.strftime('%B %Y')}</div>", unsafe_allow_html=True)
+        with h3:
+            st.button("▶", key="gs_cal_next_month", width="stretch", help="Next month",
+                      on_click=_shift_calendar_month, args=(1,))
+
+        wd_cols = st.columns(7)
+        for col, label in zip(wd_cols, _WEEKDAY_LABELS):
+            with col:
+                st.markdown(f"<div class='gs-cal-wd'>{label}</div>", unsafe_allow_html=True)
+
+        game_dates = {d['date'] for d in dates if d.get('di_games', 0) > 0}
+        today = datetime.date.today()
+        # Sunday-first weeks, matching st.date_input's own default and this
+        # app's _WEEKDAY_LABELS order.
+        weeks = calendar.Calendar(firstweekday=6).monthdatescalendar(view.year, view.month)
+        style_decls = []
+        for week in weeks:
+            cols = st.columns(7)
+            for col, day in zip(cols, week):
+                with col:
+                    if day.month != view.month:
+                        # A leading/trailing day from the adjacent month:
+                        # kept as blank filler so the grid stays a clean
+                        # rectangle, not a live button - clicking one
+                        # straight into a different month than the header
+                        # shows is more confusing than useful here.
+                        st.markdown("<div class='gs-cal-blank'></div>", unsafe_allow_html=True)
+                        continue
+                    cell_key = f"gs_cal_d_{day.isoformat().replace('-', '')}"
+                    st.button(
+                        str(day.day), key=cell_key, width="stretch",
+                        help=day.strftime('%A, %B %d, %Y'),
+                        on_click=_pick_calendar_day, args=(day,),
+                    )
+                    # Per-cell state as CSS custom properties on a tiny
+                    # scoped <style> tag - the same technique _card_html
+                    # uses for per-card team colors (ui.styling has no
+                    # per-instance hook into a Streamlit-owned button
+                    # beyond its own key class). Priority: selected > today
+                    # > has-games > plain.
+                    decls = ''
+                    if day == current:
+                        decls = (
+                            f"--gs-cal-bg:{C['primary']};--gs-cal-fg:{C['on_primary']};"
+                            f"--gs-cal-border:{C['primary']};"
+                        )
+                    elif day == today:
+                        decls = f"--gs-cal-border:{C['primary']};"
+                    elif day.isoformat() in game_dates:
+                        decls = f"--gs-cal-bg:{C['surface_container_highest']};--gs-cal-fg:{C['on_surface']};"
+                    if decls:
+                        style_decls.append(f"div[class*='st-key-{cell_key}']{{{decls}}}")
+        if style_decls:
+            st.markdown(f"<style>{''.join(style_decls)}</style>", unsafe_allow_html=True)
+
+        st.markdown(
+            f"<div class='gs-cal-selected'>{current.strftime('%a, %b %d, %Y')}</div>",
+            unsafe_allow_html=True,
+        )
+        n1, n2, n3 = st.columns([1, 3, 1])
+        with n1:
+            st.button("◀ Day", key="gs_cal_prev_day", width="stretch", help="Previous day",
+                      on_click=_shift_date, args=("gs_date", current, -1))
+        with n3:
+            st.button("Day ▶", key="gs_cal_next_day", width="stretch", help="Next day",
+                      on_click=_shift_date, args=("gs_date", current, 1))
 
 
 def render():
@@ -769,8 +927,14 @@ def render():
 
     default_season = current_cbb_season()
     seasons = AVAILABLE_SEASONS if default_season in AVAILABLE_SEASONS else [default_season] + AVAILABLE_SEASONS
-    c_season, c_prev, c_date, c_next = st.columns([2, 1, 3, 1])
-    with c_season:
+
+    # LEFT: every OTHER selector (season, DI-only, ranked-only, conferences).
+    # RIGHT: the calendar, full width of its own side - moving the other
+    # selectors over here is what gives the calendar the room to be a real,
+    # always-visible month grid instead of a click-to-open popup, per
+    # explicit request.
+    c_left, c_right = st.columns([4, 5])
+    with c_left:
         season = sticky_selectbox(
             "Season", seasons, key="gs_season", default_index=seasons.index(default_season),
             format_func=lambda y: f"{y - 1}-{str(y)[2:]}",
@@ -778,29 +942,41 @@ def render():
 
     dates = slate_dates(season)
     default_date = default_slate_date(season, dates)
-    # Read the date BEFORE the arrows render, so an arrow click this run
-    # shifts from the date currently shown rather than from a stale one.
+
+    # Picking a DIFFERENT season used to leave the date picker wherever it
+    # was - often outside that season's real window entirely (e.g. today's
+    # date, picked while browsing the current season) - which read as "this
+    # season has no games" even though it does. `gs_last_season` is a plain,
+    # non-widget session_state entry (same pattern as its sibling
+    # `gs_box_game` below), so it survives this tab losing/regaining focus
+    # and reliably distinguishes an actual season change from an ordinary
+    # rerun. Reusing `default_slate_date` for the jump target - not just
+    # "the first day of the season" - is what lands on a real, analyzable
+    # game date (today, if today's in-season; otherwise the last date with
+    # a D-I game), exactly what a first visit already gets, oriented by the
+    # newly picked year.
+    prev_season = st.session_state.get('gs_last_season')
+    if prev_season is not None and prev_season != season:
+        set_sticky_value('gs_date', default_date)
+        st.session_state['gs_cal_view'] = default_date.replace(day=1)
+    st.session_state['gs_last_season'] = season
+
+    # Read the date BEFORE the calendar renders, so a click this run (an
+    # arrow, a day cell) shifts/highlights from the date currently shown
+    # rather than from a stale one.
     current = st.session_state.get("_sticky__gs_date", default_date)
     if isinstance(current, datetime.datetime):
         current = current.date()
     if not isinstance(current, datetime.date):
         current = default_date
 
-    with c_prev:
-        st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-        st.button("◀", key="gs_prev_day", width="stretch", help="Previous day",
-                  on_click=_shift_date, args=("gs_date", current, -1))
-    with c_date:
-        picked = sticky_date_input("Date", key="gs_date", default_value=default_date)
-    with c_next:
-        st.markdown("<div style='height:28px'></div>", unsafe_allow_html=True)
-        st.button("▶", key="gs_next_day", width="stretch", help="Next day",
-                  on_click=_shift_date, args=("gs_date", current, 1))
+    with c_right:
+        _render_calendar(current, dates)
+    picked = current
 
     date_iso = picked.isoformat() if isinstance(picked, (datetime.date, datetime.datetime)) else str(picked)
 
-    f1, f2 = st.columns([3, 2])
-    with f1:
+    with c_left:
         di_only = sticky_checkbox(
             "Division I matchups only", key="gs_di_only", default_value=True,
             help=(
@@ -809,7 +985,6 @@ def render():
                 "a real season's games."
             ),
         )
-    with f2:
         ranked_only = sticky_checkbox(
             "Ranked teams only", key="gs_ranked_only", default_value=False,
             help="Only games with at least one AP Top 25 team.",
@@ -846,10 +1021,11 @@ def render():
         {c for c in pd.concat([games['Away Conf'], games['Home Conf']]).dropna().unique()}
     )
     if conf_values:
-        picked_confs = sticky_multiselect(
-            "Conferences", conf_values, key="gs_conferences", default=[],
-            help="Leave empty for every conference. A game shows if EITHER team is in one you pick.",
-        )
+        with c_left:
+            picked_confs = sticky_multiselect(
+                "Conferences", conf_values, key="gs_conferences", default=[],
+                help="Leave empty for every conference. A game shows if EITHER team is in one you pick.",
+            )
         if picked_confs:
             games = games[
                 games['Away Conf'].isin(picked_confs) | games['Home Conf'].isin(picked_confs)
