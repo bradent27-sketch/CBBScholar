@@ -473,29 +473,26 @@ def inject_theme():
             flex: 0 0 auto;
         }}
 
-        /* Invisible spacers that stand in for a control the OTHER column
-           has and this one doesn't, so the Matchup Analyzer's two side-by-
-           side panels actually line up row for row.
+        /* Invisible spacer standing in for a control the DEFENSE column has
+           that the PLAYER column doesn't, so the Matchup Analyzer's two
+           side-by-side panels actually line up row for row.
 
            st.columns only guarantees both sides START level. One extra
            control on one side pushes everything below it down on that side
-           alone, and the tab's two columns each have controls the other
-           doesn't:
-             .ma-align-checkbox (32px) - the PLAYER column's "Compare
-               against all of Division I" checkbox, which has no defense-
-               side equivalent; without it the defensive profile floated a
-               checkbox-height above the tendency profile (measured: 52px).
-             .ma-align-controls (68px) - the DEFENSE column's games/position
-               control row, which the player column has nothing opposite;
-               without it every "allowed over time" chart sat 91px below the
-               player chart it pairs with, landing halfway between two of
-               them.
+           alone - .ma-align-checkbox (32px) is the PLAYER column's own
+           "Compare against all of Division I" checkbox, which has no
+           defense-side equivalent; without it the defensive profile floated
+           a checkbox-height above the tendency profile (measured: 52px).
+           (The player column USED to need a matching spacer of its own too,
+           for the defense column's games/position control row - that slot
+           now holds a real "Games shown" selectbox instead, so it lines up
+           without any filler.)
 
-           Both numbers are Streamlit's own element-container heights,
-           measured in a browser (31.97px and 67.97px), not guessed. The
-           16px flex gap between elements comes free - each spacer is a real
-           element in the same vertical block, so it gets the same gap the
-           control it stands in for was getting.
+           The number is Streamlit's own element-container height, measured
+           in a browser (31.97px), not guessed. The 16px flex gap between
+           elements comes free - the spacer is a real element in the same
+           vertical block, so it gets the same gap the control it stands in
+           for was getting.
 
            The height goes on the ELEMENT CONTAINER, not just the inner div.
            Setting it on the div alone does nothing useful: the div does
@@ -503,15 +500,11 @@ def inject_theme():
            (measured at 16px around a 34px child), so the flex item the
            vertical block actually lays out stays 16px and the spacer comes
            up exactly one gap short. The container is the flex item, so
-           that's what has to be sized. Both skews measure 0 after. */
+           that's what has to be sized. The skew measures 0 after. */
         [data-testid="stElementContainer"]:has(> [data-testid="stMarkdown"] .ma-align-checkbox) {{
             height: 32px;
         }}
-        [data-testid="stElementContainer"]:has(> [data-testid="stMarkdown"] .ma-align-controls) {{
-            height: 68px;
-        }}
         .ma-align-checkbox {{ height: 32px; }}
-        .ma-align-controls {{ height: 68px; }}
 
         div[data-testid="stTabs"] [role="tablist"] {{
             gap: 4px;
@@ -947,51 +940,86 @@ def inject_theme():
         /* ===================================================================
            GAME SLATE always-visible calendar (ui/tabs/game_slate.py,
            _render_calendar). Replaces the old click-to-open st.date_input -
-           month header, weekday row and a 6-week day grid of real
+           a compact nav row, weekday row and a 5-6 week day grid of real
            st.buttons, so the whole thing reads at a glance with no popup.
 
-           Per-cell STATE (selected / today / has-games) is set as CSS
-           custom properties on a tiny scoped <style> tag per special cell
-           (`div[class*='st-key-gs_cal_d_...']`, exactly the `_card_html`
-           per-card-color technique above) - the rules here just consume
-           those variables with a plain fallback, so an ordinary day with
-           no state at all still renders a complete, themed button.
-           =================================================================== */
+           Kept deliberately small - explicit request that it not run any
+           taller than the filter column beside it. Two things do that:
+           tight row spacing (the gap override on gs_cal_grid's own vertical
+           block, well under Streamlit's ~1rem default) and NO per-day
+           "bubble" - an ordinary day is bare text with no fill/border at
+           all, so only the states that actually mean something (selected /
+           today / has a D-I game) draw the eye.
+
+           Per-cell STATE is set as CSS custom properties on a tiny scoped
+           <style> tag per special cell (`div[class*='st-key-gs_cal_d_...']`,
+           exactly the `_card_html` per-card-color technique above) - the
+           rules here just consume those variables, falling back to
+           "nothing" (transparent) for a plain day.
+
+           REAL BUG worked around below, confirmed present even on the
+           UNCHANGED calendar before this pass touched it (so this isn't
+           something the tighter spacing introduced, just something the
+           old, roomier layout happened to hide): the element-container
+           Streamlit wraps a plain st.markdown div in - exactly what the
+           weekday-label (.gs-cal-wd) and blank-filler (.gs-cal-blank)
+           cells are - reports a collapsed height (measured a fraction of
+           its own child's real height) inside a 7-wide row of otherwise-
+           button columns, while the child itself renders at its full,
+           correct size and just visually overflows the bottom of that
+           undersized box instead of pushing it open. Harmless when
+           something opaque sits right below (the old design's every-day
+           bubble fill, or blank cells' own emptiness) - not harmless once
+           an ordinary day is bare text with nothing behind it, where the
+           overflowing weekday label bled straight through the day number
+           below it. Forcing a real height on the wrapper (same `:has()`
+           technique as .ma-align-controls/.ma-align-checkbox in Matchup
+           Analyzer's own CSS below) stops the collapse at the source. */
+        [data-testid="stElementContainer"]:has(> [data-testid="stMarkdown"] .gs-cal-wd) {{
+            height: 20px;
+        }}
+        [data-testid="stElementContainer"]:has(> [data-testid="stMarkdown"] .gs-cal-blank) {{
+            height: 22px;
+        }}
+        div[class*="st-key-gs_cal_grid"] [data-testid="stVerticalBlock"] {{
+            gap: 0.2rem !important;
+        }}
         .gs-cal-month {{
             text-align: center;
             font-family: {F['mono']};
-            font-size: 13px;
+            font-size: 12px;
             font-weight: 700;
-            letter-spacing: 0.04em;
+            letter-spacing: 0.03em;
             color: {C['on_surface']};
-            padding: 6px 0;
+            line-height: 26px;
         }}
         .gs-cal-wd {{
             text-align: center;
-            font-size: 10px;
+            font-size: 9px;
             font-weight: 700;
             text-transform: uppercase;
-            letter-spacing: 0.06em;
+            letter-spacing: 0.05em;
             color: {C['on_surface_variant']};
-            padding: 2px 0 6px 0;
+            padding: 2px 0;
         }}
-        .gs-cal-blank {{ height: 34px; }}
+        .gs-cal-blank {{ height: 22px; }}
         .gs-cal-selected {{
             text-align: center;
-            font-size: 11.5px;
+            font-size: 10.5px;
             font-weight: 600;
             color: {C['on_surface_variant']};
-            margin: 10px 0 4px 0;
         }}
         div[class*="st-key-gs_cal_prev_month"] button,
         div[class*="st-key-gs_cal_next_month"] button,
         div[class*="st-key-gs_cal_prev_day"] button,
         div[class*="st-key-gs_cal_next_day"] button {{
-            background: {C['surface_container_high']} !important;
+            background: transparent !important;
             border: 1px solid {C['outline_variant']} !important;
             color: {C['on_surface_variant']} !important;
             font-size: 11px !important;
             font-weight: 700 !important;
+            min-height: 26px !important;
+            padding: 0 !important;
         }}
         div[class*="st-key-gs_cal_prev_month"] button:hover,
         div[class*="st-key-gs_cal_next_month"] button:hover,
@@ -1001,22 +1029,24 @@ def inject_theme():
             border-color: {C['primary']} !important;
             color: {C['on_primary']} !important;
         }}
-        /* The day grid itself - every cell not one of the four nav buttons
-           above. A plain day gets the fallback values (muted surface, thin
-           outline); --gs-cal-bg/-fg/-border override per cell for the
-           selected/today/has-games states (see _render_calendar). */
+        /* The day grid itself. A plain day has no fill and no border at
+           all (transparent fallback on both) - --gs-cal-bg/-fg/-border
+           override per cell for the selected/today/has-games states (see
+           _render_calendar) only. */
         div[class*="st-key-gs_cal_d_"] button {{
-            background: var(--gs-cal-bg, {C['surface_container_high']}) !important;
-            border: 1px solid var(--gs-cal-border, {C['outline_variant']}) !important;
+            background: var(--gs-cal-bg, transparent) !important;
+            border: 1px solid var(--gs-cal-border, transparent) !important;
+            border-radius: {R['sm']} !important;
             color: var(--gs-cal-fg, {C['on_surface_variant']}) !important;
             font-family: {F['mono']};
-            font-size: 12px !important;
-            font-weight: 700 !important;
-            min-height: 34px !important;
-            padding: 2px !important;
+            font-size: 11px !important;
+            font-weight: 600 !important;
+            min-height: 22px !important;
+            padding: 0 !important;
+            box-shadow: none !important;
         }}
         div[class*="st-key-gs_cal_d_"] button:hover {{
-            border-color: {C['primary']} !important;
+            background: {C['surface_container_high']} !important;
             color: {C['on_surface']} !important;
         }}
         /* Streamlit stacks st.columns to one-per-row under ~640px by
@@ -1024,23 +1054,25 @@ def inject_theme():
            for the general convention that IS wanted elsewhere) - fine for
            a couple of wide columns, but it would turn this calendar's
            7-wide day grid into a 40+ row scroll of full-width buttons.
-           Scoped to gs_cal_grid's own container only, so every OTHER
-           st.columns usage in the app keeps stacking on mobile exactly as
-           designed. min-width: 0 is what actually breaks the stack (see
-           the identical fix on render_sticky_footer_table's mobile card
-           layout above); flex-wrap: nowrap keeps the 7 columns from
-           wrapping once they're narrow instead of tall. */
+           min-width: 0 + nowrap (applied to the whole gs_cal_grid, nav row
+           included) is what actually breaks the stack (see the identical
+           fix on render_sticky_footer_table's mobile card layout above);
+           the extra flex:1 1 0 equal-sizing is scoped to gs_cal_days only
+           - the nav row's [1,1,5,1,1] ratio needs to survive narrow
+           viewports, not get flattened to five equal columns. */
         @media (max-width: 767px) {{
             div[class*="st-key-gs_cal_grid"] [data-testid="stColumn"] {{
                 min-width: 0 !important;
-                flex: 1 1 0 !important;
             }}
             div[class*="st-key-gs_cal_grid"] [data-testid="stHorizontalBlock"] {{
                 flex-wrap: nowrap !important;
             }}
+            div[class*="st-key-gs_cal_days"] [data-testid="stColumn"] {{
+                flex: 1 1 0 !important;
+            }}
             div[class*="st-key-gs_cal_d_"] button {{
-                min-height: 30px !important;
-                font-size: 11px !important;
+                min-height: 26px !important;
+                font-size: 10px !important;
             }}
         }}
 

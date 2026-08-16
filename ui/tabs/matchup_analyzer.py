@@ -74,6 +74,14 @@ from ui.styling import df_auto_height, render_responsive_table
 
 _PLAYER_TREND_STATS = [('Points', ''), ('Assists', ''), ('Rebounds', ''), ('Minutes', ''), ('3P%', '%')]
 
+# "Games shown" window for the player trend charts below - how many of a
+# player's most recent games each chart's line/badges cover. None means "no
+# cap" (the whole season); player_trend_series's own `.tail(n)` handles a
+# real int fine, so a very large sentinel does the "Full season" case
+# without needing a second code path.
+_TREND_WINDOW_OPTIONS = ["Last 5", "Last 10", "Last 15", "Last 20", "Full season"]
+_TREND_WINDOW_N = {"Last 5": 5, "Last 10": 10, "Last 15": 15, "Last 20": 20, "Full season": None}
+
 _TEAM_PLACEHOLDER = "Select a team..."
 
 _PLAYER_STAT_HELP = {
@@ -300,15 +308,28 @@ def _render_tendency_profile(season, ctx):
 
 
 def _render_player_trend(season, ctx, defense_team=None):
-    """Charts the player's last-10 trend for each stat, with every DATA
+    """Charts the player's recent-games trend for each stat, with every DATA
     POINT clickable - a dot opens that game's full box score in the Game
     Slate (see ui.components.render_trend_with_point_links). Clicking the
     dot for the game you're already looking at is the direct gesture; a
-    chip strip underneath would be a second control for the same games."""
+    chip strip underneath would be a second control for the same games.
+
+    "Games shown" picks the window (5/10/15/20 most recent, or the whole
+    season) every chart below covers - a real control now, not just the
+    invisible `ma-align-controls` filler this slot used to hold. It still
+    does that filler's old job as a side effect: landing in the same spot
+    keeps this column roughly level with TEAM DEFENSE's own games/position
+    control row (_render_positional_defense), so it's rendered
+    unconditionally rather than only `if defense_team`.
+    """
     team_choice, sel_row, stats, source, box_df, athlete_source_id = (
         ctx['team_choice'], ctx['sel_row'], ctx['stats'], ctx['source'], ctx['box_df'], ctx['athlete_source_id']
     )
-    st.markdown(f"**{sel_row['name']} — last 10 games vs season average**")
+    st.markdown(f"**{sel_row['name']} — trend vs season average**")
+    window_choice = sticky_selectbox(
+        "Games shown", _TREND_WINDOW_OPTIONS, key="ma_trend_window", default_index=1,
+        help="How many of this player's most recent games each chart below covers.",
+    )
     if source == 'espn':
         # Same box_df, no second download - this is the per-game rows
         # get_player_season_profile's season totals were themselves summed
@@ -350,20 +371,11 @@ def _render_player_trend(season, ctx, defense_team=None):
     )
     link_by_date = {e['date']: e for e in all_links}
 
-    # Nothing is reordered here - this is an invisible spacer standing in
-    # for the games/position control row the TEAM DEFENSE column carries
-    # above its own charts. Without it the defense charts start 91px lower
-    # than these, so each one lands halfway between two player charts
-    # instead of beside its own stat. Only when there IS a defense panel to
-    # line up against; a player looked at on their own isn't padded for a
-    # column that isn't there. See .ma-align-controls in ui.styling.
-    if defense_team:
-        st.markdown("<div class='ma-align-controls'></div>", unsafe_allow_html=True)
-
+    trend_n = _TREND_WINDOW_N[window_choice] or len(mine)
     for stat, suffix in _PLAYER_TREND_STATS:
         if stat not in mine.columns:
             continue
-        dates, values, avg = player_trend_series(mine, stat, n=10)
+        dates, values, avg = player_trend_series(mine, stat, n=trend_n)
         st.markdown(f"_{stat} — last {len(values)} games_")
         if len(values) >= 2:
             # Corner badges: last-10/5/3-game average vs the player's own

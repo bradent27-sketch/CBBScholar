@@ -813,10 +813,13 @@ def _shift_calendar_month(delta):
 
 
 def _render_calendar(current, dates):
-    """The calendar itself: a month header with prev/next-MONTH paging, a
-    weekday row, and a 6-week day grid - plus the prev/next-DAY arrows
-    underneath, since those were already a real feature and nothing asked
-    for them to go away, just for the calendar not to need a click to see.
+    """The calendar itself: one compact nav row (month-step outermost,
+    day-step innermost, flanking the month/year label), a weekday row, and
+    a 5-6 week day grid of plain, borderless numbers - no per-day "bubble"
+    fill/border, so a bare month grid doesn't read heavier than it needs
+    to. Only the meaningful states (selected/today/has-a-D-I-game) get any
+    fill at all; see the CSS custom properties set per-cell below and their
+    consumption in ui/styling.py.
 
     `dates` is this SEASON's own `slate_dates()` output (already loaded by
     the caller either way), used only to tint days that actually have a
@@ -828,8 +831,7 @@ def _render_calendar(current, dates):
     session_state + st.rerun's normal cycle, same as every other widget in
     this file - this function doesn't return a new value, it just renders
     `current` (and queues the NEXT run's value via the on_click callbacks
-    above), exactly like the prev/next-day arrows already did before this
-    replaced st.date_input.
+    above).
     """
     view = st.session_state.get('gs_cal_view')
     view = view.replace(day=1) if isinstance(view, datetime.date) else current.replace(day=1)
@@ -841,85 +843,89 @@ def _render_calendar(current, dates):
     # whatever month is actually on screen.
     st.session_state['gs_cal_view'] = view
 
-    # Keyed so the mobile override below (ui/styling.py) can target ONLY
-    # this grid's columns - st.columns stacks to one-per-row under ~640px
-    # by default (this app relies on that elsewhere), which is fine for a
-    # handful of wide columns but turns a 7-wide day grid into a 40+ row
-    # scroll of full-width buttons. A calendar is exactly the case where
-    # narrow-but-many beats few-but-stacked, so this container's columns
-    # are pinned back to a real row on every viewport width.
     with st.container(key="gs_cal_grid"):
-        h1, h2, h3 = st.columns([1, 5, 1])
+        h1, h2, h3, h4, h5 = st.columns([1, 1, 5, 1, 1])
         with h1:
-            st.button("◀", key="gs_cal_prev_month", width="stretch", help="Previous month",
+            st.button("«", key="gs_cal_prev_month", width="stretch", help="Previous month",
                       on_click=_shift_calendar_month, args=(-1,))
         with h2:
-            st.markdown(f"<div class='gs-cal-month'>{view.strftime('%B %Y')}</div>", unsafe_allow_html=True)
+            st.button("‹", key="gs_cal_prev_day", width="stretch", help="Previous day",
+                      on_click=_shift_date, args=("gs_date", current, -1))
         with h3:
-            st.button("▶", key="gs_cal_next_month", width="stretch", help="Next month",
+            st.markdown(f"<div class='gs-cal-month'>{view.strftime('%B %Y')}</div>", unsafe_allow_html=True)
+        with h4:
+            st.button("›", key="gs_cal_next_day", width="stretch", help="Next day",
+                      on_click=_shift_date, args=("gs_date", current, 1))
+        with h5:
+            st.button("»", key="gs_cal_next_month", width="stretch", help="Next month",
                       on_click=_shift_calendar_month, args=(1,))
 
-        wd_cols = st.columns(7)
-        for col, label in zip(wd_cols, _WEEKDAY_LABELS):
-            with col:
-                st.markdown(f"<div class='gs-cal-wd'>{label}</div>", unsafe_allow_html=True)
-
-        game_dates = {d['date'] for d in dates if d.get('di_games', 0) > 0}
-        today = datetime.date.today()
-        # Sunday-first weeks, matching st.date_input's own default and this
-        # app's _WEEKDAY_LABELS order.
-        weeks = calendar.Calendar(firstweekday=6).monthdatescalendar(view.year, view.month)
-        style_decls = []
-        for week in weeks:
-            cols = st.columns(7)
-            for col, day in zip(cols, week):
+        # Weekday row + week rows live in their OWN keyed container so the
+        # mobile "force equal-width columns" override in ui/styling.py can
+        # target just this 7-wide grid, not the 5-column [1,1,5,1,1] nav
+        # row above - which needs its ratio kept, not equalized, to stay
+        # readable at any width. Both containers still stack to one-per-row
+        # under ~640px by default without help (this app relies on that
+        # elsewhere), which is fine for a handful of wide columns but would
+        # turn a 7-wide day grid into a 40+ row scroll of full-width
+        # buttons - see the mobile block for the actual fix.
+        with st.container(key="gs_cal_days"):
+            wd_cols = st.columns(7)
+            for col, label in zip(wd_cols, _WEEKDAY_LABELS):
                 with col:
-                    if day.month != view.month:
-                        # A leading/trailing day from the adjacent month:
-                        # kept as blank filler so the grid stays a clean
-                        # rectangle, not a live button - clicking one
-                        # straight into a different month than the header
-                        # shows is more confusing than useful here.
-                        st.markdown("<div class='gs-cal-blank'></div>", unsafe_allow_html=True)
-                        continue
-                    cell_key = f"gs_cal_d_{day.isoformat().replace('-', '')}"
-                    st.button(
-                        str(day.day), key=cell_key, width="stretch",
-                        help=day.strftime('%A, %B %d, %Y'),
-                        on_click=_pick_calendar_day, args=(day,),
-                    )
-                    # Per-cell state as CSS custom properties on a tiny
-                    # scoped <style> tag - the same technique _card_html
-                    # uses for per-card team colors (ui.styling has no
-                    # per-instance hook into a Streamlit-owned button
-                    # beyond its own key class). Priority: selected > today
-                    # > has-games > plain.
-                    decls = ''
-                    if day == current:
-                        decls = (
-                            f"--gs-cal-bg:{C['primary']};--gs-cal-fg:{C['on_primary']};"
-                            f"--gs-cal-border:{C['primary']};"
+                    st.markdown(f"<div class='gs-cal-wd'>{label}</div>", unsafe_allow_html=True)
+
+            game_dates = {d['date'] for d in dates if d.get('di_games', 0) > 0}
+            today = datetime.date.today()
+            # Sunday-first weeks, matching st.date_input's own default and
+            # this app's _WEEKDAY_LABELS order.
+            weeks = calendar.Calendar(firstweekday=6).monthdatescalendar(view.year, view.month)
+            style_decls = []
+            for week in weeks:
+                cols = st.columns(7)
+                for col, day in zip(cols, week):
+                    with col:
+                        if day.month != view.month:
+                            # A leading/trailing day from the adjacent
+                            # month: kept as blank filler so the grid stays
+                            # a clean rectangle, not a live button -
+                            # clicking one straight into a different month
+                            # than the header shows is more confusing than
+                            # useful here.
+                            st.markdown("<div class='gs-cal-blank'></div>", unsafe_allow_html=True)
+                            continue
+                        cell_key = f"gs_cal_d_{day.isoformat().replace('-', '')}"
+                        st.button(
+                            str(day.day), key=cell_key, width="stretch",
+                            help=day.strftime('%A, %B %d, %Y'),
+                            on_click=_pick_calendar_day, args=(day,),
                         )
-                    elif day == today:
-                        decls = f"--gs-cal-border:{C['primary']};"
-                    elif day.isoformat() in game_dates:
-                        decls = f"--gs-cal-bg:{C['surface_container_highest']};--gs-cal-fg:{C['on_surface']};"
-                    if decls:
-                        style_decls.append(f"div[class*='st-key-{cell_key}']{{{decls}}}")
-        if style_decls:
-            st.markdown(f"<style>{''.join(style_decls)}</style>", unsafe_allow_html=True)
+                        # Per-cell state as CSS custom properties on a tiny
+                        # scoped <style> tag - the same technique _card_html
+                        # uses for per-card team colors (ui.styling has no
+                        # per-instance hook into a Streamlit-owned button
+                        # beyond its own key class). Priority: selected >
+                        # today > has-games > plain (plain gets no fill at
+                        # all - see the CSS fallback values).
+                        decls = ''
+                        if day == current:
+                            decls = (
+                                f"--gs-cal-bg:{C['primary']};--gs-cal-fg:{C['on_primary']};"
+                                f"--gs-cal-border:{C['primary']};"
+                            )
+                        elif day == today:
+                            decls = f"--gs-cal-border:{C['primary']};"
+                        elif day.isoformat() in game_dates:
+                            decls = f"--gs-cal-bg:{C['surface_container_highest']};--gs-cal-fg:{C['on_surface']};"
+                        if decls:
+                            style_decls.append(f"div[class*='st-key-{cell_key}']{{{decls}}}")
+            if style_decls:
+                st.markdown(f"<style>{''.join(style_decls)}</style>", unsafe_allow_html=True)
 
         st.markdown(
             f"<div class='gs-cal-selected'>{current.strftime('%a, %b %d, %Y')}</div>",
             unsafe_allow_html=True,
         )
-        n1, n2, n3 = st.columns([1, 3, 1])
-        with n1:
-            st.button("◀ Day", key="gs_cal_prev_day", width="stretch", help="Previous day",
-                      on_click=_shift_date, args=("gs_date", current, -1))
-        with n3:
-            st.button("Day ▶", key="gs_cal_next_day", width="stretch", help="Next day",
-                      on_click=_shift_date, args=("gs_date", current, 1))
 
 
 def render():
